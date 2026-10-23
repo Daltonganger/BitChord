@@ -470,6 +470,9 @@ struct ArtistCreditText: View {
     let credit: String
     var font: Font
     var color: Color
+    /// A trailing, unlinked part of the line — the album, in the deck's
+    /// "artist — album" credit.
+    var suffix: String? = nil
     @Environment(AppModel.self) private var appModel
 
     private var names: [String] {
@@ -489,6 +492,10 @@ struct ArtistCreditText: View {
                         .queryItems?.first(where: { $0.name == "name" })?.value else {
                     return .systemAction
                 }
+                // The player covers the window and the search tab behind it,
+                // so the destination has to be shown: dismiss first, then open
+                // the tab the search lands in.
+                appModel.nowPlayingPresented = false
                 appModel.pendingSearchQuery = name
                 appModel.requestedTab = .search
                 appModel.focusSearch = true
@@ -508,6 +515,9 @@ struct ArtistCreditText: View {
             piece.link = components.url
             out += piece
             if index < parts.count - 1 { out += AttributedString(", ") }
+        }
+        if let suffix, !suffix.isEmpty {
+            out += AttributedString(suffix)
         }
         return out
     }
