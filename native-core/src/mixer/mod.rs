@@ -832,11 +832,15 @@ impl Voice {
         })
     }
 
-    /// What this deck's integrated loudness says, for the transition match.
-    fn deck_loudness(&self) -> DeckLoudness {
+    /// What this deck's integrated loudness says, for the transition match, and
+    /// what normalization is already doing about it.
+    fn deck_loudness(&self, normalization: bool) -> DeckLoudness {
         DeckLoudness {
             lufs: self.measured_loudness.as_ref().map(|m| m.track_lufs),
             relative_db: self.loudness_db,
+            applied_normalization_db: normalization_gain(self, normalization)
+                .1
+                .map(|db| db as f64),
         }
     }
 
@@ -845,10 +849,12 @@ impl Voice {
     /// Armed when the blend is armed, so the correction is already in place by
     /// the time the incoming deck becomes audible — a correction that arrived
     /// during the fade would be a second, competing ramp.
-    fn arm_transition_match(&mut self, outgoing: Option<&Voice>) {
+    fn arm_transition_match(&mut self, outgoing: Option<&Voice>, normalization: bool) {
         let Some(outgoing) = outgoing else { return };
-        let Some(db) = DeckLoudness::match_gain_db(self.deck_loudness(), outgoing.deck_loudness())
-        else {
+        let Some(db) = DeckLoudness::match_gain_db(
+            self.deck_loudness(normalization),
+            outgoing.deck_loudness(normalization),
+        ) else {
             return;
         };
         if db.abs() < 0.05 {
@@ -1391,21 +1397,26 @@ pub const MAX_LOUDNESS_GAIN_DB: f64 = 0.0;
 /// final `clamp` hard-cut any overs above 0 dBFS before they reached either
 /// float or integer output.
 
-/// How loud one deck is, in whichever integrated form the engine has for it.
+/// How loud one deck is, in whichever integrated form the engine has for it,
+/// and how much of that the normalization stage will already have taken out.
 ///
 /// Two forms exist and they are not interchangeable: a measured LUFS figure from
-/// the offline analyser, or the player response's relative correction. A
-/// transition may only compare like with like — an absolute figure and a
-/// relative one say nothing about each other — so a deck with no matching
-/// counterpart is left alone rather than matched against a number of a
-/// different kind.
+/// the offline analyser, or the player response's relative figure. A transition
+/// may only compare like with like — an absolute figure and a relative one say
+/// nothing about each other — so a deck with no matching counterpart is left
+/// alone rather than matched against a number of a different kind.
 #[derive(Clone, Copy, Debug)]
 pub struct DeckLoudness {
     /// Integrated loudness in LUFS, from `loudness::measure`.
     pub lufs: Option<f64>,
-    /// The player response's relative correction, in dB. Positive asks for
-    /// attenuation, so the level it describes is the negation.
+    /// The player response's relative figure, in dB. **Positive is louder**:
+    /// `loudness_gain` attenuates by `-db`, so this is the same sign the
+    /// normalization stage reads, not its inverse.
     pub relative_db: Option<f64>,
+    /// The correction the normalization stage applies to this deck right now,
+    /// in dB (`None` when it is off or has no figure). The match is measured
+    /// *after* this, so the same difference is never corrected twice.
+    pub applied_normalization_db: Option<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -1415,13 +1426,15 @@ enum Level {
 }
 
 impl DeckLoudness {
+    /// The level the deck plays at once normalization has had its say.
     fn level(self) -> Option<Level> {
+        let applied = self.applied_normalization_db.filter(|v| v.is_finite()).unwrap_or(0.0);
         if let Some(lufs) = self.lufs.filter(|v| v.is_finite()) {
-            return Some(Level::Absolute(lufs));
+            return Some(Level::Absolute(lufs + applied));
         }
         self.relative_db
             .filter(|v| v.is_finite())
-            .map(|db| Level::Relative(-db))
+            .map(|db| Level::Relative(db + applied))
     }
 
     /// The gain, in dB, that puts the incoming deck at the outgoing deck's
@@ -2247,7 +2260,13 @@ impl MixerState {
         ) {
             Ok(mut voice) => {
                 voice.gain = 0.0; // silent until the fade lifts it
-                voice.arm_transition_match(self.current.as_ref());
+                // The match is measured after normalization, so it has to know
+                // whether normalization is on — the same condition the blend's
+                // `mix_into` calls use.
+                voice.arm_transition_match(
+                    self.current.as_ref(),
+                    self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
+                );
                 log::info!("armed next track: {}", request.title);
                 self.incoming = Some(voice);
                 self.transition = Some(TransitionState {
@@ -3874,10 +3893,18 @@ mod tests {
             .collect()
     }
 
+    fn deck(lufs: Option<f64>, relative: Option<f64>, applied: Option<f64>) -> DeckLoudness {
+        DeckLoudness {
+            lufs,
+            relative_db: relative,
+            applied_normalization_db: applied,
+        }
+    }
+
     #[test]
     fn a_transition_matches_like_with_like_and_clamps_at_six_db() {
-        let loud = DeckLoudness { lufs: Some(-14.0), relative_db: None };
-        let quiet = DeckLoudness { lufs: Some(-20.0), relative_db: None };
+        let loud = deck(Some(-14.0), None, None);
+        let quiet = deck(Some(-20.0), None, None);
         // Six LU apart: the incoming deck is boosted by six.
         let db = DeckLoudness::match_gain_db(quiet, loud).unwrap();
         assert!((db - 6.0).abs() < 1e-9, "{db}");
@@ -3886,82 +3913,231 @@ mod tests {
         assert!((db + 6.0).abs() < 1e-9, "{db}");
         // A twelve-LU difference is clamped: a transition corrects a level, it
         // does not re-master a track.
-        let very_quiet = DeckLoudness { lufs: Some(-26.0), relative_db: None };
+        let very_quiet = deck(Some(-26.0), None, None);
         let db = DeckLoudness::match_gain_db(very_quiet, loud).unwrap();
         assert!((db - MAX_TRANSITION_MATCH_DB).abs() < 1e-9, "{db}");
-        // Relative figures match each other, with the same sign convention.
-        let a = DeckLoudness { lufs: None, relative_db: Some(-2.0) };
-        let b = DeckLoudness { lufs: None, relative_db: Some(4.0) };
-        let db = DeckLoudness::match_gain_db(b, a).unwrap();
-        assert!((db - 6.0).abs() < 1e-9, "{db}");
+
+        // Relative figures use the player's own convention: positive is louder,
+        // because `loudness_gain` attenuates by `-db`. A deck marked 6 dB louder
+        // than the other is attenuated by 6, never boosted.
+        let louder = deck(None, Some(6.0), None);
+        let reference = deck(None, Some(0.0), None);
+        let db = DeckLoudness::match_gain_db(louder, reference).unwrap();
+        assert!((db + 6.0).abs() < 1e-9, "louder incoming got {db:+}");
+        let db = DeckLoudness::match_gain_db(reference, louder).unwrap();
+        assert!((db - 6.0).abs() < 1e-9, "quieter incoming got {db:+}");
+
         // An absolute figure and a relative one are not comparable.
-        let mixed = DeckLoudness { lufs: None, relative_db: Some(3.0) };
+        let mixed = deck(None, Some(3.0), None);
         assert_eq!(DeckLoudness::match_gain_db(mixed, loud), None);
         // Nothing to go on at all.
-        let nothing = DeckLoudness { lufs: None, relative_db: None };
-        assert_eq!(DeckLoudness::match_gain_db(nothing, loud), None);
+        assert_eq!(DeckLoudness::match_gain_db(deck(None, None, None), loud), None);
     }
 
     #[test]
-    fn a_six_lu_blend_holds_its_level_without_clipping() {
-        // Two tones six LU apart: the outgoing at -3 dBFS, the incoming 6 dB
-        // quieter. Equal-power gains would let the quieter one sink the mix
-        // mid-blend; the match lifts it before the fade starts.
-        let outgoing = DeckLoudness { lufs: Some(-14.0), relative_db: None };
-        let incoming = DeckLoudness { lufs: Some(-20.0), relative_db: None };
-        let match_db = DeckLoudness::match_gain_db(incoming, outgoing).unwrap();
-        let match_gain = db_to_gain(match_db) as f32;
+    fn normalization_that_already_matched_the_decks_is_not_applied_twice() {
+        // Two measured decks, both normalized to the target: their applied
+        // gains are the exact inverse of their loudness, so after normalization
+        // they are at the same level and the transition has nothing to correct.
+        let loud = deck(Some(-20.0), None, Some(6.0));   // -20 LUFS + 6 dB → -14
+        let quiet = deck(Some(-26.0), None, Some(12.0)); // -26 LUFS + 12 dB → -14
+        assert_eq!(DeckLoudness::match_gain_db(quiet, loud), Some(0.0));
 
-        let frames = 48_000 * 2;
-        let a = tone(1_000.0, 0.5, frames);
-        let b = tone(1_500.0, 0.25, frames);
-        let mut mixed = vec![0.0f32; frames * 2];
-        for frame in 0..frames {
-            let p = frame as f64 / frames as f64;
-            let fall = fall_gain(p);
-            let rise = rise_gain(p) * match_gain;
-            for channel in 0..2 {
-                let index = frame * 2 + channel;
-                mixed[index] = a[index] * fall + b[index] * rise;
-            }
+        // With normalization off the same two decks are six apart, and that is
+        // the difference the transition has to make up.
+        let loud_off = deck(Some(-20.0), None, None);
+        let quiet_off = deck(Some(-26.0), None, None);
+        let db = DeckLoudness::match_gain_db(quiet_off, loud_off).unwrap();
+        assert!((db - 6.0).abs() < 1e-9, "{db}");
+
+        // A relative deck under normalization keeps whatever the attenuation
+        // could not reach: boosting is refused, so the residual is the match.
+        let quiet_relative = deck(None, Some(-6.0), None);
+        let reference = deck(None, Some(0.0), Some(0.0));
+        let db = DeckLoudness::match_gain_db(quiet_relative, reference).unwrap();
+        assert!((db - 6.0).abs() < 1e-9, "{db}");
+    }
+
+    /// A stereo 16-bit sine at `amplitude`, for the level tests.
+    fn level_wav(path: &std::path::Path, seconds: f32, freq: f32, amplitude: f32) {
+        let rate = 44_100u32;
+        let frames = (rate as f32 * seconds) as usize;
+        let data_len = frames * 4;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for i in 0..frames {
+            let t = i as f32 / rate as f32;
+            let sample =
+                (2.0 * std::f32::consts::PI * freq * t).sin() * amplitude * i16::MAX as f32;
+            let value = sample as i16;
+            bytes.extend_from_slice(&value.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
         }
+        std::fs::write(path, bytes).unwrap();
+    }
 
-        let peak = mixed.iter().fold(0f32, |peak, s| peak.max(s.abs()));
-        let levels = window_levels(&mixed, 4_800);
-        let first = levels.first().copied().unwrap();
-        let worst = levels
+    fn transition_source(path: &std::path::Path) -> TrackSource {
+        TrackSource {
+            source: path.display().to_string(),
+            title: "level".into(),
+            artist: String::new(),
+            start_seconds: 0.0,
+            plan: TransitionPlan::default(),
+            headers: std::collections::HashMap::new(),
+            claimed_kbps: 0,
+            loudness_db: None,
+            duration_seconds: 0.0,
+        }
+    }
+
+    fn open_voice(path: &std::path::Path) -> Voice {
+        Voice::open(&transition_source(path), false, 0.0, 48_000, 1.0, false, false).unwrap()
+    }
+
+    fn measured(lufs: f64) -> crate::LoudnessMeasurement {
+        crate::LoudnessMeasurement {
+            track_lufs: lufs,
+            album_lufs: None,
+            true_peak_dbtp: None,
+        }
+    }
+
+    /// The engine's own blend: both decks pulled and mixed through `mix_into`
+    /// with the equal-power curves, so the arming, the smoothing, the
+    /// normalization stage and the release are all the shipped ones.
+    fn render_blend(outgoing: &mut Voice, incoming: &mut Voice, normalization: bool) -> Vec<f32> {
+        let total = 48_000 * 2;
+        let mut mixed = Vec::with_capacity(total * 2);
+        let mut done = 0usize;
+        while done < total {
+            let frames = 1024.min(total - done);
+            let a = outgoing.pull(frames, 48_000);
+            let b = incoming.pull(frames, 48_000);
+            let mut out = vec![0.0f32; frames * 2];
+            let progress = done as f64 / total as f64;
+            outgoing.mix_into(&a, &mut out, fall_gain(progress), normalization);
+            incoming.mix_into(&b, &mut out, rise_gain(progress), normalization);
+            mixed.extend_from_slice(&out);
+            done += frames;
+        }
+        mixed
+    }
+
+    /// How far the level moved from the first 100 ms window, and the peak.
+    fn level_spread(samples: &[f32]) -> (f64, f32) {
+        let levels = window_levels(samples, 4_800);
+        let first = levels.first().copied().unwrap_or(0.0);
+        let spread = levels
             .iter()
             .map(|level| (level - first).abs())
             .fold(0.0f64, f64::max);
+        let peak = samples.iter().fold(0f32, |peak, s| peak.max(s.abs()));
+        (spread, peak)
+    }
 
-        assert!(worst < 1.0, "level moved {worst:.2} dB across the blend");
+    fn levels() -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("bitchord-mixer-levels-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let loud = dir.join("loud.wav");
+        let quiet = dir.join("quiet.wav");
+        // Six dB apart, different frequencies so their powers add rather than
+        // their waveforms — which is what an equal-power crossfade assumes.
+        // Long enough to hold a two-second blend and then the release, which
+        // is slower than the arming on purpose.
+        level_wav(&loud, 8.0, 1_000.0, 0.5);
+        level_wav(&quiet, 8.0, 1_500.0, 0.25);
+        (loud, quiet)
+    }
+
+    #[test]
+    fn the_voice_path_matches_a_six_lu_blend_and_releases() {
+        let (loud, quiet) = levels();
+        let mut outgoing = open_voice(&loud);
+        let mut incoming = open_voice(&quiet);
+        outgoing.measured_loudness = Some(measured(-14.0));
+        incoming.measured_loudness = Some(measured(-20.0));
+
+        incoming.arm_transition_match(Some(&outgoing), false);
+        assert!((incoming.match_db - 6.0).abs() < 1e-6, "armed {}", incoming.match_db);
+        assert!(
+            (incoming.smoothed_match - 1.0).abs() < 1e-6,
+            "the match jumped at arm time: {}",
+            incoming.smoothed_match
+        );
+
+        let mixed = render_blend(&mut outgoing, &mut incoming, false);
+        let (spread, peak) = level_spread(&mixed);
+        assert!(spread < 1.0, "level moved {spread:.2} dB across the blend");
         assert!(peak <= 1.0, "peak {peak} clipped");
+        assert!(
+            incoming.smoothed_match > 1.9,
+            "the ramp did not arrive: {}",
+            incoming.smoothed_match
+        );
+
+        // Release walks the correction home instead of stepping it away.
+        incoming.release_transition_match();
+        assert_eq!(incoming.match_db, 0.0);
+        let mut previous = incoming.smoothed_match;
+        for _ in 0..120 {
+            let frames = incoming.pull(1024, 48_000);
+            let mut out = vec![0.0f32; frames.len()];
+            incoming.mix_into(&frames, &mut out, 1.0, false);
+            assert!(
+                incoming.smoothed_match <= previous + 1e-6,
+                "release went back up: {} > {previous}",
+                incoming.smoothed_match
+            );
+            previous = incoming.smoothed_match;
+        }
+        assert!(previous < 1.5, "release stalled at {}", previous);
     }
 
     #[test]
-    fn without_the_match_the_same_blend_dips() {
-        // The regression this guards: the same two tones, no correction, and the
-        // middle of the fade is audibly below the ends.
-        let frames = 48_000 * 2;
-        let a = tone(1_000.0, 0.5, frames);
-        let b = tone(1_500.0, 0.25, frames);
-        let mut mixed = vec![0.0f32; frames * 2];
-        for frame in 0..frames {
-            let p = frame as f64 / frames as f64;
-            let fall = fall_gain(p);
-            let rise = rise_gain(p);
-            for channel in 0..2 {
-                let index = frame * 2 + channel;
-                mixed[index] = a[index] * fall + b[index] * rise;
-            }
-        }
-        let levels = window_levels(&mixed, 4_800);
-        let first = levels.first().copied().unwrap();
-        let worst = levels
-            .iter()
-            .map(|level| (level - first).abs())
-            .fold(0.0f64, f64::max);
-        assert!(worst > 1.0, "the unmatched blend should dip, but stayed within {worst:.2} dB");
+    fn the_same_blend_without_the_match_dips() {
+        let (loud, quiet) = levels();
+        let mut outgoing = open_voice(&loud);
+        let mut incoming = open_voice(&quiet);
+        outgoing.measured_loudness = Some(measured(-14.0));
+        incoming.measured_loudness = Some(measured(-20.0));
+
+        let mixed = render_blend(&mut outgoing, &mut incoming, false);
+        let (spread, _) = level_spread(&mixed);
+        assert!(spread > 1.0, "the unmatched blend should dip, moved {spread:.2} dB");
+    }
+
+    #[test]
+    fn a_normalized_blend_is_not_corrected_twice() {
+        let (loud, quiet) = levels();
+        let mut outgoing = open_voice(&loud);
+        let mut incoming = open_voice(&quiet);
+        outgoing.normalization_mode = LoudnessMode::Track;
+        incoming.normalization_mode = LoudnessMode::Track;
+        outgoing.measured_loudness = Some(measured(-14.0));
+        incoming.measured_loudness = Some(measured(-20.0));
+
+        // Normalization boosts the quieter deck by exactly the difference, so
+        // both decks reach the blend at the target level and the transition has
+        // nothing left to correct.
+        incoming.arm_transition_match(Some(&outgoing), true);
+        assert_eq!(incoming.match_db, 0.0, "the same difference was corrected twice");
+
+        let mixed = render_blend(&mut outgoing, &mut incoming, true);
+        let (spread, peak) = level_spread(&mixed);
+        assert!(spread < 1.0, "normalized blend moved {spread:.2} dB");
+        assert!(peak <= 1.0, "peak {peak} clipped");
     }
 
     #[derive(Default)]
