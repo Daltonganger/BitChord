@@ -129,6 +129,17 @@ withStore { store in
     check("two sessions in one day are 72 seconds", near(week.totalMs, 72_000))
 }
 
+// The week has an hour histogram of its own, built from its days alone: last
+// week's evening listening is not this week's peak.
+withStore { store in
+    play(store, on: previousWeek.addingTimeInterval(20 * 3600))
+    play(store, on: tuesday.addingTimeInterval(9 * 3600))
+    let week = store.summary(period: .thisWeek, now: thursday)
+    let hour = Calendar.current.component(.hour, from: tuesday.addingTimeInterval(9 * 3600))
+    check("the week's hours are its own", near(week.hourOfDay.reduce(0, +), 36_000))
+    check("and peak where it was played", week.hourOfDay.indices.max(by: { week.hourOfDay[$0] < week.hourOfDay[$1] }) == hour)
+}
+
 print("")
 if failures == 0 {
     print("all listening checks passed")
