@@ -27,16 +27,17 @@ fi
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-18.0}"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-15.0}"
 
-# Full task name required — `assembleBitChordShared` alone is ambiguous
-# (KGP also creates Debug/Release variants).
-./gradlew :shared:assembleBitChordSharedXCFramework
+# Only the configuration being packaged is built: assembling both linked
+# every framework twice for a release copy nobody copied.
+CFG="${CONFIG:-debug}"
+VARIANT="$(printf '%s' "${CFG:0:1}" | tr '[:lower:]' '[:upper:]')${CFG:1}"
+./gradlew ":shared:assembleBitChordShared${VARIANT}XCFramework"
 
 # KGP emits separate debug/ and release/ xcframeworks, and
 # `xcodebuild -create-xcframework` refuses two libraries with the same
 # platform identifier, so the two configurations cannot live in one
 # xcframework. Package one configuration (debug by default — right for
 # development; use CONFIG=release for distribution builds).
-CFG="${CONFIG:-debug}"
 SRC="shared/build/XCFrameworks/$CFG/BitChordShared.xcframework"
 DEST="AppleApp/Frameworks/BitChordShared.xcframework"
 mkdir -p AppleApp/Frameworks

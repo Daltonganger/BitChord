@@ -258,6 +258,9 @@ struct PlaylistPickerView: View {
     @State private var title = ""
     @State private var privacy = "PRIVATE"
     @State private var error: String?
+    /// Several at once (upstream v1.8): tick the playlists, then Add.
+    @State private var selected: Set<String> = []
+    @State private var adding = false
 
     var body: some View {
         NavigationStack {
@@ -284,21 +287,28 @@ struct PlaylistPickerView: View {
                 Section("Your playlists") {
                     ForEach(playlists) { list in
                         Button {
-                            Task {
-                                if let err = await LibraryActions.addToPlaylist(playlistId: list.playlistId, videoId: request.videoId) {
-                                    error = err
-                                } else {
-                                    dismiss()
-                                }
+                            if selected.contains(list.playlistId) {
+                                selected.remove(list.playlistId)
+                            } else {
+                                selected.insert(list.playlistId)
                             }
                         } label: {
-                            VStack(alignment: .leading) {
-                                Text(list.title)
-                                if !list.subtitle.isEmpty {
-                                    Text(list.subtitle).font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(list.title)
+                                    if !list.subtitle.isEmpty {
+                                        Text(list.subtitle).font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
+                                Spacer()
+                                Image(systemName: selected.contains(list.playlistId) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selected.contains(list.playlistId) ? Color.accentColor : .secondary)
+                                    .font(.title3)
                             }
+                            .contentShape(.rect)
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selected.contains(list.playlistId) ? .isSelected : [])
                     }
                 }
                 if let error {
@@ -308,12 +318,42 @@ struct PlaylistPickerView: View {
             .navigationTitle("Add to Playlist")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(selected.count > 1 ? "Add to \(selected.count)" : "Add") { addToSelected() }
+                        .disabled(selected.isEmpty || adding)
+                }
             }
             .task { playlists = await LibraryActions.userPlaylists() }
         }
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 480)
         #endif
+    }
+
+    /// Adds to every ticked playlist in parallel; stays open naming any that
+    /// refused, so a partial success is not reported as a whole one.
+    private func addToSelected() {
+        adding = true
+        let ids = selected
+        let videoId = request.videoId
+        Task {
+            let failures = await withTaskGroup(of: (String, String?).self) { group in
+                for id in ids {
+                    group.addTask { (id, await LibraryActions.addToPlaylist(playlistId: id, videoId: videoId)) }
+                }
+                var failed: [String] = []
+                for await (id, err) in group where err != nil { failed.append(id) }
+                return failed
+            }
+            adding = false
+            if failures.isEmpty {
+                dismiss()
+            } else {
+                let names = playlists.filter { failures.contains($0.playlistId) }.map(\.title)
+                error = "Couldn't add to " + names.joined(separator: ", ")
+                selected = Set(failures)
+            }
+        }
     }
 }
 

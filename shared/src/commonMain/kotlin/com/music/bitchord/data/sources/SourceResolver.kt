@@ -396,7 +396,8 @@ object SourceResolver {
         // setting's answer and what it may spend is the Wi-Fi-only setting's, and a
         // mobile-data rung of Medium has no business deciding that a file saved over
         // Wi-Fi later is a YouTube one.
-        val active = SourceRegistry.active()
+        // An addon that publishes `allowDownloads: 0` is playback-only.
+        val active = SourceRegistry.active().filter { (it as? AddonSource)?.allowsDownloads() != false }
         // YouTube can be switched off, and a download still goes to it when nothing
         // here answers. So an absent YouTube means everything enabled outranks it,
         // which is already what [rankedAbove] says about a config not in the list.

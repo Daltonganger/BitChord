@@ -217,6 +217,7 @@ object LyricsRepository {
         LyricsSource.BETTER_LYRICS -> BetterLyrics.lyrics(title, artist, durationMs, album)
         LyricsSource.BETTER_LYRICS_PORTATO -> BetterLyrics.portato(title, artist, durationMs, album)
         LyricsSource.LYRICS_PLUS -> LyricsPlus.lyrics(title, artist, durationMs, album, isrc)
+        LyricsSource.LRC_RED -> LrcRed.lyrics(title, artist, durationMs, isrc ?: hit?.isrc)
         LyricsSource.BINI_LYRICS ->
             (hit?.let { BiniLyrics.lyricsFor(it) }
                 ?: BiniLyrics.lyrics(title, artist, durationMs, album, isrc))

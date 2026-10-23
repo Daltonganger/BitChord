@@ -24,9 +24,27 @@ struct RootView: View {
     #if os(iOS)
     @Namespace private var nowPlayingZoom
     #endif
+    @AppStorage(OnboardingView.doneKey) private var onboardingDone = false
+    @State private var onboardingPresented = false
 
     var body: some View {
         shell
+        .task {
+            // First run only. Someone upgrading — signed in, or with a queue
+            // to come back to — has already onboarded themselves.
+            guard !onboardingDone else { return }
+            try? await Task.sleep(for: .milliseconds(700))
+            if auth.signedIn || !controller.queue.isEmpty {
+                onboardingDone = true
+            } else {
+                onboardingPresented = true
+            }
+        }
+        #if os(iOS)
+        .fullScreenCover(isPresented: $onboardingPresented) { OnboardingView() }
+        #else
+        .sheet(isPresented: $onboardingPresented) { OnboardingView() }
+        #endif
         .onChange(of: appModel.requestedTab) { _, requested in
             guard let requested else { return }
             selection = resolvedTab(requested).rawValue

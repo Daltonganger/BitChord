@@ -25,6 +25,16 @@ enum class LyricsSource(
      * It is the only source this app contacts outside the race, and only when
      * it is switched on.
      */
+    /**
+     * Apple Music TTML filed by ISRC — one request, and never the wrong edit,
+     * once the recording is known. Ahead of [BINI_LYRICS] as upstream has it:
+     * it is the catalogue BiniLyrics answers from.
+     */
+    LRC_RED(
+        label = "lrc.red",
+        detail = "Apple Music timings, filed by recording",
+        wordSynced = true,
+    ),
     BINI_LYRICS(
         label = "BiniLyrics",
         detail = "Apple Music timings, and the recording's ISRC for everything else",
