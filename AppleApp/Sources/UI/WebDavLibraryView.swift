@@ -68,8 +68,7 @@ struct WebDavLibraryView: View {
             EmptyStateView(
                 icon: Image(.bchLibrary),
                 title: "Can’t read that share",
-                // Server text, not UI copy: it renders as-is when no key matches.
-                subtitle: LocalizedStringKey(message),
+                subtitle: message,
                 buttonTitle: "Try Again",
                 action: { Task { await store.load(force: true) } }
             )

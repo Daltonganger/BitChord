@@ -295,7 +295,7 @@ struct SearchView: View {
             } else if attempted && !searching && hits.isEmpty && searchError == nil {
                 EmptyStateView(icon: Image(.bchSearch), title: "No results", subtitle: "Nothing found for “\(query)”.", buttonTitle: nil, action: nil)
             } else if let searchError {
-                EmptyStateView(icon: Image(.bchSearch), title: "Search unavailable", subtitle: LocalizedStringKey(searchError), buttonTitle: nil, action: nil)
+                EmptyStateView(icon: Image(.bchSearch), title: "Search unavailable", subtitle: searchError, buttonTitle: nil, action: nil)
             } else if isEditing {
                 suggestionList
             } else if !query.isEmpty {
