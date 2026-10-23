@@ -66,9 +66,7 @@ struct DetailView: View {
             if loading {
                 ScrollView { FeedSkeleton() }
             } else if let error {
-                // The load error is runtime text, not UI copy: no catalog key
-                // will match it, so it renders exactly as the network reported it.
-                EmptyStateView(icon: Image(.bchMusicNote), title: "Couldn't load", subtitle: LocalizedStringKey(error), buttonTitle: "Retry") {
+                EmptyStateView(icon: Image(.bchMusicNote), title: "Couldn't load", subtitle: error, buttonTitle: "Retry") {
                     Task { await load() }
                 }
             } else if let page {

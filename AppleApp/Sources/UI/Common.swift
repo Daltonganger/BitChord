@@ -338,15 +338,69 @@ struct SkeletonBlock: View {
 
 /// Music's centered empty state: glyph, bold title, subtitle, one bordered button.
 ///
-/// The copy is `LocalizedStringKey`, not `String`: every call site passes a UI
-/// phrase, and a `String` parameter would render it verbatim instead of looking
-/// the translation up in the catalog.
+/// The copy is `LocalizedStringKey`, not `String`: a call site passing a UI
+/// phrase should get the translation from the catalog, and a plain `String`
+/// parameter would render it verbatim.
 struct EmptyStateView: View {
     var icon: Image
     var title: LocalizedStringKey
     var subtitle: LocalizedStringKey
+    /// The subtitle when it is *not* catalog copy — a load error, a server's
+    /// answer — set by the `StringProtocol` initializer below.
+    var verbatimSubtitle: String?
     var buttonTitle: LocalizedStringKey?
     var action: (() -> Void)?
+
+    init(
+        icon: Image,
+        title: LocalizedStringKey,
+        subtitle: LocalizedStringKey,
+        buttonTitle: LocalizedStringKey? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.icon = icon
+        self.title = title
+        self.subtitle = subtitle
+        self.verbatimSubtitle = nil
+        self.buttonTitle = buttonTitle
+        self.action = action
+    }
+
+    /// For text that is data rather than copy: a `404`, a timeout, a server's
+    /// own message.
+    ///
+    /// It is drawn with `Text(verbatim:)` because a `LocalizedStringKey` built
+    /// from a runtime string is still parsed as Markdown — underscores would turn
+    /// italic, asterisks bold, and a URL in an error message into a link that
+    /// points somewhere the message never meant.
+    ///
+    /// `@_disfavoredOverload` is the same attribute SwiftUI puts on
+    /// `Text.init(_:)`'s `StringProtocol` form: without it a string *literal*
+    /// would resolve to this initializer (a literal's default type is `String`)
+    /// and every empty state would stop being localized. With it, literals keep
+    /// the `LocalizedStringKey` initializer above and only real `String` values
+    /// land here.
+    @_disfavoredOverload
+    init<S: StringProtocol>(
+        icon: Image,
+        title: LocalizedStringKey,
+        subtitle: S,
+        buttonTitle: LocalizedStringKey? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.icon = icon
+        self.title = title
+        self.subtitle = ""
+        self.verbatimSubtitle = String(subtitle)
+        self.buttonTitle = buttonTitle
+        self.action = action
+    }
+
+    /// The subtitle resolved to the text the view draws: catalog copy, or the
+    /// runtime text as-is.
+    private var subtitleLabel: Text {
+        verbatimSubtitle.map { Text(verbatim: $0) } ?? Text(subtitle)
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -358,7 +412,7 @@ struct EmptyStateView: View {
                 .padding(.bottom, 4)
             Text(title)
                 .font(.title3.weight(.bold))
-            Text(subtitle)
+            subtitleLabel
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
