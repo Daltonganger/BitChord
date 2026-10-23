@@ -21,6 +21,9 @@ struct SpotifyImportSheet: View {
     @State private var phase: Phase = .idle
     @State private var error: String?
     @State private var creating = false
+    /// Identifies the import in progress. A newer load replaces it, and results
+    /// from the old one are dropped instead of overwriting the new list.
+    @State private var runID = UUID()
 
     private enum Phase: Equatable {
         case idle
@@ -35,6 +38,10 @@ struct SpotifyImportSheet: View {
 
     private var matchedRows: [SpotifyImportRow] { rows.filter { $0.status == .matched } }
     private var settledRows: Int { rows.filter { $0.status != .waiting && $0.status != .searching }.count }
+
+    /// Whether a load or a match is in flight: nothing that starts another one
+    /// may be used until it finishes.
+    private var busy: Bool { phase == .loadingPlaylist || phase == .matching }
 
     var body: some View {
         NavigationStack {
@@ -83,18 +90,19 @@ struct SpotifyImportSheet: View {
         List {
             Section {
                 TextField("Paste a Spotify playlist link", text: $link)
+                    .disabled(busy)
                     #if os(iOS)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
                     #endif
                 Button("Load Playlist") { Task { await load(input: link) } }
-                    .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || phase == .loadingPlaylist)
+                    .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || busy)
             } footer: {
                 if hasCookie {
                     Text("Paste the share link, or pick one of your playlists below.")
                 } else {
-                    Text("Paste a share link. To list your own playlists, add the sp_dc cookie in Settings › Spotify Canvas.")
+                    Text("Paste a public share link. Adding the sp_dc cookie in Settings › Spotify Canvas also lists your own playlists and imports private ones.")
                 }
             }
 
@@ -115,6 +123,7 @@ struct SpotifyImportSheet: View {
                         }
                         .buttonStyle(.plain)
                     }
+                    .disabled(busy)
                 }
             }
 
@@ -167,19 +176,37 @@ struct SpotifyImportSheet: View {
     private func load(input: String) async {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // A load replaces whatever was in flight: the token changes first, so any
+        // older fetch or match that lands afterwards sees it is stale and stops.
+        let run = UUID()
+        runID = run
         error = nil
         phase = .loadingPlaylist
-        defer { if phase == .loadingPlaylist { phase = .idle } }
-        guard let loaded = await fetchPlaylist(trimmed) else { return }
+        guard let loaded = await fetchPlaylist(trimmed) else {
+            if runID == run { phase = .idle }
+            return
+        }
+        guard runID == run else { return }
         playlist = loaded
         link = trimmed
-        rows = loaded.tracks.map { SpotifyImportRow(id: $0.id, title: $0.title, artists: $0.artists, durationMs: $0.durationMs) }
-        await matchAll()
+        // The row's id is its position in the playlist, not its text: a playlist
+        // may list the same song twice, and each occurrence is its own row.
+        rows = loaded.tracks.enumerated().map { index, track in
+            SpotifyImportRow(
+                id: "\(loaded.id)#\(index)",
+                title: track.title, artists: track.artists, durationMs: track.durationMs
+            )
+        }
+        await matchAll(run: run)
     }
 
     /// Matches the rows a few at a time, so the list fills in as it goes instead
     /// of arriving all at once at the end.
-    private func matchAll() async {
+    ///
+    /// `run` is the import this pass belongs to. Every result and every phase
+    /// change is checked against it, so a playlist that replaces this one mid
+    /// search neither gains these rows nor has its phase cleared by them.
+    private func matchAll(run: UUID) async {
         guard !rows.isEmpty else { return }
         phase = .matching
         let tracks = rows.map { (id: $0.id, title: $0.title, artists: $0.artists, durationMs: $0.durationMs) }
@@ -196,10 +223,12 @@ struct SpotifyImportSheet: View {
             }
             for _ in 0..<min(width, tracks.count) { addTask() }
             for await (id, result) in group {
+                guard runID == run else { return }
                 apply(result, to: id)
                 addTask()
             }
         }
+        guard runID == run else { return }
         phase = .idle
     }
 
@@ -401,10 +430,6 @@ private struct SpotifyPlaylistPayload: Decodable {
         let artists: String
         let durationMs: Int64
         let album: String?
-
-        /// One row's identity within this import: the same song can appear twice
-        /// in a playlist, so the title alone is not enough.
-        var id: String { "\(title)\u{1}\(artists)\u{1}\(durationMs)" }
     }
 
     let id: String
