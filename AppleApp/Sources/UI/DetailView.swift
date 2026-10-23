@@ -34,6 +34,9 @@ struct DetailView: View {
     @State private var saved = false
     @State private var saving = false
     @State private var continuation: String?
+    /// Whether a continuation fetch is in flight; the token stays put until it
+    /// succeeds, so this is what keeps duplicate requests out.
+    @State private var loadingMore = false
     @State private var pageRequestID = UUID()
     @State private var suggested: [DetailPageModel.SongPayload] = []
     @Environment(AuthController.self) private var auth
@@ -1097,10 +1100,15 @@ struct DetailView: View {
     }
 
     private func loadMore() async {
-        guard let token = continuation, !token.isEmpty else { return }
+        // The token is kept until a page actually arrives, because it is what the
+        // retry and the "12+ songs" count both read. Clearing it before the await
+        // made a slow page — and a failed one for ever — look like the end of the
+        // playlist. `loadingMore` is what stops the last row asking twice.
+        guard !loadingMore, let token = continuation, !token.isEmpty else { return }
+        loadingMore = true
+        defer { loadingMore = false }
         let generation = PageSession.generation()
         let request = pageRequestID
-        continuation = nil
         guard let extra = try? await InnertubeDetail.shared.more(token: token),
               generation == PageSession.generation(), !Task.isCancelled,
               pageRequestID == request, var page else { return }
