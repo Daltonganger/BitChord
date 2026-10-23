@@ -146,6 +146,9 @@ final class ListeningStore {
         /// Day key ("2026-10-23") → that day's tracks. Optional so a file
         /// written before F12 still decodes.
         var dayTracks: [String: [Track]]? = nil
+        /// Day key → that day's listening by hour (24 values, ms), so the week
+        /// has an hour histogram of its own. Optional for the same reason.
+        var dayHours: [String: [Double]]? = nil
     }
 
     private struct ExportEnvelope: Codable {
@@ -162,6 +165,7 @@ final class ListeningStore {
         var days: [Int: Double] = [:]
         /// Per-day track totals, for the week Replay. Only recent days are kept.
         var dayTracks: [String: [Track]] = [:]
+        var dayHours: [String: [Double]] = [:]
 
         func snapshot() -> StoredBucket {
             StoredBucket(
@@ -171,7 +175,8 @@ final class ListeningStore {
                 albums: Array(albums.values),
                 hours: hours,
                 days: days,
-                dayTracks: dayTracks
+                dayTracks: dayTracks,
+                dayHours: dayHours
             )
         }
 
@@ -215,7 +220,8 @@ final class ListeningStore {
                 albums: albums,
                 hours: hours,
                 days: stored.days,
-                dayTracks: stored.dayTracks ?? [:]
+                dayTracks: stored.dayTracks ?? [:],
+                dayHours: stored.dayHours ?? [:]
             )
         }
     }
@@ -486,8 +492,8 @@ final class ListeningStore {
     /// Built from the per-day rows rather than the month totals, because a week
     /// begins mid-month and is not a subset of any one bucket. Artists and albums
     /// are derived from the week's tracks by the same rules the month aggregation
-    /// uses; the hour histogram is left empty, since hours are stored per month
-    /// and a week's share of them is not something the data says.
+    /// uses, and the hour histogram is the sum of the week's per-day hours (days
+    /// recorded before those were kept contribute none).
     private func weekSummary(includeGenres: Bool, now: Date) -> ReplaySummary {
         let cal = Calendar.current
         let start = ListeningPeriod.weekStart(now) ?? now
@@ -497,8 +503,13 @@ final class ListeningStore {
         var artists: [String: NameEntry] = [:]
         var albums: [String: NameEntry] = [:]
         var days: [String: Double] = [:]
+        var hours = Array(repeating: 0.0, count: 24)
 
         for month in collected(period: .thisWeek, now: now) {
+            for (day, values) in month.dayHours ?? [:] {
+                guard let date = Self.date(fromDayKey: day), date >= firstDay, date <= now else { continue }
+                for (i, value) in values.prefix(24).enumerated() { hours[i] += value }
+            }
             for (day, entries) in month.dayTracks ?? [:] {
                 guard let date = Self.date(fromDayKey: day), date >= firstDay, date <= now else { continue }
                 for entry in entries {
@@ -543,7 +554,7 @@ final class ListeningStore {
             tracks: tracks,
             artists: artists,
             albums: albums,
-            hours: Array(repeating: 0, count: 24),
+            hours: hours,
             days: days,
             earliest: ListeningStore.monthKey(start),
             period: .thisWeek,
@@ -672,7 +683,12 @@ final class ListeningStore {
         open.dayTracks[dayKey] = dayTracks
 
         let hour = Calendar.current.component(.hour, from: at)
-        if hour >= 0 && hour < 24 { open.hours[hour] += playedMs }
+        if hour >= 0 && hour < 24 {
+            open.hours[hour] += playedMs
+            var dayHours = open.dayHours[dayKey] ?? Array(repeating: 0, count: 24)
+            dayHours[hour] += playedMs
+            open.dayHours[dayKey] = dayHours
+        }
         let day = Calendar.current.component(.day, from: at)
         open.days[day, default: 0] += playedMs
         pruneOpen()
@@ -708,6 +724,10 @@ final class ListeningStore {
         if open.dayTracks.count > Self.keptDays {
             let keep = open.dayTracks.keys.sorted().suffix(Self.keptDays)
             open.dayTracks = open.dayTracks.filter { keep.contains($0.key) }
+        }
+        if open.dayHours.count > Self.keptDays {
+            let keep = open.dayHours.keys.sorted().suffix(Self.keptDays)
+            open.dayHours = open.dayHours.filter { keep.contains($0.key) }
         }
         if open.tracks.count > Self.maxTracks {
             let drop = open.tracks.values.sorted { $0.ms < $1.ms }.prefix(open.tracks.count - Self.maxTracks)
