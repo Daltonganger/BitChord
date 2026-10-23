@@ -563,7 +563,11 @@ struct NowPlayingView: View {
                 sourceVisible: true,
                 onChangeSource: { showLyricsSources = true },
                 onRevealControls: {},
-                onFocusLyrics: {}
+                onFocusLyrics: {},
+                trackTitle: controller.current?.title ?? "",
+                trackArtist: controller.current?.artist ?? "",
+                artworkData: controller.current?.artworkData,
+                artworkUrl: controller.current?.thumbnailUrl
             )
         }
     }
@@ -749,7 +753,11 @@ struct NowPlayingView: View {
                 sourceVisible: lyricsControlsOpen,
                 onChangeSource: { showLyricsSources = true },
                 onRevealControls: { revealLyricsControls() },
-                onFocusLyrics: { hideLyricsControls() }
+                onFocusLyrics: { hideLyricsControls() },
+                trackTitle: controller.current?.title ?? "",
+                trackArtist: controller.current?.artist ?? "",
+                artworkData: controller.current?.artworkData,
+                artworkUrl: controller.current?.thumbnailUrl
             )
             }
         case .queue:
@@ -841,10 +849,11 @@ struct NowPlayingView: View {
                 Text(controller.current?.title ?? "Nothing playing")
                     .font(.headline.weight(.semibold))
                     .lineLimit(1)
-                Text(controller.current?.artist ?? "")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.7))
-                    .lineLimit(1)
+                ArtistCreditText(
+                    credit: controller.current?.artist ?? "",
+                    font: .subheadline,
+                    color: .white.opacity(0.7)
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if auth.signedIn, controller.current?.videoId != nil {
@@ -1788,10 +1797,11 @@ struct UpNextPane: View {
                         .font(.body.weight(.medium))
                         .foregroundStyle(.white)
                         .lineLimit(1)
-                    Text(controller.current?.artist ?? "")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.65))
-                        .lineLimit(1)
+                    ArtistCreditText(
+                        credit: controller.current?.artist ?? "",
+                        font: .caption,
+                        color: .white.opacity(0.65)
+                    )
                 }
                 Spacer(minLength: 0)
                 Image(systemName: "waveform")
@@ -2386,6 +2396,75 @@ struct MeshBackdrop: View {
 
 /// Upstream's lyrics strip: the current line is bright and sharp; neighbours
 /// recede by opacity, the same treatment as the Android panel.
+/// The picture a shared lyric becomes: the sleeve's colours, the quoted lines
+/// and the song they came from.
+///
+/// A view rather than a drawn image so `ImageRenderer` can produce one at the
+/// display's own scale — the card is rendered the way it is laid out here, which
+/// is also what makes it previewable in the canvas.
+struct LyricShareCard: View {
+    let lines: [String]
+    let title: String
+    let artist: String
+    let tint: ArtworkPalette.PageTint
+    let artwork: Data?
+    let artworkUrl: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 12) {
+                ArtworkView(url: artworkUrl, data: artwork, side: 56)
+                    .clipShape(.rect(cornerRadius: 10, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(artist)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            HStack {
+                Text("BitChord")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer(minLength: 8)
+                Text(artist)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.55))
+                    .lineLimit(1)
+            }
+        }
+        .padding(28)
+        .frame(width: 560, height: 700, alignment: .topLeading)
+        .background {
+            ZStack {
+                tint.wash
+                LinearGradient(
+                    colors: [tint.accent.opacity(0.38), tint.wash, .black.opacity(0.86)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            }
+        }
+    }
+}
+
 struct LyricsPane: View {
     var lines: [LyricLineDto]
     var loading: Bool
@@ -2405,9 +2484,21 @@ struct LyricsPane: View {
     var onChangeSource: (() -> Void)? = nil
     var onRevealControls: (() -> Void)? = nil
     var onFocusLyrics: (() -> Void)? = nil
+    /// What the share card names. The pane draws lines; the card has to say
+    /// whose song they are, and only the caller knows.
+    var trackTitle: String = ""
+    var trackArtist: String = ""
+    var artworkData: Data? = nil
+    var artworkUrl: String? = nil
+    /// Lyric lines picked for a share card, at most [maxSharedLines].
+    @State private var selection: Set<Int> = []
+    @State private var shareImage: Image?
     /// True while the listener is scrolling the list themselves, which stands the
     /// auto-scroll down until they have been still for a moment.
     @State private var reading = false
+    /// A share card is a quote, not a transcript: four lines read as a lyric,
+    /// twenty read as a wall.
+    private let maxSharedLines = 4
 
     /// The clock the lyrics are judged against, which runs `offsetMs` behind the
     /// transport.
@@ -2525,6 +2616,19 @@ struct LyricsPane: View {
                                             }
                                         }
                                     )
+                                    .overlay(alignment: .topTrailing) {
+                                        if selection.contains(index) {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundStyle(.white)
+                                                .padding(.top, 4)
+                                                .accessibilityHidden(true)
+                                        }
+                                    }
+                                    .contextMenu {
+                                        Button(selection.contains(index) ? "Remove from Share" : "Add to Share") {
+                                            toggleShareSelection(index)
+                                        }
+                                    }
                                     .id(index)
                                 }
                             }
@@ -2579,6 +2683,10 @@ struct LyricsPane: View {
                                 }
                         )
                     }
+                    if !selection.isEmpty {
+                        shareBar
+                            .padding(.horizontal, 12)
+                    }
                     if sourceVisible, let credit = attribution {
                         HStack(spacing: 8) {
                             Text(credit)
@@ -2599,6 +2707,86 @@ struct LyricsPane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The quote bar: what has been picked, and the way to share it.
+    private var shareBar: some View {
+        HStack(spacing: 10) {
+            Text(selection.count == 1 ? "1 line selected" : "\(selection.count) lines selected")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white.opacity(0.8))
+            Spacer(minLength: 0)
+            if let shareImage {
+                ShareLink(
+                    item: shareImage,
+                    preview: SharePreview(
+                        trackTitle.isEmpty ? "Lyrics" : "\(trackTitle) — lyrics",
+                        image: shareImage
+                    )
+                ) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .foregroundStyle(.white)
+            } else {
+                ProgressView().controlSize(.small).tint(.white)
+            }
+            Button("Done") {
+                selection.removeAll()
+                shareImage = nil
+            }
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.white.opacity(0.10), in: Capsule())
+        .task(id: selection) { renderShareCard() }
+    }
+
+    private func toggleShareSelection(_ index: Int) {
+        if selection.contains(index) {
+            selection.remove(index)
+        } else if selection.count < maxSharedLines {
+            selection.insert(index)
+        }
+        Haptics.play(.select)
+    }
+
+    private var selectedLines: [String] {
+        selection.sorted().compactMap { index in
+            guard lines.indices.contains(index) else { return nil }
+            return lines[index].text
+        }
+    }
+
+    /// Draws the card once per selection. `ImageRenderer` is main-actor work, so
+    /// this is an `.task`, and the result is kept until the selection changes.
+    private func renderShareCard() {
+        guard !selection.isEmpty else {
+            shareImage = nil
+            return
+        }
+        let tint = ArtworkPalette.pageTint(
+            from: artworkData,
+            seed: trackTitle.hashValue,
+            dark: true
+        )
+        let card = LyricShareCard(
+            lines: selectedLines,
+            title: trackTitle,
+            artist: trackArtist,
+            tint: tint,
+            artwork: artworkData,
+            artworkUrl: artworkUrl
+        )
+        let renderer = ImageRenderer(content: card)
+        renderer.scale = PlatformScale.current
+        #if os(iOS)
+        shareImage = renderer.uiImage.map { Image(uiImage: $0) }
+        #else
+        shareImage = renderer.nsImage.map { Image(nsImage: $0) }
+        #endif
     }
 
     private var attribution: String? {

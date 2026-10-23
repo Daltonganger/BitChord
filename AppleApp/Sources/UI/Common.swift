@@ -427,6 +427,92 @@ struct EmptyStateView: View {
     }
 }
 
+/// Three bars that move while a track plays: the indicator Music puts beside the
+/// row that is playing, so a list says which row it is rather than only colouring
+/// its title. Static under Reduce Motion.
+struct PlayingBars: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var color: Color = .accentColor
+    @State private var phase = false
+
+    private static let shapes: [[CGFloat]] = [[4, 10, 7], [10, 5, 9], [7, 9, 4]]
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<3, id: \.self) { index in
+                Capsule()
+                    .fill(color)
+                    .frame(width: 2.5, height: height(index))
+            }
+        }
+        .frame(width: 14, height: 11, alignment: .bottom)
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.5).repeatForever(autoreverses: true),
+            value: phase
+        )
+        .onAppear { phase = true }
+        .accessibilityLabel("Playing")
+    }
+
+    private func height(_ index: Int) -> CGFloat {
+        guard !reduceMotion else { return Self.shapes[0][index] }
+        return Self.shapes[phase ? 1 : 0][index]
+    }
+}
+
+/// A credit line whose artist names each open their own search.
+///
+/// A track can be credited to several artists and the player used to draw them as
+/// one string with nothing to press. The player only carries the *first* artist's
+/// browse id, so each name opens a search for itself instead — one tap from that
+/// artist's page, and it works for the second and third name too.
+struct ArtistCreditText: View {
+    let credit: String
+    var font: Font
+    var color: Color
+    @Environment(AppModel.self) private var appModel
+
+    private var names: [String] {
+        credit.split(whereSeparator: { $0 == "," || $0 == "&" || $0 == "/" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    var body: some View {
+        Text(attributed)
+            .font(font)
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .environment(\.openURL, OpenURLAction { url in
+                guard url.scheme == "bitchord", url.host == "artist",
+                      let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                        .queryItems?.first(where: { $0.name == "name" })?.value else {
+                    return .systemAction
+                }
+                appModel.pendingSearchQuery = name
+                appModel.requestedTab = .search
+                appModel.focusSearch = true
+                return .handled
+            })
+    }
+
+    private var attributed: AttributedString {
+        var out = AttributedString()
+        let parts = names.isEmpty ? [credit] : names
+        for (index, name) in parts.enumerated() {
+            var piece = AttributedString(name)
+            var components = URLComponents()
+            components.scheme = "bitchord"
+            components.host = "artist"
+            components.queryItems = [URLQueryItem(name: "name", value: name)]
+            piece.link = components.url
+            out += piece
+            if index < parts.count - 1 { out += AttributedString(", ") }
+        }
+        return out
+    }
+}
+
 /// The one selected row in a window.
 ///
 /// Selection cannot live in each row: a `@State` per row keeps every row that
@@ -589,10 +675,13 @@ struct SongRow: View {
                 }
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.title)
-                    .font(.body.weight(active ? .semibold : .regular))
-                    .foregroundStyle(active ? Color.accentColor : .primary)
-                    .lineLimit(titleLines)
+                HStack(spacing: 6) {
+                    Text(entry.title)
+                        .font(.body.weight(active ? .semibold : .regular))
+                        .foregroundStyle(active ? Color.accentColor : .primary)
+                        .lineLimit(titleLines)
+                    if active { PlayingBars() }
+                }
                 if !entry.artist.isEmpty {
                     Text(entry.artist)
                         .font(.callout)
