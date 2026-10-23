@@ -57,7 +57,14 @@ struct TopResultSection: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: play)
-        .contextMenu { menu }
+        .liftPreview {
+            menu
+        } preview: {
+            ContextMenuPreview(
+                artworkUrl: hit.thumbnailUrl, title: hit.title, subtitle: hit.subtitle,
+                roundArtwork: hit.browseType?.uppercased() == "ARTIST"
+            )
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(hit.title), \(hit.subtitle ?? "")")
         .accessibilityHint("Plays the top result")

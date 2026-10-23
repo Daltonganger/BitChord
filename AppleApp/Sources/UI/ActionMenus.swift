@@ -169,6 +169,131 @@ struct SongActionButtons: View {
     }
 }
 
+/// The card iOS draws above a lifted row's actions, the way Apple Music does:
+/// artwork big enough to recognise, then the title and its second line.
+///
+/// System context menus take an arbitrary view here, and every song, album and
+/// playlist menu in the app passes through the modifiers below, so a long press
+/// looks the same wherever the row lives.
+struct ContextMenuPreview: View {
+    var artworkUrl: String?
+    var artworkData: Data?
+    var title: String
+    var subtitle: String?
+    /// Artists are drawn round and everything else square, as in the app.
+    var roundArtwork: Bool = false
+
+    /// 280 wide, less the 16pt padding either side: the sleeve is the card.
+    private let side: CGFloat = 248
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ArtworkView(url: artworkUrl, data: artworkData, side: side)
+                .clipShape(roundArtwork
+                    ? AnyShape(.circle)
+                    : AnyShape(.rect(cornerRadius: 12, style: .continuous)))
+                .shadow(color: .black.opacity(0.28), radius: 14, y: 6)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(2)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 280, alignment: .leading)
+    }
+
+    init(artworkUrl: String?, artworkData: Data? = nil, title: String, subtitle: String?, roundArtwork: Bool = false) {
+        self.artworkUrl = artworkUrl
+        self.artworkData = artworkData
+        self.title = title
+        self.subtitle = subtitle
+        self.roundArtwork = roundArtwork
+    }
+
+    init(entry: QueueEntry) {
+        self.init(
+            artworkUrl: entry.thumbnailUrl, artworkData: entry.artworkData,
+            title: entry.title, subtitle: entry.artist
+        )
+    }
+
+    init(card: ShelfCard, roundArtwork: Bool = false) {
+        self.init(
+            artworkUrl: card.thumbnailUrl, title: card.title,
+            subtitle: card.subtitle, roundArtwork: roundArtwork
+        )
+    }
+}
+
+extension View {
+    /// A menu with an Apple Music style lift preview on iOS.
+    ///
+    /// macOS keeps the plain right-click menu: its context menus are a pointer
+    /// gesture with no lift, and the preview view has nothing to attach to.
+    @ViewBuilder
+    func liftPreview<Menu: View, Preview: View>(
+        @ViewBuilder menu: () -> Menu,
+        @ViewBuilder preview: () -> Preview
+    ) -> some View {
+        #if os(iOS)
+        contextMenu(menuItems: menu, preview: preview)
+        #else
+        contextMenu(menuItems: menu)
+        #endif
+    }
+
+    /// The shared song actions, with the lifted sleeve on iOS.
+    func songContextMenu(
+        _ entry: QueueEntry,
+        playlistBrowseId: String? = nil,
+        playlistOwned: Bool = false
+    ) -> some View {
+        liftPreview {
+            SongActionButtons(
+                entry: entry, playlistBrowseId: playlistBrowseId,
+                setVideoId: entry.setVideoId, playlistOwned: playlistOwned
+            )
+        } preview: {
+            ContextMenuPreview(entry: entry)
+        }
+    }
+
+    /// A shelf card's actions: the track menu when the card is a track, the
+    /// browse menu (play, shuffle, pin, save) when it is a collection.
+    func shelfCardContextMenu(_ card: ShelfCard, roundArtwork: Bool = false) -> some View {
+        liftPreview {
+            ShelfCardActionButtons(card: card)
+        } preview: {
+            ContextMenuPreview(card: card, roundArtwork: roundArtwork)
+        }
+    }
+}
+
+/// A shelf card's actions, whichever kind of card it is: a card carrying a
+/// video id is a track and gets the track menu; everything else is a
+/// collection and gets play/shuffle/pin/save.
+struct ShelfCardActionButtons: View {
+    let card: ShelfCard
+
+    var body: some View {
+        if let videoId = card.videoId, !videoId.isEmpty {
+            SongActionButtons(entry: QueueEntry.youtube(
+                videoId: videoId, title: card.title, artist: card.subtitle ?? "",
+                thumbnailUrl: card.thumbnailUrl
+            ))
+        } else {
+            BrowseActionButtons(card: card)
+        }
+    }
+}
+
 struct BrowseActionButtons: View {
     let card: ShelfCard
     @Environment(PlaybackController.self) private var controller

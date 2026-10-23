@@ -396,12 +396,14 @@ struct SearchView: View {
                         entityType: browseEntityType(hit)
                     ))
                 })
-                .contextMenu {
-                    BrowseActionButtons(card: ShelfCard(
+                .shelfCardContextMenu(
+                    ShelfCard(
                         title: hit.title, subtitle: hit.subtitle,
                         thumbnailUrl: hit.thumbnailUrl, browseId: browseId
-                    ))
-                }
+                    ),
+                    // An artist's sleeve is round wherever it appears.
+                    roundArtwork: hit.browseType?.uppercased() == "ARTIST"
+                )
             } else {
                 SongRow(
                     entry: hit.asEntry(),
