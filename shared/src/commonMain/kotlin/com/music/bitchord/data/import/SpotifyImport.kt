@@ -37,6 +37,8 @@ object SpotifyImport {
     private const val PAGE = 100
     private const val PLAYLIST_PAGE = 50
     private const val UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+    private const val BROWSER_UA =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -123,11 +125,16 @@ object SpotifyImport {
     /**
      * Every track in a playlist, not the first page of it.
      *
-     * Spotify caps a page at 100, so this walks the offsets until a short page
-     * arrives. A playlist of 400 tracks is four requests, and the count the
-     * host shows is the real one.
+     * With a session this walks the Web API's pages of 100, so a playlist of
+     * 400 tracks is four requests and the count the host shows is the real one.
+     * Without one the public web player's own page is read instead — a share
+     * link has to work for someone who never set up a cookie, and what that page
+     * carries is the whole list Spotify itself shows.
      */
-    suspend fun loadPlaylist(id: String): Playlist {
+    suspend fun loadPlaylist(id: String): Playlist =
+        if (SpotifyToken.accessToken() != null) loadPlaylistFromApi(id) else loadPublicPlaylist(id)
+
+    private suspend fun loadPlaylistFromApi(id: String): Playlist {
         val meta = api("$API/playlists/$id")
         val name = meta["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: "Spotify playlist"
         val tracks = mutableListOf<Track>()
@@ -164,6 +171,60 @@ object SpotifyImport {
         val durationMs = track["duration_ms"]?.jsonPrimitive?.longOrNull ?: 0L
         val album = (track["album"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
         return Track(title, artists, durationMs, album)
+    }
+
+    /**
+     * A playlist read from its public web-player page.
+     *
+     * `__NEXT_DATA__` carries the page's own track list — title, artist and
+     * length — which is enough to match against YouTube Music. Private playlists
+     * are not on that page at all, which is one of the things the cookie buys.
+     */
+    private suspend fun loadPublicPlaylist(id: String): Playlist {
+        val response = Http.getRaw(
+            "https://open.spotify.com/embed/playlist/$id",
+            headers = mapOf("User-Agent" to BROWSER_UA, "Accept" to "text/html"),
+        )
+        if (response.status !in 200..299) {
+            error("That playlist could not be read. Add the sp_dc cookie in Settings to import private playlists.")
+        }
+        val html = response.body ?: error("Spotify sent an empty page.")
+        val payload = Regex(
+            """<script id="__NEXT_DATA__" type="application/json">(.*?)</script>""",
+            RegexOption.DOT_MATCHES_ALL,
+        ).find(html)?.groupValues?.get(1)
+            ?: error("Spotify's page did not contain a track list. Add the sp_dc cookie in Settings and try again.")
+        val entity = findEntity(json.parseToJsonElement(payload))
+            ?: error("That link is not a public Spotify playlist.")
+        val name = entity["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: "Spotify playlist"
+        val tracks = (entity["trackList"] as? kotlinx.serialization.json.JsonArray)
+            ?.mapNotNull { item ->
+                val track = item as? JsonObject ?: return@mapNotNull null
+                val title = track["title"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                if (title.isEmpty()) return@mapNotNull null
+                Track(
+                    title = title,
+                    artists = track["subtitle"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    durationMs = track["duration"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    album = null,
+                )
+            }
+            .orEmpty()
+        return Playlist(id, name, tracks)
+    }
+
+    /** The object anywhere in a page's JSON that carries a `trackList`. */
+    private fun findEntity(element: kotlinx.serialization.json.JsonElement): JsonObject? {
+        val obj = element as? JsonObject
+        if (obj == null) {
+            (element as? kotlinx.serialization.json.JsonArray)?.forEach { child ->
+                findEntity(child)?.let { return it }
+            }
+            return null
+        }
+        if (obj["trackList"] != null) return obj
+        obj.values.forEach { child -> findEntity(child)?.let { return it } }
+        return null
     }
 
     private suspend fun api(url: String, query: Map<String, String> = emptyMap()): JsonObject {
