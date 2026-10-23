@@ -139,6 +139,9 @@ struct FeedSectionHeader: View {
 /// card navigates to its detail page (spec parity with upstream's two-row cards).
 struct ShelfCarousel: View {
     let shelf: FeedShelf
+    /// The cards to draw, when the caller has already taken some of them for
+    /// itself — a promoted "latest release" leaves the rest of its shelf here.
+    var items: [ShelfCard]? = nil
     /// Flips which end of a card that has *both* ids wins. See
     /// [ShelfCardView] for why the two orders are not interchangeable.
     var preferTrack: Bool = false
@@ -153,7 +156,7 @@ struct ShelfCarousel: View {
             FeedSectionHeader(title: shelf.title, subtitle: shelf.subtitle, onShowAll: onShowAll)
             ShelfScroller(inset: inset) {
                 LazyHStack(alignment: .top, spacing: 14) {
-                    ForEach(shelf.items) { card in
+                    ForEach(items ?? shelf.items) { card in
                         if sizeClass == .regular {
                             // A wide window shows fewer, larger sleeves: the card
                             // is a quarter of the run, and the artwork follows the

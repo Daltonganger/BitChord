@@ -191,10 +191,13 @@ struct DetailView: View {
                             .padding(.top, 28)
                         }
 
-                        ForEach(displaySections(page)) { shelf in
-                            ShelfCarousel(shelf: shelf, inset: 28)
-                                .padding(.horizontal, 28)
-                                .padding(.top, 28)
+                        ForEach(page.sections) { shelf in
+                            let cards = carouselItems(shelf, page: page)
+                            if !cards.isEmpty {
+                                ShelfCarousel(shelf: shelf, items: cards, inset: 28)
+                                    .padding(.horizontal, 28)
+                                    .padding(.top, 28)
+                            }
                         }
                     }
                     .frame(maxWidth: 860)
@@ -768,14 +771,31 @@ struct DetailView: View {
     /// time rather than a catalogue figure (F10).
     private func releaseInfoLine(_ page: DetailPageModel) -> String {
         let songs = page.songs
+        let partial = hasMoreSongs
         var pieces: [String] = []
         if let year = releaseYear(page) { pieces.append(year) }
         if !songs.isEmpty {
-            pieces.append("\(songs.count) \(songs.count == 1 ? "song" : "songs")")
-            let total = songs.reduce(0) { $0 + durationToSeconds($1.durationText) }
-            if total > 0 { pieces.append(lengthText(total)) }
+            // A long playlist arrives a page at a time. Until the last page has
+            // landed, the count is "at least this many" and the length is a
+            // fragment, so neither is presented as if it were the total.
+            pieces.append(partial
+                ? "\(songs.count)+ songs"
+                : "\(songs.count) \(songs.count == 1 ? "song" : "songs")")
+            if !partial {
+                let total = songs.reduce(0) { $0 + durationToSeconds($1.durationText) }
+                if total > 0 { pieces.append(lengthText(total)) }
+            }
         }
         return pieces.joined(separator: " · ")
+    }
+
+    /// Whether YouTube still has rows for this page that haven't been fetched.
+    ///
+    /// The detail page loads one page and asks for the next when the list is
+    /// scrolled to its end, so the songs in memory are a window onto the
+    /// playlist until this is false.
+    private var hasMoreSongs: Bool {
+        !(continuation ?? "").isEmpty
     }
 
     /// The four-digit year in a page subtitle, when it has one.
@@ -806,11 +826,15 @@ struct DetailView: View {
         }
     }
 
-    /// The shelves to draw as carousels. The latest release has already been
-    /// shown once, under the header, so it is not shown again below.
-    private func displaySections(_ page: DetailPageModel) -> [FeedShelf] {
-        let promoted = latestReleaseShelf(page)?.id
-        return page.sections.filter { $0.id != promoted }
+    /// The cards a shelf should draw.
+    ///
+    /// An artist's latest release is promoted to the card under the header, so
+    /// its first card is not drawn twice — but only that card. The shelf itself
+    /// keeps its title and the rest of its releases, which used to disappear
+    /// with it.
+    private func carouselItems(_ shelf: FeedShelf, page: DetailPageModel) -> [ShelfCard] {
+        guard shelf.id == latestReleaseShelf(page)?.id else { return shelf.items }
+        return Array(shelf.items.dropFirst())
     }
 
     /// The promoted latest release: sleeve, title, credit, tappable through to
@@ -863,6 +887,10 @@ struct DetailView: View {
 
     /// Upstream's `playtimeSummary`: "16 songs, 48 minutes"
     private func playtimeSummary(_ songs: [DetailPageModel.SongPayload]) -> String {
+        // Same rule as the header: a partial list gets a floor, not a total.
+        if hasMoreSongs {
+            return "\(songs.count)+ songs"
+        }
         let count = "\(songs.count) \(songs.count == 1 ? "song" : "songs")"
         let totalSeconds = songs.reduce(0) { sum, s in
             sum + durationToSeconds(s.durationText)
