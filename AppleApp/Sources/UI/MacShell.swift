@@ -313,7 +313,11 @@ private struct MacLyricsInspector: View {
                 onSeek: { controller.seek(to: $0) },
                 translator: controller.lyricsTranslator,
                 trackId: controller.current?.id ?? "",
-                offsetMs: offsetMs
+                offsetMs: offsetMs,
+                trackTitle: controller.current?.title ?? "",
+                trackArtist: controller.current?.artist ?? "",
+                artworkData: controller.current?.artworkData,
+                artworkUrl: controller.current?.thumbnailUrl
             )
         }
         .onReceive(NotificationCenter.default.publisher(for: .lyricsOffsetChanged)) { _ in
