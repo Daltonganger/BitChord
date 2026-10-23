@@ -269,23 +269,11 @@ struct IPadSidebarView: View {
             Text("BitChord")
                 .font(.title3.weight(.semibold))
             Spacer(minLength: 0)
-            Button {
-                choose(.search)
-                appModel.focusSearch = true
-            } label: {
-                Image(systemName: "magnifyingglass")
-                    .scaledFont(size: 16, weight: .medium)
-                    .foregroundStyle(.primary)
-                    .frame(width: 34, height: 34)
-                    .contentShape(.rect)
-            }
-            .buttonStyle(ProfileCircleButtonStyle())
-            .accessibilityLabel("Search")
         }
-        .padding(.leading, 18)
-        .padding(.trailing, 10)
+        .padding(.horizontal, 18)
+        .frame(height: 44)
         .padding(.top, 8)
-        .padding(.bottom, 10)
+        .padding(.bottom, 4)
     }
 
     private var footer: some View {
