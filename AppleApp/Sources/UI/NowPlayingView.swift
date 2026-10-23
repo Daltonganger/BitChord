@@ -150,6 +150,20 @@ struct NowPlayingView: View {
             .keyboardShortcut(.cancelAction)
             .labelStyle(.iconOnly)
             .help("Close")
+            .accessibilityLabel("Close")
+        }
+
+        // The player already hides the title and the toolbar's background; going
+        // full screen takes the traffic lights and the menu bar with it, which
+        // is the borderless player upstream offers.
+        ToolbarItem(placement: .navigation) {
+            Button("Toggle Full Screen", systemImage: "arrow.up.left.and.arrow.down.right") {
+                NSApp.keyWindow?.toggleFullScreen(nil)
+            }
+            .keyboardShortcut("f", modifiers: [.command, .control])
+            .labelStyle(.iconOnly)
+            .help("Toggle Full Screen")
+            .accessibilityLabel("Toggle Full Screen")
         }
 
         if #available(macOS 26.0, *) {
@@ -1598,7 +1612,7 @@ private extension View {
 /// Queue column. The current song stays in the compact player header when
 /// there is no neighbouring player column (portrait); wide layouts already have
 /// that information beside the queue, so they omit the duplicate header.
-private struct UpNextPane: View {
+struct UpNextPane: View {
     @Environment(PlaybackController.self) private var controller
     @Environment(AuthController.self) private var auth
 
