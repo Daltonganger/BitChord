@@ -444,6 +444,11 @@ struct SongRow: View {
     @Environment(ToastCenter.self) private var toast
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var hovering = false
+    #if os(macOS)
+    /// The Mac list selection. A click selects the row the way a Mac list does;
+    /// the second click of a double click is what starts playback.
+    @State private var selected = false
+    #endif
 
     /// How many lines a track's text may take.
     ///
@@ -455,61 +460,42 @@ struct SongRow: View {
     private var titleLines: Int? { dynamicTypeSize.isAccessibilitySize ? 2 : 1 }
 
     private var active: Bool { isCurrent || controller.current?.id == entry.id }
+    /// Whether a Mac click has selected this row.
+    private var isSelected: Bool {
+        #if os(macOS)
+        selected
+        #else
+        false
+        #endif
+    }
     private var buffering: Bool { controller.current?.id == entry.id && controller.isBuffering }
 
     var body: some View {
-        Button(action: play) {
-            HStack(spacing: 12) {
-                ZStack {
-                    ArtworkView(entry: entry, side: 44)
-                        .clipShape(.rect(cornerRadius: 6, style: .continuous))
-                    if buffering {
-                        ProgressView().controlSize(.small)
-                    }
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.title)
-                        .font(.body.weight(active ? .semibold : .regular))
-                        .foregroundStyle(active ? Color.accentColor : .primary)
-                        .lineLimit(titleLines)
-                    if !entry.artist.isEmpty {
-                        Text(entry.artist)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(titleLines)
-                    }
-                }
-                Spacer(minLength: 8)
-                if let text = entry.durationText, !text.isEmpty {
-                    Text(text)
-                        .font(.callout.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                Image(.bchChevronRight)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 12)
-                    .foregroundStyle(.tertiary)
-                    .opacity(hovering ? 1 : 0)
-                    .decorative()
+        Group {
+            #if os(macOS)
+            rowContent
+                .contentShape(.rect)
+                // Double click first: SwiftUI resolves the more specific gesture,
+                // so a play does not also land as a selection click.
+                .onTapGesture(count: 2) { play() }
+                .onTapGesture { selected = true }
+            #else
+            // A phone row is the play button itself: there is no pointer to
+            // select with, and a double click would mean starting it twice.
+            Button(action: play) {
+                rowContent
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 8)
-            .contentShape(.rect)
+            .buttonStyle(.plain)
+            #endif
         }
-        .buttonStyle(.plain)
         .background {
             RoundedRectangle(cornerRadius: Theme.Metrics.rowRadius, style: .continuous)
                 .fill(rowFill)
         }
         .onHover { hovering = $0 }
-        // One stop per row, not four. Title, artist, duration and chevron read as
-        // separate elements otherwise, so a screen-reader user had to swipe four
-        // times to hear one track — and the artwork announced its asset name on
-        // top of that.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
-        .accessibilityAddTraits(active ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAddTraits(active || isSelected ? [.isButton, .isSelected] : .isButton)
         .songContextMenu(entry, playlistBrowseId: playlistBrowseId, playlistOwned: playlistOwned)
         #if os(iOS)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
@@ -557,7 +543,53 @@ struct SongRow: View {
         #endif
     }
 
+    /// The lane itself, shared by both platforms' interaction wrappers.
+    private var rowContent: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                ArtworkView(entry: entry, side: 44)
+                    .clipShape(.rect(cornerRadius: 6, style: .continuous))
+                if buffering {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.title)
+                    .font(.body.weight(active ? .semibold : .regular))
+                    .foregroundStyle(active ? Color.accentColor : .primary)
+                    .lineLimit(titleLines)
+                if !entry.artist.isEmpty {
+                    Text(entry.artist)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(titleLines)
+                }
+            }
+            Spacer(minLength: 8)
+            if let text = entry.durationText, !text.isEmpty {
+                Text(text)
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Image(.bchChevronRight)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 12)
+                .foregroundStyle(.tertiary)
+                .opacity(hovering ? 1 : 0)
+                .decorative()
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .contentShape(.rect)
+    }
+
     private var rowFill: Color {
+        #if os(macOS)
+        // A selected row outranks the playing and hover tints: it is the row the
+        // next double click would play.
+        if selected { return Color.accentColor.opacity(0.16) }
+        #endif
         if active { return Color.primary.opacity(0.08) }
         if hovering { return Color.primary.opacity(0.05) }
         return .clear
