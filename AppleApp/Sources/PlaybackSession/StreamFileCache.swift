@@ -158,6 +158,56 @@ actor StreamFileCache {
         DiskCache.clearFolder(folder)
     }
 
+    // MARK: - What is on disk
+
+    /// One cached track, as the Cached Songs list needs it.
+    struct CachedEntry: Identifiable, Sendable {
+        let videoId: String
+        let bytes: Int64
+        let durationSeconds: Int?
+        let codec: String
+        let modified: Date
+
+        var id: String { videoId }
+    }
+
+    /// Every finished track in the cache, newest first.
+    ///
+    /// The manifest is what says whether a file is a finished track or a
+    /// half-written one, so a file without a readable manifest is not listed —
+    /// it is not something the listener could play from the cache anyway.
+    func entries() -> [CachedEntry] {
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
+        )) ?? []
+        var out: [CachedEntry] = []
+        for manifestFile in urls where manifestFile.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: manifestFile),
+                  let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
+                  manifest.complete else { continue }
+            let audio = manifestFile.deletingPathExtension()
+            guard FileManager.default.fileExists(atPath: audio.path) else { continue }
+            let values = try? audio.resourceValues(forKeys: Set(keys))
+            out.append(CachedEntry(
+                videoId: manifest.youtubeVideoId ?? manifest.recordingIdentity,
+                bytes: Int64(values?.fileSize ?? 0),
+                durationSeconds: manifest.durationSeconds,
+                codec: manifest.codec,
+                modified: values?.contentModificationDate ?? .distantPast
+            ))
+        }
+        return out.sorted { $0.modified > $1.modified }
+    }
+
+    /// Drops one track's cached audio and its manifest.
+    func remove(_ videoId: String) {
+        let url = cachedURL(for: videoId)
+        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: manifestURL(url.path))
+        inFlight.removeValue(forKey: videoId)
+    }
+
     /// Drops everything cached for one track, and forgets where it was growing.
     ///
     /// The growing path has to go too, and not only the finished copy: a revert

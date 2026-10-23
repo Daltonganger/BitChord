@@ -1982,6 +1982,13 @@ struct OnDeviceView: View {
                     subtitle: local.scanned ? "\(local.tracks.count) song\(local.tracks.count == 1 ? "" : "s")" : "Choose a folder to scan"
                 )
             }
+            NavigationLink(destination: CachedSongsView()) {
+                deviceRow(
+                    systemImage: "internaldrive.fill", tint: .orange,
+                    title: "Cached Songs",
+                    subtitle: "Songs kept on disk for instant and offline playback"
+                )
+            }
             NavigationLink(destination: WebDavLibraryView()) {
                 deviceRow(
                     systemImage: "cloud.fill", tint: .teal,

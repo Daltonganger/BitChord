@@ -198,6 +198,7 @@ struct ReplayView: View {
 
     private var emptyCopy: LocalizedStringKey {
         switch period {
+        case .thisWeek: "Nothing from this week yet. Play a few songs and it will fill in."
         case .thisMonth: "There isn't much from this month yet. Play a few songs and it will fill in."
         case .thisYear: "Play a few songs this year and this page will fill in with minutes, top tracks and artists."
         case .allTime: "Play a few songs and this page will fill in with minutes, top tracks and artists."
@@ -311,7 +312,7 @@ struct ReplayView: View {
 
     private var periodPicker: some View {
         HStack(spacing: 2) {
-            ForEach([ListeningPeriod.thisYear, .allTime, .thisMonth]) { item in
+            ForEach([ListeningPeriod.thisWeek, .thisMonth, .thisYear, .allTime]) { item in
                 Button {
                     Haptics.play(.select)
                     period = item

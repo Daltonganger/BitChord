@@ -5,6 +5,7 @@ import BitChordShared
 /// Named separately from the UI's `ReplayPeriod` so both can compile until Replay
 /// binds `summary(period:)`.
 enum ListeningPeriod: String, CaseIterable, Sendable, Identifiable {
+    case thisWeek
     case thisMonth
     case thisYear
     case allTime
@@ -13,6 +14,7 @@ enum ListeningPeriod: String, CaseIterable, Sendable, Identifiable {
 
     var chip: String {
         switch self {
+        case .thisWeek: "This Week"
         case .thisMonth: "This Month"
         case .thisYear: "This Year"
         case .allTime: "All Time"
@@ -23,6 +25,11 @@ enum ListeningPeriod: String, CaseIterable, Sendable, Identifiable {
         let cal = Calendar.current
         switch self {
         case .allTime: return true
+        case .thisWeek:
+            // A week can straddle two months, so both are read: the file of the
+            // month the week started in, and the current one.
+            guard let start = Self.weekStart(now) else { return month == ListeningStore.monthKey(now) }
+            return month == ListeningStore.monthKey(start) || month == ListeningStore.monthKey(now)
         case .thisYear:
             return month.hasPrefix(String(format: "%04d", cal.component(.year, from: now)))
         case .thisMonth:
@@ -30,9 +37,19 @@ enum ListeningPeriod: String, CaseIterable, Sendable, Identifiable {
         }
     }
 
+    /// The start of the calendar week `now` falls in — Monday in most locales.
+    static func weekStart(_ now: Date = Date()) -> Date? {
+        Calendar.current.dateInterval(of: .weekOfYear, for: now)?.start
+    }
+
     func label(now: Date = Date()) -> String {
         let cal = Calendar.current
         switch self {
+        case .thisWeek:
+            guard let start = Self.weekStart(now) else { return "This Week" }
+            let fmt = DateFormatter()
+            fmt.dateFormat = "d MMM"
+            return "\(fmt.string(from: start)) – \(fmt.string(from: now))"
         case .thisMonth:
             let fmt = DateFormatter()
             fmt.dateFormat = "MMMM yyyy"
@@ -126,6 +143,9 @@ final class ListeningStore {
         var albums: [NameEntry] = []
         var hours: [Double] = Array(repeating: 0, count: 24)
         var days: [Int: Double] = [:]
+        /// Day key ("2026-10-23") → that day's tracks. Optional so a file
+        /// written before F12 still decodes.
+        var dayTracks: [String: [Track]]? = nil
     }
 
     private struct ExportEnvelope: Codable {
@@ -140,6 +160,8 @@ final class ListeningStore {
         var albums: [String: NameEntry] = [:]
         var hours: [Double] = Array(repeating: 0, count: 24)
         var days: [Int: Double] = [:]
+        /// Per-day track totals, for the week Replay. Only recent days are kept.
+        var dayTracks: [String: [Track]] = [:]
 
         func snapshot() -> StoredBucket {
             StoredBucket(
@@ -148,7 +170,8 @@ final class ListeningStore {
                 artists: Array(artists.values),
                 albums: Array(albums.values),
                 hours: hours,
-                days: days
+                days: days,
+                dayTracks: dayTracks
             )
         }
 
@@ -191,7 +214,8 @@ final class ListeningStore {
                 artists: artists,
                 albums: albums,
                 hours: hours,
-                days: stored.days
+                days: stored.days,
+                dayTracks: stored.dayTracks ?? [:]
             )
         }
     }
@@ -291,6 +315,7 @@ final class ListeningStore {
     /// Period-filtered top songs / artists / albums / genres.
     func summary(period: ListeningPeriod, includeGenres: Bool = true) -> ReplaySummary {
         persist()
+        if period == .thisWeek { return weekSummary(includeGenres: includeGenres) }
         let months = collected(period: period)
         var tracks: [String: Track] = [:]
         var artists: [String: NameEntry] = [:]
@@ -351,7 +376,37 @@ final class ListeningStore {
             if earliest == nil || month.month < earliest! { earliest = month.month }
         }
 
-        // Migrated v1 months may have tracks but empty artist/album maps.
+        return assemble(
+            tracks: tracks,
+            artists: artists,
+            albums: albums,
+            hours: hours,
+            days: days,
+            earliest: earliest,
+            period: period,
+            includeGenres: includeGenres
+        )
+    }
+
+
+    /// The shared tail of every period: rank what was collected and describe it.
+    ///
+    /// Split out so the week can be built from its per-day rows and still be
+    /// ranked, labelled and described by exactly the same code as a month or a
+    /// year.
+    private func assemble(
+        tracks source: [String: Track],
+        artists sourceArtists: [String: NameEntry],
+        albums sourceAlbums: [String: NameEntry],
+        hours: [Double],
+        days: [String: Double],
+        earliest: String?,
+        period: ListeningPeriod,
+        includeGenres: Bool
+    ) -> ReplaySummary {
+        var tracks = source
+        var artists = sourceArtists
+        var albums = sourceAlbums
         if artists.isEmpty || albums.isEmpty {
             for t in tracks.values {
                 if artists.isEmpty {
@@ -412,6 +467,92 @@ final class ListeningStore {
             distinctAlbums: albums.count,
             since: earliest
         )
+    }
+
+    /// Replay for the calendar week so far.
+    ///
+    /// Built from the per-day rows rather than the month totals, because a week
+    /// begins mid-month and is not a subset of any one bucket. Artists and albums
+    /// are derived from the week's tracks by the same rules the month aggregation
+    /// uses; the hour histogram is left empty, since hours are stored per month
+    /// and a week's share of them is not something the data says.
+    private func weekSummary(includeGenres: Bool) -> ReplaySummary {
+        let now = Date()
+        let cal = Calendar.current
+        let start = ListeningPeriod.weekStart(now) ?? now
+        let firstDay = cal.startOfDay(for: start)
+
+        var tracks: [String: Track] = [:]
+        var artists: [String: NameEntry] = [:]
+        var albums: [String: NameEntry] = [:]
+        var days: [String: Double] = [:]
+
+        for month in collected(period: .thisWeek) {
+            for (day, entries) in month.dayTracks ?? [:] {
+                guard let date = Self.date(fromDayKey: day), date >= firstDay, date <= now else { continue }
+                for entry in entries {
+                    if var existing = tracks[entry.id] {
+                        existing.ms += entry.ms
+                        existing.plays += entry.plays
+                        if existing.art == nil { existing.art = entry.art }
+                        tracks[entry.id] = existing
+                    } else {
+                        tracks[entry.id] = entry
+                    }
+                    if let lead = Self.primaryArtist(entry.artist) {
+                        let key = lead.lowercased()
+                        var row = artists[key] ?? NameEntry(
+                            name: lead, sub: nil, art: entry.art, id: entry.artistId,
+                            ms: 0, plays: 0
+                        )
+                        row.ms += entry.ms
+                        row.plays += entry.plays
+                        if row.id == nil { row.id = entry.artistId }
+                        if row.art == nil { row.art = entry.art }
+                        artists[key] = row
+                    }
+                    if let album = entry.album, !album.isEmpty {
+                        let key = Self.albumKey(album, entry.artist)
+                        var row = albums[key] ?? NameEntry(
+                            name: album, sub: entry.artist, art: entry.art, id: entry.albumId,
+                            ms: 0, plays: 0
+                        )
+                        row.ms += entry.ms
+                        row.plays += entry.plays
+                        if row.id == nil { row.id = entry.albumId }
+                        if row.art == nil { row.art = entry.art }
+                        albums[key] = row
+                    }
+                    days[day, default: 0] += entry.ms
+                }
+            }
+        }
+
+        return assemble(
+            tracks: tracks,
+            artists: artists,
+            albums: albums,
+            hours: Array(repeating: 0, count: 24),
+            days: days,
+            earliest: ListeningStore.monthKey(start),
+            period: .thisWeek,
+            includeGenres: includeGenres
+        )
+    }
+
+    /// Names for the playback cache, which stores audio and a hash rather than
+    /// titles. The newest play wins, because a track's name can be corrected and
+    /// the cache is keyed by the audio, not by the name in force when it landed.
+    func trackMetadata() -> [String: Track] {
+        persist()
+        var out: [String: Track] = [:]
+        for month in collected(period: .allTime) {
+            for track in month.tracks {
+                if let existing = out[track.id], (existing.last ?? 0) > (track.last ?? 0) { continue }
+                out[track.id] = track
+            }
+        }
+        return out
     }
 
     /// Latest recorded play time for each track, in milliseconds since epoch.
@@ -496,6 +637,21 @@ final class ListeningStore {
             open.albums[key] = row
         }
 
+        // The week's summary is built from the days themselves, because a week
+        // crosses the month boundary the other buckets are keyed on.
+        let dayKey = Self.isoDay(at)
+        var dayTracks = open.dayTracks[dayKey] ?? []
+        if let index = dayTracks.firstIndex(where: { $0.id == id }) {
+            dayTracks[index].ms += playedMs
+            if countsAsPlay { dayTracks[index].plays += 1 }
+            dayTracks[index].last = track.last
+            dayTracks[index].title = track.title
+            dayTracks[index].artist = track.artist
+        } else {
+            dayTracks.append(track)
+        }
+        open.dayTracks[dayKey] = dayTracks
+
         let hour = Calendar.current.component(.hour, from: at)
         if hour >= 0 && hour < 24 { open.hours[hour] += playedMs }
         let day = Calendar.current.component(.day, from: at)
@@ -525,7 +681,15 @@ final class ListeningStore {
         pruneFolder()
     }
 
+    /// How many days of per-day tracks a month bucket keeps. The week needs a
+    /// fortnight at most; a little more costs nothing and covers a stale clock.
+    private static let keptDays = 21
+
     private func pruneOpen() {
+        if open.dayTracks.count > Self.keptDays {
+            let keep = open.dayTracks.keys.sorted().suffix(Self.keptDays)
+            open.dayTracks = open.dayTracks.filter { keep.contains($0.key) }
+        }
         if open.tracks.count > Self.maxTracks {
             let drop = open.tracks.values.sorted { $0.ms < $1.ms }.prefix(open.tracks.count - Self.maxTracks)
             drop.forEach { open.tracks.removeValue(forKey: $0.id) }
@@ -654,6 +818,17 @@ final class ListeningStore {
     nonisolated static func monthKey(_ date: Date = Date()) -> String {
         let cal = Calendar.current
         return String(format: "%04d-%02d", cal.component(.year, from: date), cal.component(.month, from: date))
+    }
+
+    /// The calendar day a day key names, in this locale.
+    nonisolated private static func date(fromDayKey key: String) -> Date? {
+        let parts = key.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        var components = DateComponents()
+        components.year = parts[0]
+        components.month = parts[1]
+        components.day = parts[2]
+        return Calendar.current.date(from: components)
     }
 
     nonisolated private static func isoDay(_ date: Date) -> String {

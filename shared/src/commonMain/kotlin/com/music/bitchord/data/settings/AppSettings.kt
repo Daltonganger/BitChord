@@ -330,15 +330,29 @@ object AppSettings {
         setPrioritizeSyllableSync(false)
     }
 
+    /** The "Unlimited" cache setting: a ceiling no disk will ever reach. */
+    const val UNLIMITED_CACHE_LIMIT_BYTES = Long.MAX_VALUE
+
     private val _audioCacheLimitBytes = MutableStateFlow(
         settings.getLong("audio_cache_limit_bytes", DEFAULT_CACHE_LIMIT_BYTES)
-            .coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES),
+            .coerceCacheLimit(),
     )
     val audioCacheLimitBytes: StateFlow<Long> = _audioCacheLimitBytes.asStateFlow()
     fun setAudioCacheLimitBytes(value: Long) {
-        _audioCacheLimitBytes.value = value.coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
+        _audioCacheLimitBytes.value = value.coerceCacheLimit()
         settings.putLong("audio_cache_limit_bytes", _audioCacheLimitBytes.value)
     }
+
+    /**
+     * A cache limit inside the allowed range — or the unlimited sentinel.
+     *
+     * Unlimited has to survive the clamp, which is why it is checked first:
+     * coercing `Long.MAX_VALUE` back to the 10 GB ceiling would silently turn
+     * "Unlimited" into "10 GB".
+     */
+    private fun Long.coerceCacheLimit(): Long =
+        if (this >= UNLIMITED_CACHE_LIMIT_BYTES) UNLIMITED_CACHE_LIMIT_BYTES
+        else coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
 
     // ---- Local library -----------------------------------------------------
     private val _localLibraryPath = MutableStateFlow(settings.getString("local_library_path", ""))
