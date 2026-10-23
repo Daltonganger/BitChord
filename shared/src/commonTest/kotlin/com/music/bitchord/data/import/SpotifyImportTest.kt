@@ -159,4 +159,33 @@ class SpotifyImportTest {
         )
         assertEquals(SpotifyImport.Status.MATCHED, match.status)
     }
+
+    @Test
+    fun aPathfinderPageReadsTracksLengthsAndTheTotal() {
+        val body = """
+            {"data":{"playlistV2":{"content":{"totalCount":150,"items":[
+              {"itemV2":{"data":{"name":"Lucid Dreams","trackDuration":{"totalMilliseconds":239835},
+                "albumOfTrack":{"name":"Goodbye & Good Riddance"},
+                "artists":{"items":[{"profile":{"name":"Juice WRLD"}}]}}}},
+              {"itemV2":{"data":{"name":"  ","artists":{"items":[]}}}},
+              {"itemV2":{"data":{"name":"Love Me Like You Do",
+                "artists":{"items":[{"profile":{"name":"Ellie Goulding"}},{"profile":{"name":"Someone"}}]}}}}
+            ]}}}}
+        """.trimIndent()
+        val (page, total) = SpotifyImport.parsePathfinderPage(body)
+        assertEquals(150, total)
+        // Three rows were read, even though one had no title, so paging advances by three.
+        assertEquals(3, page.read)
+        assertEquals(listOf("Lucid Dreams", "Love Me Like You Do"), page.tracks.map { it.title })
+        assertEquals(239_835L, page.tracks[0].durationMs)
+        assertEquals("Goodbye & Good Riddance", page.tracks[0].album)
+        assertEquals("Ellie Goulding, Someone", page.tracks[1].artists)
+    }
+
+    @Test
+    fun aRefusedPathfinderPageEndsPaging() {
+        val (page, total) = SpotifyImport.parsePathfinderPage("""{"errors":[{"message":"denied"}]}""")
+        assertEquals(0, page.read)
+        assertNull(total)
+    }
 }
