@@ -196,7 +196,7 @@ struct ReplayView: View {
         .environment(\.colorScheme, .dark)
     }
 
-    private var emptyCopy: String {
+    private var emptyCopy: LocalizedStringKey {
         switch period {
         case .thisMonth: "There isn't much from this month yet. Play a few songs and it will fill in."
         case .thisYear: "Play a few songs this year and this page will fill in with minutes, top tracks and artists."
@@ -796,26 +796,32 @@ private struct ReplayStoriesView: View {
         }
     }
 
+    /// One markdown sentence per card, not a `+` chain of fragments.
+    ///
+    /// Concatenating `Text` views splits each sentence into several catalog keys,
+    /// and a translator then cannot reorder the words or the bold emphasis. A
+    /// single key with `**…**` markers keeps the sentence whole and still renders
+    /// the emphasised run in bold.
     @ViewBuilder
     private var headline: some View {
         let s = model.summary
         switch current {
         case .intro:
-            Text("This is your ") + Text("Replay").bold() + Text(" — the year in music you actually played.")
+            Text("This is your **Replay** — the year in music you actually played.")
         case .minutes:
-            Text("You listened to ") + Text("\(ReplayModel.grouped(s.minutes)) minutes").bold() + Text(" of music.")
+            Text("You listened to **\(ReplayModel.grouped(s.minutes)) minutes** of music.")
         case .songs:
-            Text("You played ") + Text("\(s.totalPlays) songs").bold() + Text(", one was your anthem.")
+            Text("You played **\(s.totalPlays) songs**, one was your anthem.")
         case .artists:
-            Text("There was one ") + Text("artist").bold() + Text(" you never got tired of.")
+            Text("There was one **artist** you never got tired of.")
         case .albums:
-            Text("One ") + Text("album").bold() + Text(" you kept coming back to.")
+            Text("One **album** you kept coming back to.")
         case .genres:
-            Text("There was one ") + Text("genre").bold() + Text(" you came back to again and again.")
+            Text("There was one **genre** you came back to again and again.")
         case .habits:
-            Text("You got through ") + Text("\(s.distinctSongs) songs").bold() + Text(" by ") + Text("\(s.distinctArtists) artists").bold() + Text(".")
+            Text("You got through **\(s.distinctSongs) songs** by **\(s.distinctArtists) artists**.")
         case .summary:
-            Text("That was ") + Text(s.label).bold() + Text(".")
+            Text("That was **\(s.label)**.")
         }
     }
 

@@ -10,6 +10,9 @@ attributes:
 options:
   createIntermediateGroups: true
   developmentLanguage: en
+  # The locales the String Catalog ships. XcodeGen writes these into the
+  # project's knownRegions so the localized .lproj folders are packaged.
+  knownRegions: [en, de, es, fr, he, hi, id, it, ja, pl, pt-BR, ru, th, tr, vi, zh-Hans, zh-Hant, zh-HK]
   xcodeVersion: "15.0"
   deploymentTarget:
     iOS: "18.0"
