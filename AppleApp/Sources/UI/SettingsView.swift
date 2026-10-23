@@ -83,6 +83,7 @@ struct SettingsView: View {
     @State private var importPresented = false
     @State private var backupNote: String?
     @State private var cacheLimitMB = SettingsView.cacheLimitMegabytes()
+    @State private var cacheUnlimited = SettingsView.cacheIsUnlimited()
     @State private var loginPresented = false
     @State private var discordPresented = false
     /// The Automix models offer, raised when Automix is switched on without the
@@ -983,10 +984,12 @@ struct SettingsView: View {
             SettingsSliderRow(
                 glyph: .storage,
                 title: "Song Cache Limit",
-                subtitle: cacheLimitMB > 2048
-                    ? "Up to \(Self.formatCache(cacheLimitMB)) of downloaded audio kept on disk."
-                    : "Downloaded audio kept on disk for instant seeking and replays",
-                valueText: Self.formatCache(cacheLimitMB),
+                subtitle: cacheUnlimited
+                    ? "Every played song is kept until the disk is full."
+                    : cacheLimitMB > 2048
+                        ? "Up to \(Self.formatCache(cacheLimitMB)) of downloaded audio kept on disk."
+                        : "Downloaded audio kept on disk for instant seeking and replays",
+                valueText: cacheUnlimited ? "Unlimited" : Self.formatCache(cacheLimitMB),
                 value: Binding(
                     get: { Double(cacheLimitMB) },
                     set: { cacheLimitMB = Int($0.rounded()) }
@@ -994,6 +997,17 @@ struct SettingsView: View {
                 range: 512...10240,
                 step: 512
             )
+            .disabled(cacheUnlimited)
+
+            // Upstream's "Unlimited": the ceiling is a disk-space question, and
+            // someone with the room should be able to say yes to all of it.
+            Toggle("Unlimited", isOn: $cacheUnlimited)
+                .onChange(of: cacheUnlimited) { _, unlimited in
+                    AppSettings.shared.setAudioCacheLimitBytes(
+                        value: unlimited ? Int64.max : Swift.Int64(cacheLimitMB) * 1024 * 1024
+                    )
+                    Task { await StreamFileCache.shared.trim() }
+                }
             Button {
                 Task {
                     await StreamFileCache.shared.clear()
@@ -1318,7 +1332,14 @@ struct SettingsView: View {
 
     private static func cacheLimitMegabytes() -> Int {
         let bytes = PlatformSettings.shared.getLong(key: "audio_cache_limit_bytes", default: Int64(512) * 1024 * 1024)
+        // "Unlimited" is the sentinel the shared setting stores; the slider it
+        // disables remembers an ordinary size for when it is turned back off.
+        guard bytes < Int64.max else { return 1024 }
         return max(512, Int(bytes / (1024 * 1024)))
+    }
+
+    private static func cacheIsUnlimited() -> Bool {
+        PlatformSettings.shared.getLong(key: "audio_cache_limit_bytes", default: 0) >= Int64.max
     }
 
     private static func formatCache(_ mb: Int) -> String {
