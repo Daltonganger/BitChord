@@ -143,12 +143,14 @@ struct ShelfCarousel: View {
     /// [ShelfCardView] for why the two orders are not interchangeable.
     var preferTrack: Bool = false
     var onShowAll: (() -> Void)? = nil
+    /// The side padding of the page the shelf sits in; see [ShelfScroller].
+    var inset: CGFloat = 24
     @Environment(PlaybackController.self) private var controller
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             FeedSectionHeader(title: shelf.title, subtitle: shelf.subtitle, onShowAll: onShowAll)
-            ScrollView(.horizontal, showsIndicators: false) {
+            ShelfScroller(inset: inset) {
                 LazyHStack(alignment: .top, spacing: 14) {
                     ForEach(shelf.items) { card in
                         ShelfCardView(card: card, preferTrack: preferTrack)
@@ -156,6 +158,68 @@ struct ShelfCarousel: View {
                 }
                 .padding(.vertical, 2)
             }
+        }
+    }
+}
+
+/// The horizontal run every shelf sits in.
+///
+/// - **Edge to edge.** The run escapes its parent's side padding and puts it
+///   back as a content margin, so cards scroll out to the window edge instead
+///   of being sliced off at an invisible line 24 points in.
+/// - **Snaps** to a card's leading edge, so a shelf never rests on half a card.
+/// - **Pages on hover** (macOS, iPad with a pointer): chevrons at each end
+///   move one screenful, the way Music's shelves do. A trackpad swipe still works.
+struct ShelfScroller<Content: View>: View {
+    var inset: CGFloat = 24
+    @ViewBuilder var content: Content
+
+    @State private var position = ScrollPosition(edge: .leading)
+    @State private var offset: CGFloat = 0
+    @State private var viewport: CGFloat = 0
+    @State private var extent: CGFloat = 0
+    @State private var hovering = false
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            content.scrollTargetLayout()
+        }
+        .scrollTargetBehavior(.viewAligned)
+        .contentMargins(.horizontal, inset, for: .scrollContent)
+        .scrollPosition($position)
+        .onScrollGeometryChange(for: [CGFloat].self) { geometry in
+            [geometry.contentOffset.x, geometry.containerSize.width, geometry.contentSize.width]
+        } action: { _, value in
+            offset = value[0]; viewport = value[1]; extent = value[2]
+        }
+        .padding(.horizontal, -inset)
+        .overlay(alignment: .leading) { pager(forward: false) }
+        .overlay(alignment: .trailing) { pager(forward: true) }
+        .onHover { hovering = $0 }
+    }
+
+    @ViewBuilder
+    private func pager(forward: Bool) -> some View {
+        let canPage = forward ? offset + viewport < extent - 1 : offset > -inset + 1
+        if hovering, canPage {
+            Button {
+                let page = max(viewport - inset * 3, 120)
+                let target = forward
+                    ? min(offset + page, extent - viewport)
+                    : max(offset - page, -inset)
+                withAnimation(.smooth(duration: 0.35)) { position.scrollTo(x: target) }
+            } label: {
+                Image(systemName: forward ? "chevron.right" : "chevron.left")
+                    .font(.system(.body, weight: .semibold))
+                    .frame(width: 34, height: 34)
+                    .background(.regularMaterial, in: .circle)
+                    .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .help(forward ? "Next" : "Previous")
+            .accessibilityLabel(forward ? "Scroll shelf forward" : "Scroll shelf back")
+            .transition(.opacity)
         }
     }
 }
@@ -333,7 +397,7 @@ struct HeroShelf: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(shelf.title)
                 .font(.title2.weight(.bold))
-            ScrollView(.horizontal, showsIndicators: false) {
+            ShelfScroller {
                 LazyHStack(spacing: 16) {
                     ForEach(shelf.items) { card in
                         ShelfCardView(card: card)

@@ -179,7 +179,7 @@ struct DetailView: View {
                         }
 
                         ForEach(page.sections) { shelf in
-                            ShelfCarousel(shelf: shelf)
+                            ShelfCarousel(shelf: shelf, inset: 28)
                                 .padding(.horizontal, 28)
                                 .padding(.top, 28)
                         }

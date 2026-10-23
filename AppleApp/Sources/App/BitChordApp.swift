@@ -22,6 +22,10 @@ struct BitChordApp: App {
     /// screen being somewhere else.
     @State private var partySync: PartySync?
     @Environment(\.scenePhase) private var scenePhase
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var appDelegate
+    @AppStorage("menu_bar_player") private var menuBarPlayer = true
+    #endif
 
     var body: some Scene {
         WindowGroup {
@@ -71,6 +75,9 @@ struct BitChordApp: App {
                         await controller.verifySleepBehavior()
                         return
                     }
+                    #endif
+                    #if os(macOS)
+                    MacAppDelegate.controller = controller
                     #endif
                     CipherUnlockWiring.install()
                     ApplePoTokenWiring.install()
@@ -187,7 +194,30 @@ struct BitChordApp: App {
         .commands {
             SidebarCommands()
             PlaybackCommands(controller: controller, appModel: appModel)
+            MiniPlayerCommands()
         }
+#endif
+#if os(macOS)
+        Window("Mini Player", id: MiniPlayerWindow.id) {
+            MiniPlayerView()
+                .environment(controller)
+                .environment(appModel)
+                .preferredColorScheme(appModel.preferredScheme)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultPosition(.bottomTrailing)
+        .windowLevel(.floating)
+
+        MenuBarExtra(isInserted: $menuBarPlayer) {
+            MiniPlayerView(compact: true)
+                .environment(controller)
+                .environment(appModel)
+        } label: {
+            Image(systemName: "music.note")
+                .symbolEffect(.pulse, isActive: controller.isPlaying)
+        }
+        .menuBarExtraStyle(.window)
 #endif
 #if os(macOS)
         Settings {

@@ -49,6 +49,11 @@ targets:
         excludes:
           - "Widget/**"
       - path: Assets.xcassets
+      # Icon Composer app icon (Liquid Glass, with dark/tinted/clear modes on
+      # OS 26+). Same name as the asset-catalog AppIcon, which older systems use.
+      - path: AppIcon.icon
+        type: file
+        buildPhase: resources
       # UniFFI-generated NativeCore.swift lands here via scripts/build-native-core.sh.
       - path: Generated
         optional: true
