@@ -146,7 +146,7 @@ struct RootView: View {
             _ = old
         }
         #if os(macOS)
-        .frame(minWidth: 1080, minHeight: 700)
+        .frame(minWidth: 860, minHeight: 600)
         #endif
         .preferredColorScheme(appModel.preferredScheme)
         .environment(\.locale, appModel.appLanguage.isEmpty ? .autoupdatingCurrent : Locale(identifier: appModel.appLanguage))
@@ -220,15 +220,16 @@ struct RootView: View {
             Tab(value: AppModel.Tab.home) {
                 HomeView(feed: homeFeed).modifier(MacPlaybackChrome())
             } label: {
-                // Upstream's own Home glyph, not the play triangle the UI spec
-                // §6 claimed. `MainActivity.kt` puts `BitChordIcons.Home` on that
-                // tab; the spec's inventory was wrong about it.
-                sidebarLabel("Home", image: .bchHome)
+                // Navigation is one icon family: SF Symbols, as the system
+                // sidebar and tab bar draw them (upstream's own tab glyphs are
+                // now copies of these iOS shapes). Brand glyphs stay on the
+                // player, where they are the identity rather than chrome.
+                Label("Home", systemImage: "house")
             }
             Tab(value: AppModel.Tab.explore) {
                 ExploreView().modifier(MacPlaybackChrome())
             } label: {
-                sidebarLabel("Explore", image: .bchExplore)
+                Label("Explore", systemImage: "square.grid.2x2")
             }
             TabSection("Library") {
                 Tab(value: AppModel.Tab.libraryYouTube) {
@@ -242,14 +243,14 @@ struct RootView: View {
                 Tab(value: AppModel.Tab.librarySongs) {
                     LibraryView(lockedSection: .songs).modifier(MacPlaybackChrome())
                 } label: {
-                    sidebarLabel("Songs", image: .bchMusicNote)
+                    Label("Songs", systemImage: "music.note")
                 }
                 Tab(value: AppModel.Tab.libraryAlbums) {
                     LibraryView(lockedSection: .albums).modifier(MacPlaybackChrome())
                 } label: {
                     // Songs keeps the music note and Albums keeps the library
                     // shelves — the more fitting half of each conflicted pair.
-                    sidebarLabel("Albums", image: .bchLibrary)
+                    Label("Albums", systemImage: "square.stack")
                 }
                 Tab(value: AppModel.Tab.libraryArtists) {
                     LibraryView(lockedSection: .artists).modifier(MacPlaybackChrome())
@@ -282,7 +283,7 @@ struct RootView: View {
                 Tab(value: AppModel.Tab.libraryHistory) {
                     LibraryView(lockedSection: .history).modifier(MacPlaybackChrome())
                 } label: {
-                    sidebarLabel("History", image: .bchClock)
+                    Label("History", systemImage: "clock")
                 }
                 // Only when there is a share. A sidebar row that leads to "not set up
                 // yet" is a row that exists to be disappointing, and Sources is where
@@ -302,14 +303,14 @@ struct RootView: View {
             Tab(value: AppModel.Tab.search, role: .search) {
                 SearchView().modifier(MacPlaybackChrome())
             } label: {
-                sidebarLabel("Search", image: .bchSearch)
+                Label("Search", systemImage: "magnifyingglass")
             }
             #else
             if UIDevice.current.userInterfaceIdiom == .pad {
-                Tab("Home", image: "bch-home", value: AppModel.Tab.home) {
+                Tab("Home", systemImage: "house.fill", value: AppModel.Tab.home) {
                     HomeView(feed: homeFeed).modifier(iPadPlaybackChrome())
                 }
-                Tab("Explore", image: "bch-explore", value: AppModel.Tab.explore) {
+                Tab("Explore", systemImage: "square.grid.2x2.fill", value: AppModel.Tab.explore) {
                     ExploreView().modifier(iPadPlaybackChrome())
                 }
                 TabSection("Library") {
@@ -318,10 +319,10 @@ struct RootView: View {
                     } label: {
                         Label("Recent", systemImage: "clock.arrow.circlepath")
                     }
-                    Tab("Songs", image: "bch-music-note", value: AppModel.Tab.librarySongs) {
+                    Tab("Songs", systemImage: "music.note", value: AppModel.Tab.librarySongs) {
                         LibraryView(lockedSection: .songs).modifier(iPadPlaybackChrome())
                     }
-                    Tab("Albums", image: "bch-library", value: AppModel.Tab.libraryAlbums) {
+                    Tab("Albums", systemImage: "square.stack", value: AppModel.Tab.libraryAlbums) {
                         LibraryView(lockedSection: .albums).modifier(iPadPlaybackChrome())
                     }
                     Tab(value: AppModel.Tab.libraryArtists) {
@@ -349,7 +350,7 @@ struct RootView: View {
                     } label: {
                         Label("On Device", systemImage: "externaldrive")
                     }
-                    Tab("History", image: "bch-clock", value: AppModel.Tab.libraryHistory) {
+                    Tab("History", systemImage: "clock", value: AppModel.Tab.libraryHistory) {
                         LibraryView(lockedSection: .history).modifier(iPadPlaybackChrome())
                     }
                     if WebDavStore.shared.isConfigured {
@@ -360,20 +361,20 @@ struct RootView: View {
                         }
                     }
                 }
-                Tab("Search", image: "bch-search", value: AppModel.Tab.search, role: .search) {
+                Tab("Search", systemImage: "magnifyingglass", value: AppModel.Tab.search, role: .search) {
                     SearchView().modifier(iPadPlaybackChrome())
                 }
             } else {
-                Tab("Home", image: "bch-home", value: AppModel.Tab.home) {
+                Tab("Home", systemImage: "house.fill", value: AppModel.Tab.home) {
                     HomeView(feed: homeFeed)
                 }
-                Tab("Explore", image: "bch-explore", value: AppModel.Tab.explore) {
+                Tab("Explore", systemImage: "square.grid.2x2.fill", value: AppModel.Tab.explore) {
                     ExploreView()
                 }
-                Tab("Library", image: "bch-library", value: AppModel.Tab.library) {
+                Tab("Library", systemImage: "square.stack.fill", value: AppModel.Tab.library) {
                     LibraryView()
                 }
-                Tab("Search", image: "bch-search", value: AppModel.Tab.search, role: .search) {
+                Tab("Search", systemImage: "magnifyingglass", value: AppModel.Tab.search, role: .search) {
                     SearchView()
                 }
             }
@@ -414,18 +415,6 @@ struct RootView: View {
     }
 
 
-    #if os(macOS)
-    private func sidebarLabel(_ title: String, image: ImageResource) -> some View {
-        Label {
-            Text(title)
-        } icon: {
-            Image(image)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 16, height: 16)
-        }
-    }
-    #endif
 
     private var tabBinding: Binding<AppModel.Tab> {
         Binding(
@@ -531,19 +520,21 @@ private final class MacWindowToolbarView: NSView {
                     if let hidden = normalItems[item.itemIdentifier] { item.isHidden = hidden }
                 }
             }
-            // Keep SwiftUI's own control and action. Reinserting its identifier
-            // asks the window's existing toolbar delegate for the same item.
+            // The sidebar toggle belongs in the sidebar's own titlebar, beside
+            // the traffic lights, as in Music and Finder — not floating at the
+            // head of the content column. Keep SwiftUI's own control and
+            // action: reinserting its identifier asks the window's existing
+            // toolbar delegate for the same item.
             if let toggleIndex = toolbar.items.firstIndex(where: Self.isSidebarToggle),
                let dividerIndex = toolbar.items.firstIndex(where: {
                    $0 is NSTrackingSeparatorToolbarItem
-               }), toggleIndex < dividerIndex {
+               }), toggleIndex > dividerIndex {
                 let identifier = toolbar.items[toggleIndex].itemIdentifier
                 toolbar.removeItem(at: toggleIndex)
                 toolbar.insertItem(withItemIdentifier: identifier, at: dividerIndex)
             }
             if let toggle = toolbar.items.first(where: Self.isSidebarToggle) {
                 toggle.visibilityPriority = .user
-                toggle.isNavigational = true
             }
             normalItems = Dictionary(toolbar.items.map { ($0.itemIdentifier, $0.isHidden) }, uniquingKeysWith: { first, _ in first })
         }

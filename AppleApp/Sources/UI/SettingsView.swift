@@ -18,6 +18,9 @@ struct SettingsView: View {
 
     @State private var crossfade = Int(PlatformSettings.shared.getInt(key: "crossfade_seconds", default: 0))
     @AppStorage("dolby_atmos") private var dolbyAtmos = true
+    #if os(macOS)
+    @AppStorage("menu_bar_player") private var menuBarPlayer = true
+    #endif
     @State private var spatial = PlatformSettings.shared.getBoolean(key: "spatial_audio", default: false)
     @State private var automix = PlatformSettings.shared.getBoolean(key: "smart_fade_enabled", default: true)
     @State private var automixSequence = PlatformSettings.shared.getBoolean(key: "automix_smart_sequence", default: true)
@@ -833,6 +836,9 @@ struct SettingsView: View {
                     }
                 }
             }
+            #if os(macOS)
+            Toggle("Show Player in Menu Bar", isOn: $menuBarPlayer)
+            #endif
         } header: {
             Text("Appearance")
         }

@@ -336,6 +336,8 @@ struct SearchView: View {
                     }
                 }
                 .listStyle(.plain)
+                .listSectionSeparator(.hidden)
+                .scrollContentBackground(.hidden)
                 // Upstream's `scrollResetTrigger`: one list whose contents change,
                 // reset for each new request, so choosing a recent search cannot
                 // inherit the history's previous scroll position — or a previous
@@ -419,6 +421,7 @@ struct SearchView: View {
             }
         }
         .listRowInsets(EdgeInsets(top: 2, leading: 24, bottom: 2, trailing: 24))
+        .searchRowChrome()
     }
 
     /// The trimmed query, in one place. Everywhere below asks the same question
@@ -459,7 +462,6 @@ struct SearchView: View {
             // empty "Suggestions" header and no way onward.
             let recent = RecentSearchStore.load()
             if !suggestions.isEmpty || !recent.isEmpty {
-                if !suggestions.isEmpty { Divider() }
                 Section("Recent") {
                     ForEach(recent) { entity in
                         suggestionRow(entity.title)
@@ -468,6 +470,8 @@ struct SearchView: View {
             }
         }
         .listStyle(.plain)
+        .listSectionSeparator(.hidden)
+        .scrollContentBackground(.hidden)
     }
 
     /// One typeahead row: tapping the text searches it, tapping the arrow
@@ -503,6 +507,8 @@ struct SearchView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Fill search with \(term)")
         }
+        .padding(.vertical, 4)
+        .searchRowChrome()
     }
 
     private func browseRow(_ hit: SearchHitDTO) -> some View {
@@ -945,5 +951,16 @@ private struct SearchCategoryTile: View {
         }
         .aspectRatio(1.75, contentMode: .fit)
         .accessibilityLabel(category.title)
+    }
+}
+
+private extension View {
+    /// Search rows are spaced, not ruled. A plain `List` draws a hairline under
+    /// every row (and macOS a second one under each section header), which is
+    /// the "lines drawn across the page" look; artwork and spacing already
+    /// separate the rows.
+    func searchRowChrome() -> some View {
+        listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
     }
 }
