@@ -456,9 +456,7 @@ struct SongRow: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(active ? [.isButton, .isSelected] : .isButton)
-        .contextMenu {
-            SongActionButtons(entry: entry, playlistBrowseId: playlistBrowseId, setVideoId: entry.setVideoId, playlistOwned: playlistOwned)
-        }
+        .songContextMenu(entry, playlistBrowseId: playlistBrowseId, playlistOwned: playlistOwned)
         #if os(iOS)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             let playNext = PlatformSettings.shared.getBoolean(key: "swipe_to_play_next", default: false)

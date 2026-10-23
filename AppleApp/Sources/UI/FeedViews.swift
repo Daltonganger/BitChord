@@ -309,16 +309,7 @@ struct ShelfCardView: View {
         }
         .frame(width: 160, alignment: .leading)
         .contentShape(.rect)
-        .contextMenu {
-            if let videoId = card.videoId, !videoId.isEmpty {
-                SongActionButtons(entry: QueueEntry.youtube(
-                    videoId: videoId, title: card.title, artist: card.subtitle ?? "",
-                    thumbnailUrl: card.thumbnailUrl
-                ))
-            } else {
-                BrowseActionButtons(card: card)
-            }
-        }
+        .shelfCardContextMenu(card)
     }
 }
 

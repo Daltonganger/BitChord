@@ -332,9 +332,9 @@ private struct RecentTrackRow: View {
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
-            .contextMenu { actionMenu }
+            .shelfCardContextMenu(card)
 
-            Menu { actionMenu } label: {
+            Menu { ShelfCardActionButtons(card: card) } label: {
                 Image(systemName: "ellipsis")
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -345,18 +345,6 @@ private struct RecentTrackRow: View {
             .accessibilityLabel("More actions for \(card.title)")
         }
         .padding(.vertical, 4)
-    }
-
-    @ViewBuilder
-    private var actionMenu: some View {
-        if let videoId = card.videoId, !videoId.isEmpty {
-            SongActionButtons(entry: QueueEntry.youtube(
-                videoId: videoId, title: card.title, artist: card.subtitle ?? "",
-                thumbnailUrl: card.thumbnailUrl
-            ))
-        } else {
-            BrowseActionButtons(card: card)
-        }
     }
 }
 
