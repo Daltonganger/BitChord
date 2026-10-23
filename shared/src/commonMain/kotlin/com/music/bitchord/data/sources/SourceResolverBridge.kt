@@ -393,19 +393,29 @@ object SourceResolverBridge {
             .getOrNull()
             ?.toFormat()
 
-    private fun StreamFormat.encode(): String =
-        json.encodeToString(
-            FormatDocument.serializer(),
-            FormatDocument(
-                codec = codec,
-                kbps = kbps,
-                sampleRateHz = sampleRateHz,
-                bitDepth = bitDepth,
-                isLossless = isLossless,
-                isDolbyAtmos = isDolbyAtmos,
-                summary = summary,
+    private fun SourceStream.encode(): String = encodeStream(this)
+
+    // Native callbacks must use the already initialized bridge's serializer,
+    // rather than a file-level Json that can still be null on this entry path.
+    internal fun encodeStream(stream: SourceStream): String = json.encodeToString(
+        StreamDocument.serializer(),
+        StreamDocument(
+            url = stream.url,
+            format = FormatDocument(
+                codec = stream.format.codec,
+                kbps = stream.format.kbps,
+                sampleRateHz = stream.format.sampleRateHz,
+                bitDepth = stream.format.bitDepth,
+                isLossless = stream.format.isLossless,
+                isDolbyAtmos = stream.format.isDolbyAtmos,
+                summary = stream.format.summary,
             ),
-        )
+            headers = stream.headers,
+            belowRequest = stream.belowRequest,
+            durationSec = stream.durationSec,
+            sourceConfigId = stream.sourceConfigId,
+        ),
+    )
 
     private fun readConfigs(): ConfigListing = ConfigListing(
             SourceRegistry.configs.value.map { config ->
@@ -480,39 +490,4 @@ private fun FormatDocument.toFormat(): StreamFormat = StreamFormat(
     kbps = kbps,
     sampleRateHz = sampleRateHz,
     bitDepth = bitDepth,
-)
-
-private val wireJson = Json { ignoreUnknownKeys = true }
-
-private fun StreamFormat.encode(): String = wireJson.encodeToString(
-    FormatDocument.serializer(),
-    FormatDocument(
-        codec = codec,
-        kbps = kbps,
-        sampleRateHz = sampleRateHz,
-        bitDepth = bitDepth,
-        isLossless = isLossless,
-        isDolbyAtmos = isDolbyAtmos,
-        summary = summary,
-    ),
-)
-
-private fun SourceStream.encode(): String = wireJson.encodeToString(
-    StreamDocument.serializer(),
-    StreamDocument(
-        url = url,
-        format = FormatDocument(
-            codec = format.codec,
-            kbps = format.kbps,
-            sampleRateHz = format.sampleRateHz,
-            bitDepth = format.bitDepth,
-            isLossless = format.isLossless,
-            isDolbyAtmos = format.isDolbyAtmos,
-            summary = format.summary,
-        ),
-        headers = headers,
-        belowRequest = belowRequest,
-        durationSec = durationSec,
-        sourceConfigId = sourceConfigId,
-    ),
 )
