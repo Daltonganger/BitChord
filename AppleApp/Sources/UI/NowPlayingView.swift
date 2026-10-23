@@ -2721,11 +2721,22 @@ struct LyricsPane: View {
         .onChange(of: lyricsSignature) { _, _ in clearShareSelection() }
     }
 
-    /// What makes one lyric document different from another. A source change
-    /// usually brings a different number of lines, and always a different first
-    /// timestamp or credit.
-    private var lyricsSignature: String {
-        "\(lines.count)|\(lines.first?.timeMs ?? 0)|\(sourceLabel ?? "")"
+    /// What makes one lyric document different from another.
+    ///
+    /// A digest of every line, not of its count and ends: a re-fetch can return
+    /// the same number of lines at the same timestamps with different words
+    /// (a translation, a corrected transcript), and a signature that only looked
+    /// at the shape would keep the old card. Hashing the document is O(lines) on
+    /// a body that already lays every line out.
+    private var lyricsSignature: Int {
+        var hasher = Hasher()
+        hasher.combine(sourceLabel)
+        hasher.combine(lines.count)
+        for line in lines {
+            hasher.combine(line.timeMs)
+            hasher.combine(line.text)
+        }
+        return hasher.finalize()
     }
 
     private func clearShareSelection() {
