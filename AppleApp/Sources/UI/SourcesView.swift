@@ -152,9 +152,10 @@ struct SourcesView: View {
             #if os(iOS)
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 if config.kind == "ADDON" {
-                    Button("Remove", systemImage: "trash", role: .destructive) {
+                    Button("Remove", systemImage: "trash") {
                         removingAddon = config
                     }
+                    .tint(.red)
                 }
             }
             #endif
