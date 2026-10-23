@@ -375,6 +375,9 @@ final class AppModel {
         case libraryYouTube, librarySongs, libraryAlbums
         case libraryArtists, libraryDownloads, libraryHistory, libraryWebDav
         case libraryPlaylists, librarySubscriptions, libraryPodcasts, libraryOnDevice
+        /// One of the listener's own playlists, opened from the iPad sidebar.
+        /// Which one is the sidebar's state; the tab only gives it a page.
+        case sidebarPlaylist
     }
 }
 
