@@ -536,7 +536,25 @@ struct Avatar: View {
 /// Root-page brand mark: upstream FrostedTopBar's leading BitChord logo,
 /// sized and positioned for native Apple navigation bars across all primary tabs.
 struct TopBarLeadingMark: View {
+    #if os(iOS)
+    /// Present only in the iPad shell, whose root pages carry the sidebar toggle
+    /// here instead; the mark itself moves to the sidebar's header.
+    @Environment(\.iPadSidebar) private var sidebar
+    #endif
+
     var body: some View {
+        #if os(iOS)
+        if let sidebar {
+            IPadSidebarToggle(sidebar: sidebar)
+        } else {
+            mark
+        }
+        #else
+        mark
+        #endif
+    }
+
+    private var mark: some View {
         Image(.bchLogo)
             .resizable()
             .scaledToFit()
