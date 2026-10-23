@@ -213,7 +213,10 @@ struct ScaledFont: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        content.scaledFont(size: size, weight: weight, design: design)
+        // The scaled size is the `@ScaledMetric`'s job; the font is built here.
+        // Calling `scaledFont` from inside this modifier's own body would apply
+        // it to itself, for ever — which is what it briefly did.
+        content.font(.system(size: size, weight: weight, design: design))
     }
 }
 
