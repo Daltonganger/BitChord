@@ -370,7 +370,7 @@ struct RootView: View {
                 Section("Playlists") {
                     ForEach(macPlaylists) { playlist in
                         sideRow(
-                            .playlist(id: playlist.playlistId, title: playlist.title),
+                            .playlist(id: playlist.browseId, title: playlist.title),
                             LocalizedStringKey(playlist.title),
                             "music.note.list"
                         )

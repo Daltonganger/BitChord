@@ -748,6 +748,7 @@ struct LibraryView: View {
     }
 
     @State private var pickingFolder = false
+    @State private var showSpotifyImport = false
 
     var body: some View {
         NavigationStack {
@@ -787,8 +788,21 @@ struct LibraryView: View {
                                 .frame(height: 20)
                                 .opacity(0.5)
 
-                            Button {
-                                pickFolder()
+                            // Everything that adds to the library, in one place:
+                            // a phone's Library page is the only way in to the
+                            // Spotify import (the Playlists grid is not a page here).
+                            Menu {
+                                if auth.signedIn {
+                                    Button("New Playlist", systemImage: "music.note.list") {
+                                        appModel.playlistPicker = PlaylistPickerRequest(videoId: "", title: "")
+                                    }
+                                    Button("Import from Spotify", systemImage: "square.and.arrow.down") {
+                                        showSpotifyImport = true
+                                    }
+                                }
+                                Button("Scan a Folder", systemImage: "folder") {
+                                    pickFolder()
+                                }
                             } label: {
                                 Image(systemName: "plus")
                                     .scaledFont(size: 15, weight: .medium)
@@ -797,11 +811,10 @@ struct LibraryView: View {
                                     .contentShape(.rect)
                             }
                             .buttonStyle(ProfileCircleButtonStyle())
-                            .accessibilityLabel("Scan a folder")
+                            .accessibilityLabel("Add to Library")
                         }
                         .padding(.horizontal, 6)
-                        .chromeGlass(in: Capsule())
-                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
+                        .toolbarChrome(in: Capsule())
 
                         TopBarAccountButton()
                     }
@@ -829,6 +842,9 @@ struct LibraryView: View {
             if case .success(let url) = result {
                 local.scanPicked(url)
             }
+        }
+        .sheet(isPresented: $showSpotifyImport) {
+            SpotifyImportSheet()
         }
     }
 
@@ -1441,8 +1457,7 @@ struct LocalMusicView: View {
                             .scaledFont(size: 15, weight: .medium)
                             .foregroundStyle(.primary)
                             .frame(width: 34, height: 34)
-                            .chromeGlass(in: Circle())
-                            .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
+                            .toolbarChrome(in: Circle())
                     }
                     .buttonStyle(ProfileCircleButtonStyle())
                     .accessibilityLabel("Scan a folder")
@@ -2200,8 +2215,7 @@ struct UnifiedSongsView: View {
                         .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .chromeGlass(in: Circle())
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
+                        .toolbarChrome(in: Circle())
                 }
                 .buttonStyle(ProfileCircleButtonStyle())
                 .accessibilityLabel("Scan a folder")
@@ -2349,8 +2363,7 @@ struct UnifiedAlbumsView: View {
                         .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .chromeGlass(in: Circle())
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
+                        .toolbarChrome(in: Circle())
                 }
                 .buttonStyle(ProfileCircleButtonStyle())
                 .accessibilityLabel("Scan a folder")
@@ -2578,8 +2591,7 @@ struct UnifiedArtistsView: View {
                         .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .chromeGlass(in: Circle())
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
+                        .toolbarChrome(in: Circle())
                 }
                 .buttonStyle(ProfileCircleButtonStyle())
                 .accessibilityLabel("Scan a folder")
@@ -3162,8 +3174,7 @@ private struct LocalPlaylistsView: View {
                         .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .chromeGlass(in: Circle())
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
+                        .toolbarChrome(in: Circle())
                 }
                 .buttonStyle(ProfileCircleButtonStyle())
                 .accessibilityLabel("Import Playlist File")
@@ -3176,8 +3187,7 @@ private struct LocalPlaylistsView: View {
                             .scaledFont(size: 15, weight: .medium)
                             .foregroundStyle(.primary)
                             .frame(width: 34, height: 34)
-                            .chromeGlass(in: Circle())
-                            .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
+                            .toolbarChrome(in: Circle())
                     }
                     .buttonStyle(ProfileCircleButtonStyle())
                     .accessibilityLabel("New Playlist")
@@ -3430,8 +3440,7 @@ struct LibraryGridView: View {
                         .scaledFont(size: 14, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .chromeGlass(in: Circle())
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
+                        .toolbarChrome(in: Circle())
                 }
                 .buttonStyle(ProfileCircleButtonStyle())
                 .accessibilityLabel("Sort \(title)")

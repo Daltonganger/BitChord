@@ -202,7 +202,7 @@ struct NowPlayingView: View {
                 AirPlayRouteButton()
                     .frame(width: 22, height: 22)
                     .frame(width: 32, height: 32)
-                    .chromeGlass(in: Circle())
+                    .toolbarChrome(in: Circle())
                     .help("AirPlay")
             }
         }
