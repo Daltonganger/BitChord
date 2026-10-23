@@ -244,8 +244,11 @@ final class ListeningStore {
         migrateV1IfNeeded()
     }
 
-    func onSample(id: String, title: String, artist: String, album: String?, albumId: String?, artistId: String?, art: String?, duration: Double) {
-        let now = Date()
+    func onSample(
+        id: String, title: String, artist: String, album: String?,
+        albumId: String?, artistId: String?, art: String?, duration: Double,
+        at now: Date = Date()
+    ) {
         if id != currentId {
             currentId = id
             lastSampleAt = now
@@ -278,6 +281,9 @@ final class ListeningStore {
     }
 
     func persist() {
+        #if DEBUG
+        if Self.persistenceDisabled { return }
+        #endif
         pendingPersist = (open.snapshot(), bucket)
         schedulePersist()
     }
@@ -313,10 +319,14 @@ final class ListeningStore {
     }
 
     /// Period-filtered top songs / artists / albums / genres.
-    func summary(period: ListeningPeriod, includeGenres: Bool = true) -> ReplaySummary {
+    func summary(
+        period: ListeningPeriod,
+        includeGenres: Bool = true,
+        now: Date = Date()
+    ) -> ReplaySummary {
         persist()
-        if period == .thisWeek { return weekSummary(includeGenres: includeGenres) }
-        let months = collected(period: period)
+        if period == .thisWeek { return weekSummary(includeGenres: includeGenres, now: now) }
+        let months = collected(period: period, now: now)
         var tracks: [String: Track] = [:]
         var artists: [String: NameEntry] = [:]
         var albums: [String: NameEntry] = [:]
@@ -384,7 +394,8 @@ final class ListeningStore {
             days: days,
             earliest: earliest,
             period: period,
-            includeGenres: includeGenres
+            includeGenres: includeGenres,
+            now: now
         )
     }
 
@@ -402,9 +413,10 @@ final class ListeningStore {
         days: [String: Double],
         earliest: String?,
         period: ListeningPeriod,
-        includeGenres: Bool
+        includeGenres: Bool,
+        now: Date
     ) -> ReplaySummary {
-        var tracks = source
+        let tracks = source
         var artists = sourceArtists
         var albums = sourceAlbums
         if artists.isEmpty || albums.isEmpty {
@@ -461,7 +473,7 @@ final class ListeningStore {
             busiestDayMs: busiest?.value ?? 0,
             hourOfDay: hours,
             period: period,
-            label: period.label(),
+            label: period.label(now: now),
             distinctSongs: tracks.count,
             distinctArtists: artists.count,
             distinctAlbums: albums.count,
@@ -476,8 +488,7 @@ final class ListeningStore {
     /// are derived from the week's tracks by the same rules the month aggregation
     /// uses; the hour histogram is left empty, since hours are stored per month
     /// and a week's share of them is not something the data says.
-    private func weekSummary(includeGenres: Bool) -> ReplaySummary {
-        let now = Date()
+    private func weekSummary(includeGenres: Bool, now: Date) -> ReplaySummary {
         let cal = Calendar.current
         let start = ListeningPeriod.weekStart(now) ?? now
         let firstDay = cal.startOfDay(for: start)
@@ -487,7 +498,7 @@ final class ListeningStore {
         var albums: [String: NameEntry] = [:]
         var days: [String: Double] = [:]
 
-        for month in collected(period: .thisWeek) {
+        for month in collected(period: .thisWeek, now: now) {
             for (day, entries) in month.dayTracks ?? [:] {
                 guard let date = Self.date(fromDayKey: day), date >= firstDay, date <= now else { continue }
                 for entry in entries {
@@ -536,7 +547,8 @@ final class ListeningStore {
             days: days,
             earliest: ListeningStore.monthKey(start),
             period: .thisWeek,
-            includeGenres: includeGenres
+            includeGenres: includeGenres,
+            now: now
         )
     }
 
@@ -648,7 +660,14 @@ final class ListeningStore {
             dayTracks[index].title = track.title
             dayTracks[index].artist = track.artist
         } else {
-            dayTracks.append(track)
+            // Only what this call listened to. `track` is the month's running
+            // total, so copying it gave a day the whole month's minutes the
+            // moment a second day started.
+            dayTracks.append(Track(
+                id: id, title: title, artist: artist, album: album,
+                albumId: albumId, artistId: artistId, art: art,
+                ms: playedMs, plays: countsAsPlay ? 1 : 0, last: track.last
+            ))
         }
         open.dayTracks[dayKey] = dayTracks
 
@@ -706,11 +725,11 @@ final class ListeningStore {
 
     // MARK: - Months on disk
 
-    private func collected(period: ListeningPeriod) -> [StoredBucket] {
+    private func collected(period: ListeningPeriod, now: Date = Date()) -> [StoredBucket] {
         var keys = Set(Self.monthFiles())
         keys.insert(open.key)
         return keys.sorted()
-            .filter { period.covers(month: $0) }
+            .filter { period.covers(month: $0, now: now) }
             .compactMap { key in
                 if key == open.key { return open.snapshot() }
                 return Self.readMonth(key)
@@ -809,7 +828,19 @@ final class ListeningStore {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
     }
 
+    #if DEBUG
+    /// Where the month files live. The listening check points this at a
+    /// temporary folder, so it never reads or writes a real library.
+    nonisolated(unsafe) static var folderOverride: URL?
+    /// Whether a sample reaches the disk and UserDefaults. The check turns this
+    /// off: it is measuring the model, not the writer.
+    nonisolated(unsafe) static var persistenceDisabled = false
+    #endif
+
     private static var folder: URL {
+        #if DEBUG
+        if let folderOverride { return folderOverride }
+        #endif
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         return root.appendingPathComponent("BitChord/listening", isDirectory: true)
