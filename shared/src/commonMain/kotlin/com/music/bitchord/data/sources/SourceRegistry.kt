@@ -3,6 +3,7 @@ package com.music.bitchord.data.sources
 import com.music.bitchord.data.DebugLog
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.PlatformSettings
+import com.music.bitchord.data.sources.addon.AddonClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -427,15 +428,7 @@ object SourceRegistry {
      * `https://host/`, `https://host/manifest.json` and `https://host/MANIFEST.JSON`
      * all address one server, and the app appends the paths itself.
      */
-    internal fun normalizeAddonBase(raw: String): String {
-        val trimmed = raw.trim().trimEnd('/')
-        if (trimmed.isEmpty()) return ""
-        return if (trimmed.substringAfterLast('/').contains('.')) {
-            trimmed.substringBeforeLast('.')
-        } else {
-            trimmed
-        }
-    }
+    internal fun normalizeAddonBase(raw: String): String = AddonClient.normalizeBase(raw)
 
     private val BUILT_IN_KINDS = listOf(SourceKind.JIOSAAVN, SourceKind.YOUTUBE)
 
