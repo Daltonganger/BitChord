@@ -1950,21 +1950,20 @@ struct SavedPlaylistsView: View {
             ToolbarItem(placement: .topBarLeading) {
                 TopBarLeadingMark()
             }
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                // Actions first, the account last: the profile is the
+                // trailing item on every page, so it stays put here too.
+                if auth.signedIn { spotifyImportButton }
                 TopBarAccountButton()
             }
         }
-        #endif
+        #else
         .toolbar {
             if auth.signedIn {
-                ToolbarItem(placement: .primaryAction) {
-                    Button("Import from Spotify", systemImage: "square.and.arrow.down") {
-                        showSpotifyImport = true
-                    }
-                    .help("Import a Spotify playlist by link")
-                }
+                ToolbarItem(placement: .primaryAction) { spotifyImportButton }
             }
         }
+        #endif
         .sheet(isPresented: $showSpotifyImport) {
             SpotifyImportSheet()
         }
@@ -1972,6 +1971,13 @@ struct SavedPlaylistsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .libraryPlaylistsChanged)) { _ in
             Task { await load(force: true) }
         }
+    }
+
+    private var spotifyImportButton: some View {
+        Button("Import from Spotify", systemImage: "square.and.arrow.down") {
+            showSpotifyImport = true
+        }
+        .help("Import a Spotify playlist by link")
     }
 
     private func load(force: Bool = false) async {
