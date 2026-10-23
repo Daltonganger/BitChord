@@ -11,14 +11,28 @@ final class NetworkQuality {
     private(set) var metered = false
     private(set) var connected = true
     @ObservationIgnored private let monitor = NWPathMonitor()
+    /// Which interface carries traffic, and whether it is up. A change here is
+    /// what strands a request on a dead socket (leaving Wi-Fi, a VPN coming up).
+    @ObservationIgnored private var pathSignature: String?
+    /// Bumped on every real path change, for anything that wants to retry.
+    private(set) var pathChanges = 0
 
     init() {
         monitor.pathUpdateHandler = { [weak self] path in
             let expensive = path.isExpensive || path.isConstrained
+            let signature = "\(path.status)|" + path.availableInterfaces.map { "\($0.type):\($0.name)" }.joined(separator: ",")
             Task { @MainActor in
-                self?.metered = expensive; self?.connected = path.status == .satisfied
+                guard let self else { return }
+                self.metered = expensive; self.connected = path.status == .satisfied
                 AppSettings.shared.setMeteredConnection(value: KotlinBoolean(bool: expensive))
                 DownloadStore.shared.networkPolicyChanged()
+                if let previous = self.pathSignature, previous != signature {
+                    self.pathChanges += 1
+                    // Active streams drop requests on the old path and resume at
+                    // their offsets, rather than waiting out a socket timeout.
+                    if path.status == .satisfied { StreamDownloadBridge.shared.networkChanged() }
+                }
+                self.pathSignature = signature
             }
         }
         monitor.start(queue: DispatchQueue.global(qos: .utility))

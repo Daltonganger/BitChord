@@ -14,8 +14,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import platform.Foundation.NSMutableData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSLock
@@ -101,7 +106,68 @@ object StreamDownloadBridge {
         ready: DownloadCallback,
         done: DownloadCallback,
     ) {
-        startStream(null, url, headers, ready, done)
+        startStream(null, url, headers, ready, done, videoId = null, maxKbps = Int.MAX_VALUE)
+    }
+
+    /**
+     * [streamToFile] for a YouTube track, which lets a refusal *mid-track* be
+     * answered with a fresh URL for the same rendition, resumed at the same byte.
+     * Without the id the bridge can only give up, and the listener hears the song
+     * stop part-way through.
+     */
+    fun streamTrackToFile(
+        videoId: String,
+        maxKbps: Int,
+        url: String,
+        headers: Map<String, String>,
+        ready: DownloadCallback,
+        done: DownloadCallback,
+    ) {
+        startStream(null, url, headers, ready, done, videoId = videoId, maxKbps = maxKbps)
+    }
+
+    /**
+     * The device's network path changed (Wi-Fi ↔ cellular, VPN up, captive portal
+     * cleared). A request in flight on the old interface would otherwise sit out
+     * its whole timeout before failing; every active stream drops it and asks again
+     * at the same offset, and any stream waiting out a backoff retries now.
+     */
+    fun networkChanged() {
+        networkGeneration.value = networkGeneration.value + 1
+        DebugLog.d("network path changed; active streams will re-request at their offsets")
+    }
+
+    private val networkGeneration = MutableStateFlow(0L)
+
+    private class NetworkChanged : Exception("network path changed")
+
+    /**
+     * One range, abandoned early if the network path changes underneath it.
+     * Returns null when it was abandoned for that reason.
+     */
+    private suspend fun fetchRange(url: String, headers: Map<String, String>): ByteArray? {
+        val startGeneration = networkGeneration.value
+        return coroutineScope {
+            val fetch = async { Http.getBytes(url, headers, CHUNK_TIMEOUT_MS) }
+            val watcher = launch {
+                networkGeneration.first { it != startGeneration }
+                fetch.cancel(CancellationException("network changed"))
+            }
+            try {
+                fetch.await()
+            } catch (e: CancellationException) {
+                currentCoroutineContext().ensureActive()
+                null
+            } finally {
+                watcher.cancel()
+            }
+        }
+    }
+
+    /** Sleep [millis], or less if the network path changes first. */
+    private suspend fun backoff(millis: Long) {
+        val startGeneration = networkGeneration.value
+        withTimeoutOrNull(millis) { networkGeneration.first { it != startGeneration } }
     }
 
     @OptIn(ExperimentalForeignApi::class)
@@ -111,6 +177,8 @@ object StreamDownloadBridge {
         headers: Map<String, String>,
         ready: DownloadCallback,
         done: DownloadCallback,
+        videoId: String? = null,
+        maxKbps: Int = Int.MAX_VALUE,
     ) {
         val job = bridgeScope.launch(start = CoroutineStart.LAZY) {
             var tmpPath: String? = null
@@ -118,7 +186,10 @@ object StreamDownloadBridge {
             try {
                 DebugLog.d("stream starting: ${url.take(120)}")
 
+                var currentUrl = url
+                var currentHeaders = headers
                 val chunkSize = PlayerClient.rangeBytesFor(url)
+                val declaredLength = PlayerClient.lengthFromUrl(url)
                 val tmpDir = NSTemporaryDirectory()
                 val ext = when {
                     url.contains("mime=video", ignoreCase = true) ||
@@ -130,7 +201,7 @@ object StreamDownloadBridge {
 
                 // Upstream reads the total out of the URL's own `clen` rather than
                 // making a request to find out, so read-ahead knows when it is done.
-                PlayerClient.lengthFromUrl(url)?.let { clen ->
+                declaredLength?.let { clen ->
                     val lenPath = "$path.len"
                     val digits = clen.toString().encodeToByteArray()
                     val lenFile = fopen(lenPath, "wb")
@@ -151,26 +222,54 @@ object StreamDownloadBridge {
                 var offset = 0L
                 var consecutiveEmpty = 0
                 var readyFired = false
+                var failures = 0
+                var remints = 0
 
                 while (true) {
-                    val rangeEnd = offset + chunkSize - 1
-                    val rangeHeaders = headers + ("Range" to "bytes=$offset-$rangeEnd")
+                    // The first range is small so the decoder has its header and
+                    // first frames in a fraction of the time a full range takes;
+                    // first sound waits on this one request and nothing else.
+                    val want = if (offset == 0L) minOf(FIRST_RANGE_BYTES, chunkSize) else chunkSize
+                    val rangeEnd = offset + want - 1
+                    val rangeHeaders = currentHeaders + ("Range" to "bytes=$offset-$rangeEnd")
 
                     val data = try {
-                        Http.getBytes(url, rangeHeaders)
+                        fetchRange(currentUrl, rangeHeaders) ?: throw NetworkChanged()
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
                         val code = httpCodeOf(e)
                         if (code != null && code in REFUSAL_CODES) {
                             DebugLog.w("stream refused with $code at offset $offset")
-                            StreamResolver.onPlaybackRefused(url, code)
-                        } else {
-                            DebugLog.w("stream chunk failed at offset $offset: ${e.message}")
+                            StreamResolver.onPlaybackRefused(currentUrl, code)
+                            // Before the first byte the host re-resolves on its own.
+                            // Mid-track it cannot without restarting the song, so
+                            // the bridge asks for the same rendition and resumes.
+                            val fresh = if (readyFired && videoId != null && remints < MAX_REMINTS) {
+                                remints++
+                                runCatching { StreamResolver.resolve(videoId, maxKbps) }.getOrNull()
+                                    ?.takeIf { sameRendition(currentUrl, it.url) }
+                            } else null
+                            if (fresh == null) throw e
+                            DebugLog.d("stream re-minted at offset $offset; resuming on a fresh URL")
+                            currentUrl = fresh.url
+                            currentHeaders = fresh.headers
+                            continue
                         }
-                        throw e
+                        // Transport trouble (and 5xx/429): the URL is still good,
+                        // so ask again for the same bytes rather than ending here.
+                        failures++
+                        if (failures > MAX_TRANSPORT_RETRIES) {
+                            DebugLog.w("stream chunk failed at offset $offset after $failures tries: ${e.message}")
+                            throw e
+                        }
+                        val wait = BACKOFF_MS[minOf(failures - 1, BACKOFF_MS.lastIndex)]
+                        DebugLog.d("stream chunk failed at offset $offset (${e.message}); retry $failures in ${wait}ms")
+                        if (e !is NetworkChanged) backoff(wait)
+                        continue
                     }
                     currentCoroutineContext().ensureActive()
+                    failures = 0
 
                     if (data.isEmpty()) {
                         consecutiveEmpty++
@@ -205,7 +304,11 @@ object StreamDownloadBridge {
                         ready.onResult(path, null)
                     }
 
-                    if (data.size < chunkSize) break
+                    // With a declared length that is the end; a short range before
+                    // it is a connection that gave up early, not the end of the file.
+                    if (declaredLength != null) {
+                        if (offset >= declaredLength) break
+                    } else if (data.size < want) break
                     if (offset > MAX_BYTES) break
                 }
 
@@ -227,16 +330,20 @@ object StreamDownloadBridge {
                 // A cancelled row must not leave a partial file that could be
                 // mistaken for a completed download or resumed by the player.
                 tmpPath?.let { path ->
-                    listOf(path, "$path.len", "$path.grow", "$path.complete").forEach {
+                    listOf(path, "$path.len", "$path.grow", "$path.complete", "$path.failed").forEach {
                         NSFileManager.defaultManager.removeItemAtPath(it, null)
                     }
                 }
             } catch (e: Throwable) {
                 currentCoroutineContext().ensureActive()
                 DebugLog.e("stream failed", e)
-                // Marked complete either way: a half-written file left looking
-                // unfinished would be re-read forever by the growing-file reader.
-                tmpPath?.let { NSMutableData().writeToFile("$it.complete", atomically = true) }
+                // `.failed` before `.complete`: the reader stops waiting either way,
+                // but a failed file ends in an error the player can recover from
+                // rather than a short track that looks like it finished.
+                tmpPath?.let {
+                    NSMutableData().writeToFile("$it.failed", atomically = true)
+                    NSMutableData().writeToFile("$it.complete", atomically = true)
+                }
                 // A refusal and a transport failure call for opposite responses
                 // at the call site: one means "this URL is dead, go and get another",
                 // the other means "that attempt failed, here is the same URL to try
@@ -266,6 +373,15 @@ object StreamDownloadBridge {
         job.start()
     }
 
+    /** Same itag and same byte length: a byte offset in one is valid in the other. */
+    private fun sameRendition(old: String, new: String): Boolean {
+        val oldLen = PlayerClient.lengthFromUrl(old) ?: return false
+        return oldLen == PlayerClient.lengthFromUrl(new) && itagOf(old) != null && itagOf(old) == itagOf(new)
+    }
+
+    private fun itagOf(url: String): String? =
+        Regex("[?&]itag=(\\d+)").find(url)?.groupValues?.get(1)
+
     /** The status code out of [Http]'s refusal message, if it was a refusal. */
     private fun httpCodeOf(e: Throwable): Int? =
         e.message?.let { message ->
@@ -294,4 +410,17 @@ object StreamDownloadBridge {
 
     /** A ceiling so a URL that never stops returning data cannot fill the disk. */
     private const val MAX_BYTES = 200L * 1024 * 1024
+
+    /** The opening range: enough for the container header and the first frames. */
+    private const val FIRST_RANGE_BYTES = 128L * 1024
+
+    /** Per range. A full range is a megabyte; one that takes this long is stuck. */
+    private const val CHUNK_TIMEOUT_MS = 15_000L
+
+    /** Roughly 45 s of trying, inside the reader's two-minute patience. */
+    private const val MAX_TRANSPORT_RETRIES = 8
+    private val BACKOFF_MS = longArrayOf(250, 500, 1_000, 2_000, 4_000, 8_000, 8_000, 8_000)
+
+    /** Fresh URLs one track may ask for mid-stream before giving up. */
+    private const val MAX_REMINTS = 2
 }
