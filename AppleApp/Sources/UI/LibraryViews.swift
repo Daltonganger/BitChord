@@ -42,7 +42,7 @@ struct HomeView: View {
             EmptyStateView(
                 icon: Image(.bchMusicNote),
                 title: "Your feed couldn't load",
-                subtitle: message,
+                subtitle: LocalizedStringKey(message),
                 buttonTitle: "Retry"
             ) { Task { await feed.load() } }
         case .loaded(let shelves):
@@ -411,7 +411,7 @@ struct ExploreView: View {
             EmptyStateView(
                 icon: Image(.bchExplore),
                 title: "Nothing to explore right now",
-                subtitle: message,
+                subtitle: LocalizedStringKey(message),
                 buttonTitle: "Retry"
             ) { Task { await moods.load(force: true) } }
         case .loaded:
@@ -584,7 +584,7 @@ struct MoodGenrePlaylistsView: View {
                 EmptyStateView(
                     icon: Image(.bchExplore),
                     title: "Nothing here right now",
-                    subtitle: message,
+                    subtitle: LocalizedStringKey(message),
                     buttonTitle: "Retry"
                 ) { Task { await load() } }
             case .loaded:
@@ -898,7 +898,7 @@ struct LibraryLandingView: View {
                     EmptyStateView(
                         icon: Image(.bchLibrary),
                         title: "Library couldn't load",
-                        subtitle: error,
+                        subtitle: LocalizedStringKey(error),
                         buttonTitle: "Retry"
                     ) { Task { await loadShelves() } }
                 } else {
@@ -1795,7 +1795,7 @@ struct LocalArtistList: View {
 struct SavedShelfView: View {
     var shelfName = "Subscriptions"
     var title = "Subscriptions"
-    var emptySubtitle = "Channels you subscribe to show up here."
+    var emptySubtitle = LocalizedStringKey("Channels you subscribe to show up here.")
     @Environment(AuthController.self) private var auth
     @State private var shelves: [FeedShelf] = []
     @State private var dataGeneration: Int64?
@@ -1821,7 +1821,7 @@ struct SavedShelfView: View {
                 EmptyStateView(
                     icon: Image(.bchLibrary),
                     title: "\(title) couldn't load",
-                    subtitle: error,
+                    subtitle: LocalizedStringKey(error),
                     buttonTitle: "Retry"
                 ) { Task { await load() } }
             } else if items.isEmpty {
@@ -1911,7 +1911,7 @@ struct SavedPlaylistsView: View {
                 EmptyStateView(
                     icon: Image(.bchLibrary),
                     title: "Playlists couldn't load",
-                    subtitle: error,
+                    subtitle: LocalizedStringKey(error),
                     buttonTitle: "Retry"
                 ) { Task { await load() } }
             } else {
@@ -2273,7 +2273,7 @@ struct UnifiedAlbumsView: View {
                 EmptyStateView(
                     icon: Image(.bchLibrary),
                     title: "Albums couldn't load",
-                    subtitle: error,
+                    subtitle: LocalizedStringKey(error),
                     buttonTitle: "Retry"
                 ) { Task { await load() } }
             } else if !hasCloud && !hasDevice {
@@ -2491,7 +2491,7 @@ struct UnifiedArtistsView: View {
                 EmptyStateView(
                     icon: Image(.bchLibrary),
                     title: "Artists couldn't load",
-                    subtitle: error,
+                    subtitle: LocalizedStringKey(error),
                     buttonTitle: "Retry"
                 ) { Task { await load() } }
             } else if !hasCloud && !hasDevice {
@@ -2737,7 +2737,7 @@ struct HistoryView: View {
                 EmptyStateView(
                     icon: Image(.bchClock),
                     title: "History couldn't load",
-                    subtitle: error,
+                    subtitle: LocalizedStringKey(error),
                     buttonTitle: "Retry"
                 ) { Task { await load() } }
             } else if songs.isEmpty {
@@ -2840,7 +2840,7 @@ private struct YoutubeLibraryView: View {
                 EmptyStateView(
                     icon: Image(.bchLibrary),
                     title: "Library couldn't load",
-                    subtitle: error,
+                    subtitle: LocalizedStringKey(error),
                     buttonTitle: "Retry"
                 ) { Task { await load() } }
             } else if shelves.isEmpty {

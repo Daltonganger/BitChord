@@ -337,11 +337,15 @@ struct SkeletonBlock: View {
 }
 
 /// Music's centered empty state: glyph, bold title, subtitle, one bordered button.
+///
+/// The copy is `LocalizedStringKey`, not `String`: every call site passes a UI
+/// phrase, and a `String` parameter would render it verbatim instead of looking
+/// the translation up in the catalog.
 struct EmptyStateView: View {
     var icon: Image
-    var title: String
-    var subtitle: String
-    var buttonTitle: String?
+    var title: LocalizedStringKey
+    var subtitle: LocalizedStringKey
+    var buttonTitle: LocalizedStringKey?
     var action: (() -> Void)?
 
     var body: some View {
