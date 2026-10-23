@@ -28,6 +28,18 @@ use crate::spatial::SpatialRenderer;
 use crate::time_stretch::TimeStretch;
 use crate::transition_filter::TransitionFilter;
 
+mod fx;
+
+/// How long a technique's window is at `beat_seconds`, for the planner.
+pub(crate) fn technique_window_seconds(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
+    fx::window_seconds(style, beat_seconds)
+}
+
+/// Where in its window a technique lands the incoming record, 0…1.
+pub(crate) fn technique_landing_fraction(style: TransitionStyle) -> Option<f64> {
+    fx::Technique::of(style).map(|t| t.shape().1)
+}
+
 /// Callback surface — the UniFFI-generated Swift side implements this.
 pub trait EngineEvents: Send + Sync {
     fn state_changed(&self, state: crate::PlaybackState);
@@ -92,6 +104,25 @@ pub enum TransitionStyle {
     DjFilter,
     DjBlend,
     Gapless,
+    /// Tempo-synced echo thrown on the outgoing record's last beat; the next
+    /// one lands on its downbeat while the repeats ring out. See [`fx`].
+    EchoOut,
+    /// One beat captured and repeated in ½, ¼, ⅛ slices under a rising
+    /// high-pass, then the next record on the one.
+    LoopRoll,
+    /// The outgoing record dissolves into a long reverb; the next one rises
+    /// out of the wash.
+    ReverbWash,
+    /// A two-beat high-pass build and a hard cut on the downbeat — the drop swap.
+    DropCut,
+}
+
+impl TransitionStyle {
+    /// A technique that finishes the outgoing record with an effect rather
+    /// than overlapping the two, and so needs no tempo match.
+    pub fn is_effect(self) -> bool {
+        fx::Technique::of(self).is_some()
+    }
 }
 
 /// The style fields of upstream `TransitionPlan` — everything the render
@@ -143,6 +174,11 @@ pub struct TransitionPlan {
     /// mix-out anchor — so it travels with the plan rather than being asked for
     /// again.
     pub outgoing_duration_seconds: f64,
+    /// One beat of the outgoing record, in seconds; 0 = unknown. The effect
+    /// techniques are measured in beats.
+    pub beat_seconds: f64,
+    /// Why the planner chose this style, for the transition log.
+    pub reason: String,
 }
 
 impl Default for TransitionPlan {
@@ -163,6 +199,8 @@ impl Default for TransitionPlan {
             dip_width: 0.0,
             post_glide_seconds: 0.0,
             outgoing_duration_seconds: 0.0,
+            beat_seconds: 0.0,
+            reason: String::new(),
         }
     }
 }
@@ -559,6 +597,14 @@ fn ride_filters(
             inc.open();
         }
         TransitionStyle::EqualPower => ride_vocal_separation(progress, plan, out, inc),
+        // The effect techniques do their own filtering on the outgoing deck.
+        TransitionStyle::EchoOut
+        | TransitionStyle::LoopRoll
+        | TransitionStyle::ReverbWash
+        | TransitionStyle::DropCut => {
+            out.open();
+            inc.open();
+        }
     }
 }
 
@@ -1471,6 +1517,9 @@ struct TransitionState {
     /// curve and no filter ride — filtering a track against itself would edit
     /// the record — and never reports a track change for them.
     swap: bool,
+    /// The outgoing deck's effect, for the techniques that finish a record
+    /// with one. Created when the window opens.
+    fx: Option<fx::DeckFx>,
 }
 
 struct RetiringVoice {
@@ -1798,7 +1847,7 @@ impl MixerState {
                     .map(|request| request.plan.clone())
                     .unwrap_or_default();
                 let fade_s =
-                    self.blend_seconds(plan.fade_seconds, current.known_duration.unwrap_or(0.0));
+                    self.plan_seconds(&plan, current.known_duration.unwrap_or(0.0));
                 let tail = self.audible_tail_s(&plan, current);
                 let horizon = fade_s + ARM_LEAD_MS as f64 / 1000.0;
                 if tail.is_finite() && tail <= horizon {
@@ -1845,6 +1894,7 @@ impl MixerState {
             plan: TransitionPlan::default(),
             arm_deadline: Instant::now(),
             swap: true,
+            fx: None,
         });
         // Same track, same instant: the timeline does not move, so this only
         // re-points the playhead at the replacement voice.
@@ -1929,7 +1979,7 @@ impl MixerState {
             .as_ref()
             .and_then(|voice| voice.known_duration)
             .unwrap_or(0.0);
-        let fade_s = self.blend_seconds(request.plan.fade_seconds, track);
+        let fade_s = self.plan_seconds(&request.plan, track);
         let rate = if request.plan.playback_rate > 0.05 {
             request.plan.playback_rate
         } else {
@@ -1980,7 +2030,7 @@ impl MixerState {
                     .as_ref()
                     .and_then(|current| current.known_duration)
                     .unwrap_or(0.0);
-                let fade_s = self.blend_seconds(request.plan.fade_seconds, track);
+                let fade_s = self.plan_seconds(&request.plan, track);
                 let rate = if request.plan.playback_rate > 0.05 {
                     request.plan.playback_rate
                 } else {
@@ -2039,7 +2089,7 @@ impl MixerState {
             .unwrap_or_default();
         let window_s = self.effective_fade_seconds(current.known_duration.unwrap_or(0.0));
         let fade_s = if plan.fade_seconds > 0.0 {
-            self.blend_seconds(plan.fade_seconds, current.known_duration.unwrap_or(0.0))
+            self.plan_seconds(&plan, current.known_duration.unwrap_or(0.0))
         } else {
             window_s
         };
@@ -2089,6 +2139,7 @@ impl MixerState {
                     plan,
                     arm_deadline: Instant::now() + Duration::from_millis(ARM_TIMEOUT_MS),
                     swap: false,
+                    fx: None,
                 });
             }
             Err(e) => {
@@ -2119,6 +2170,13 @@ impl MixerState {
     /// for four seconds, that figure is a cut and the floor replaces it. A
     /// plan that already asked for a real blend is left alone, including one
     /// that spends most of a short record — the planner chose that length.
+    /// The window a plan needs: a technique's own length, in beats, or the
+    /// floored blend length for a crossfade.
+    fn plan_seconds(&self, plan: &TransitionPlan, track_seconds: f64) -> f64 {
+        fx::window_seconds(plan.style, plan.beat_seconds)
+            .unwrap_or_else(|| self.blend_seconds(plan.fade_seconds, track_seconds))
+    }
+
     fn blend_seconds(&self, plan_fade: f64, track_seconds: f64) -> f64 {
         let planned = plan_fade.max(0.0);
         // A region-limited handoff must never be expanded across a skipped interval.
@@ -2210,9 +2268,19 @@ impl MixerState {
         self.duration_ms
             .store((info.duration_seconds * 1000.0) as u64, Ordering::Relaxed);
         self.incoming = Some(voice);
+        let device_rate = self.device_rate;
         if let Some(t) = &mut self.transition {
             t.phase = Phase::Fading;
             t.handed_off = true;
+            t.fx = fx::DeckFx::new(t.plan.style, device_rate, t.plan.beat_seconds);
+            if t.fx.is_some() {
+                log::info!(
+                    "transition technique {:?} ({:.2}s beat): {}",
+                    t.plan.style,
+                    t.plan.beat_seconds,
+                    t.plan.reason
+                );
+            }
         }
         let db = self.incoming.as_ref().and_then(|v| v.loudness_db);
         self.publish_nerd(&info, db);
@@ -2233,6 +2301,21 @@ impl MixerState {
             .is_some_and(|t| t.phase == Phase::Fading)
         {
             return false;
+        }
+        if let Some(fx) = self.transition.as_ref().and_then(|t| t.fx.as_ref()) {
+            // The effect sets the outgoing level itself; the voice gain stays
+            // at unity so the effect hears the record, not a fade of it.
+            let rise = fx.incoming_gain();
+            let done = fx.finished();
+            if let Some(current) = &mut self.current {
+                current.gain = 1.0;
+                current.filter.open();
+            }
+            if let Some(incoming) = &mut self.incoming {
+                incoming.gain = rise;
+                incoming.filter.open();
+            }
+            return done;
         }
         let Some(incoming) = &self.incoming else {
             return false;
@@ -3307,7 +3390,25 @@ fn render_available(state: &mut MixerState, ring: &mut Producer<f32>) {
                 voice.drive_tempo_glide(rate, speed);
                 let frames = voice.pull(CHUNK_FRAMES, rate);
                 voice.note_glide_frames((frames.len() / 2) as u64);
-                if !frames.is_empty() {
+                let effect = state
+                    .transition
+                    .as_mut()
+                    .filter(|t| t.phase == Phase::Fading)
+                    .and_then(|t| t.fx.as_mut());
+                if let Some(effect) = effect {
+                    // The outgoing deck runs through its effect, and keeps
+                    // running after its file ends: the tail is the point.
+                    let mut dry = vec![0.0f32; frames.len()];
+                    voice.mix_into(
+                        &frames,
+                        &mut dry,
+                        voice.gain,
+                        state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
+                    );
+                    effect.render(&dry, &mut scratch, CHUNK_FRAMES);
+                    audible = true;
+                    produced = produced.max(chunk_samples);
+                } else if !frames.is_empty() {
                     audible = true;
                     produced = produced.max(frames.len());
                     if swap_fade {
@@ -3331,10 +3432,12 @@ fn render_available(state: &mut MixerState, ring: &mut Producer<f32>) {
             state.publish_audible_position();
         }
 
-        let incoming_renders = state
-            .transition
-            .as_ref()
-            .is_some_and(|t| t.phase == Phase::Fading);
+        // An effect transition holds the incoming record until it lands, so
+        // it starts exactly on its cue.
+        let incoming_renders = state.transition.as_ref().is_some_and(|t| {
+            t.phase == Phase::Fading
+                && t.fx.as_ref().map_or(true, |fx| fx.incoming_live())
+        });
         if let Some(voice) = &mut state.incoming {
             if state.playing && incoming_renders {
                 let frames = voice.pull(CHUNK_FRAMES, state.device_rate);
@@ -4652,6 +4755,7 @@ mod tests {
                 plan: TransitionPlan::default(),
                 arm_deadline: Instant::now(),
                 swap: false,
+                fx: None,
             }),
             retiring: Vec::new(),
             playing: true,

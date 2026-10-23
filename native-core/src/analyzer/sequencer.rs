@@ -63,6 +63,12 @@ pub fn rank_candidates(
             TransitionStyle::DjFilter => cost += 0.15,
             TransitionStyle::EqualPower => cost += 0.4,
             TransitionStyle::Gapless => cost += 0.05,
+            // A technique is chosen because the pair cannot blend; it costs
+            // less than a fade and more than a blend that works.
+            TransitionStyle::EchoOut
+            | TransitionStyle::LoopRoll
+            | TransitionStyle::ReverbWash
+            | TransitionStyle::DropCut => cost += 0.1,
         }
         // Prefer candidates the planner already trusts enough to blend.
         if matches!(plan.style, TransitionStyle::DjBlend) && stretch <= 0.04 {

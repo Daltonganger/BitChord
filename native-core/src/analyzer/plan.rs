@@ -635,6 +635,8 @@ pub fn plan_pair(
                 dip_width: 0.0,
                 post_glide_seconds: 0.0,
                 outgoing_duration_seconds: outgoing_duration,
+                beat_seconds: 0.0,
+                reason: String::new(),
             };
         }
     }
@@ -739,6 +741,8 @@ fn plain_fallback(fade: f64, outgoing: &Analysis) -> TransitionPlan {
         dip_width: 0.0,
         post_glide_seconds: 0.0,
         outgoing_duration_seconds: outgoing.duration,
+        beat_seconds: 0.0,
+        reason: String::new(),
     }
 }
 
@@ -1446,11 +1450,21 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
     let too_short = (outgoing.duration > 0.0 && outgoing.duration < MIN_SMART_DURATION_SECONDS)
         || (incoming.duration > 0.0 && incoming.duration < MIN_SMART_DURATION_SECONDS);
     let tier = assess(outgoing, incoming);
+    if !too_short {
+        if let Some(plan) = technique_plan(outgoing, incoming, tier, entry) {
+            return plan;
+        }
+    }
     if matches!(tier, Tier::Plain) || too_short {
         let mut plan = plain_fallback(fade, outgoing);
         // Still enter at the top of the music, not at a drop and not at the
         // file's last byte.
         plan.cue_seconds = entry;
+        plan.reason = if too_short {
+            "fade: a track is too short for a technique".into()
+        } else {
+            "fade: no usable tempo on either side".into()
+        };
         return plan;
     }
 
@@ -1647,6 +1661,8 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
         dip_width: shape.dip_width,
         post_glide_seconds: shape.post_glide_seconds,
         outgoing_duration_seconds: outgoing.duration,
+        beat_seconds: 0.0,
+        reason: String::new(),
     }
 }
 
@@ -1711,6 +1727,156 @@ fn mix_shape(
         dip_width,
         post_glide_seconds,
     }
+}
+
+// ---- DJ techniques ---------------------------------------------------------
+//
+// A blend needs two grids that agree. Most pairs an autoplay run produces do
+// not: different tempos, different genres, a vocal on both sides. A DJ does not
+// fade those — they finish the outgoing record with an effect and drop the next
+// one on its own downbeat. [`technique_plan`] picks which effect, from what the
+// two ends of the pair actually sound like, and returns `None` only when a
+// blend is the better move (a real beatmatch) or nothing is known.
+
+/// Mean energy over `[start, end]`, 0…1-ish; `None` with no curve.
+fn energy_between(analysis: &Analysis, start: f64, end: f64) -> Option<f64> {
+    let values: Vec<f64> = analysis
+        .energy_curve
+        .iter()
+        .filter(|p| p.time.is_finite() && p.time >= start && p.time <= end && p.energy.is_finite())
+        .map(|p| p.energy)
+        .collect();
+    (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
+}
+
+/// Deterministic variety: the same pair always gets the same technique (so a
+/// replan does not flip it), different pairs spread across the eligible set.
+fn pair_salt(outgoing: &Analysis, incoming: &Analysis) -> usize {
+    let a = (outgoing.duration * 1000.0) as u64;
+    let b = (incoming.duration * 1000.0) as u64;
+    let c = (outgoing.bpm * 100.0) as u64 ^ ((incoming.bpm * 100.0) as u64).rotate_left(17);
+    (a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.rotate_left(29) ^ c) as usize
+}
+
+fn technique_plan(
+    outgoing: &Analysis,
+    incoming: &Analysis,
+    tier: Tier,
+    entry: f64,
+) -> Option<TransitionPlan> {
+    let out_bpm = outgoing.bpm;
+    let in_bpm = incoming.bpm;
+    let has_tempo = (MIN_BPM..=MAX_BPM).contains(&out_bpm);
+    let ratio = if has_tempo && (MIN_BPM..=MAX_BPM).contains(&in_bpm) {
+        normalized_tempo_ratio(out_bpm, in_bpm)
+    } else {
+        1.0
+    };
+    let tempo_gap = (1.0 - ratio).abs();
+    // A true beatmatch with a transparent stretch is still the best thing a
+    // pair can do; leave it to the blend planner.
+    if matches!(tier, Tier::Beatmatched) && tempo_gap <= MAX_STRETCH_DEVIATION {
+        return None;
+    }
+    let duration = if outgoing.content_end > 0.0 {
+        outgoing.content_end
+    } else {
+        outgoing.duration
+    };
+    if duration <= 0.0 {
+        return None;
+    }
+    let beat = if has_tempo { beat_seconds_of(outgoing).max(0.25) } else { 0.5 };
+    let grid = has_tempo && outgoing.beat_confidence >= MIN_DJ_CONFIDENCE;
+
+    let (anchor, _) = resolve_mix_out_anchor(outgoing);
+    let mix_end = anchor.min(duration).max(0.0);
+    let out_energy = energy_between(outgoing, mix_end - 8.0 * beat, mix_end);
+    let in_energy = energy_between(incoming, entry, entry + 8.0 * beat.max(0.4));
+    let out_vocal = vocal_activity_between(outgoing, mix_end - 4.0 * beat, mix_end)
+        .unwrap_or(outgoing.vocal_probability * 0.6);
+    let slow = has_tempo && out_bpm < 92.0;
+    let energetic_in = in_energy.zip(out_energy).is_some_and(|(i, o)| i >= o * 0.9 && i > 0.35);
+    let key_clash = key_distance(&trusted_key(outgoing), &trusted_key(incoming)).is_some_and(|d| d > 3);
+
+    // Eligible techniques, each with why.
+    let mut eligible: Vec<(TransitionStyle, &str)> = Vec::new();
+    if grid && out_vocal >= 0.35 {
+        eligible.push((TransitionStyle::EchoOut, "echo out: the outgoing record ends on a vocal"));
+    }
+    if grid && outgoing.beat_confidence >= 0.45 && !slow && out_vocal < 0.5 {
+        eligible.push((TransitionStyle::LoopRoll, "loop roll: a strong grid and an instrumental ending"));
+    }
+    if grid && energetic_in {
+        eligible.push((TransitionStyle::DropCut, "cut on the one: the next record comes in hot"));
+    }
+    if slow || key_clash || !grid || tempo_gap > 0.12 {
+        eligible.push((
+            TransitionStyle::ReverbWash,
+            if slow {
+                "reverb wash: a slow record dissolves better than it cuts"
+            } else if key_clash {
+                "reverb wash: the keys clash, so the two never overlap dry"
+            } else if !grid {
+                "reverb wash: no reliable beat to cut or echo on"
+            } else {
+                "reverb wash: the tempos are too far apart to blend"
+            },
+        ));
+    }
+    if grid && eligible.is_empty() {
+        eligible.push((TransitionStyle::EchoOut, "echo out: tempos too far apart for a blend"));
+    }
+    // A pair that could blend at all keeps the filter blend some of the time,
+    // so a set is not all effects.
+    if matches!(tier, Tier::DjAssisted) && tempo_gap <= 0.06 && eligible.len() < 3 {
+        return None;
+    }
+    let (style, why) = *eligible.get(pair_salt(outgoing, incoming) % eligible.len().max(1))?;
+
+    let window = crate::mixer::technique_window_seconds(style, beat)?;
+    let land_fraction = crate::mixer::technique_landing_fraction(style)?;
+    // The landing — the dry cut, the drop — goes on a downbeat (a phrase
+    // start when one is near) at the mix-out anchor.
+    let lead = land_fraction * window;
+    let tail = window - lead;
+    let latest_land = (duration - tail).max(lead);
+    let target = (mix_end).min(latest_land);
+    let land = if grid {
+        aligned_transition_start(outgoing, target, latest_land, true, lead)
+    } else {
+        target
+    };
+    let land = land.clamp(lead.min(latest_land), latest_land);
+    // The cut lands on the next record's drop when it has one close by.
+    let cue = if style == TransitionStyle::DropCut {
+        let drop = incoming_handoff(incoming, 8.0 * beat);
+        if drop > entry && drop < entry + 32.0 * beat { drop } else { entry }
+    } else {
+        entry
+    };
+    Some(TransitionPlan {
+        style,
+        bass_swap: false,
+        bass_swap_fraction: DEFAULT_BASS_SWAP_FRACTION,
+        filter_sweep: 0.0,
+        vocal_overlap: 0.0,
+        fade_seconds: window,
+        transition_end_seconds: land + tail,
+        cue_seconds: cue,
+        playback_rate: 1.0,
+        bed_fraction: 0.0,
+        bed_gain_db: 0.0,
+        dip_depth: 0.0,
+        dip_width: 0.0,
+        post_glide_seconds: 0.0,
+        outgoing_duration_seconds: outgoing.duration,
+        beat_seconds: beat,
+        reason: format!(
+            "{why} (tempo {out_bpm:.0}→{in_bpm:.0} BPM, grid {:.2})",
+            outgoing.beat_confidence
+        ),
+    })
 }
 
 fn long_blend_allowed(outgoing: &Analysis, incoming: &Analysis) -> bool {
@@ -2414,6 +2580,8 @@ fn plan_wsola_transition(outgoing: &Analysis, incoming: &Analysis) -> Option<Tra
         dip_width: shape.dip_width,
         post_glide_seconds: shape.post_glide_seconds,
         outgoing_duration_seconds: outgoing.duration,
+        beat_seconds: 0.0,
+        reason: String::new(),
     })
 }
 
@@ -2493,6 +2661,42 @@ mod tests {
             beat_interval: 0.5,
             ..Analysis::default()
         }
+    }
+
+    /// The pairs an autoplay run is made of — different tempos, a confident
+    /// grid — used to fall to a fade. They now get a named technique whose
+    /// landing sits on a downbeat inside the outgoing record.
+    #[test]
+    fn mismatched_tempos_get_a_dj_technique_not_a_fade() {
+        let grid = |bpm: f64| (0..200).map(|i| i as f64 * 4.0 * 60.0 / bpm).collect::<Vec<_>>();
+        let mut out = analysis(0.0, 210.0, grid(124.0));
+        out.bpm = 124.0;
+        out.beat_interval = 60.0 / 124.0;
+        out.beat_confidence = 0.8;
+        out.content_end = 205.0;
+        let mut inc = analysis(0.0, 190.0, grid(92.0));
+        inc.bpm = 92.0;
+        inc.beat_interval = 60.0 / 92.0;
+        inc.beat_confidence = 0.8;
+        let plan = plan_from(&out, &inc, 8.0);
+        assert!(plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
+        assert!(!plan.reason.is_empty());
+        assert!(plan.transition_end_seconds <= 205.0 + 1e-6);
+        assert!((plan.beat_seconds - 60.0 / 124.0).abs() < 1e-6);
+        assert_eq!(plan.playback_rate, 1.0, "a technique never stretches");
+    }
+
+    /// A real beatmatch is still a blend: the techniques are for pairs that
+    /// cannot share a grid, not a replacement for one that can.
+    #[test]
+    fn a_true_beatmatch_still_blends() {
+        let grid = (0..200).map(|i| i as f64 * 2.0).collect::<Vec<_>>();
+        let mut out = analysis(0.0, 210.0, grid.clone());
+        out.beat_confidence = 0.9;
+        let mut inc = analysis(0.0, 210.0, grid);
+        inc.beat_confidence = 0.9;
+        let plan = plan_from(&out, &inc, 8.0);
+        assert!(!plan.style.is_effect(), "got {:?}", plan.style);
     }
 
     #[test]
@@ -3021,12 +3225,17 @@ mod tests {
         out.content_end = 170.0;
         let inc = analysis(0.5, 200.0, vec![]);
         let plan = plan_from(&out, &inc, 8.0);
-        assert_eq!(plan.style, TransitionStyle::EqualPower);
+        // No tempo is no longer a fade: the record washes out instead, and the
+        // wash still ends where the music does.
+        assert_eq!(plan.style, TransitionStyle::ReverbWash, "{}", plan.reason);
         assert!(
             (plan.transition_end_seconds - 170.0).abs() < 1e-6,
-            "plain fade ended at {}, not the content end",
+            "wash ended at {}, not the content end",
             plan.transition_end_seconds
         );
+        let fade = plain_fallback(8.0, &out);
+        assert_eq!(fade.style, TransitionStyle::EqualPower);
+        assert!((fade.transition_end_seconds - 170.0).abs() < 1e-6);
         assert_eq!(plan.bed_fraction, 0.0);
         assert_eq!(plan.dip_depth, 0.0);
     }

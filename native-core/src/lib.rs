@@ -94,6 +94,10 @@ pub enum TransitionStyleRec {
     DjFilter,
     DjBlend,
     Gapless,
+    EchoOut,
+    LoopRoll,
+    ReverbWash,
+    DropCut,
 }
 
 impl From<TransitionStyleRec> for TransitionStyle {
@@ -103,6 +107,10 @@ impl From<TransitionStyleRec> for TransitionStyle {
             TransitionStyleRec::DjFilter => TransitionStyle::DjFilter,
             TransitionStyleRec::DjBlend => TransitionStyle::DjBlend,
             TransitionStyleRec::Gapless => TransitionStyle::Gapless,
+            TransitionStyleRec::EchoOut => TransitionStyle::EchoOut,
+            TransitionStyleRec::LoopRoll => TransitionStyle::LoopRoll,
+            TransitionStyleRec::ReverbWash => TransitionStyle::ReverbWash,
+            TransitionStyleRec::DropCut => TransitionStyle::DropCut,
         }
     }
 }
@@ -148,6 +156,13 @@ pub struct TransitionPlanRec {
     /// transition schedulable when the container declares no duration of its
     /// own.
     pub outgoing_duration_seconds: f64,
+    /// See `mixer::TransitionPlan::beat_seconds`.
+    #[uniffi(default = 0.0)]
+    pub beat_seconds: f64,
+    /// Why the planner chose this style — for the transition log and the
+    /// audio pipeline readout.
+    #[uniffi(default = "")]
+    pub reason: String,
 }
 
 impl From<TransitionPlanRec> for TransitionPlan {
@@ -168,6 +183,8 @@ impl From<TransitionPlanRec> for TransitionPlan {
             dip_width: rec.dip_width,
             post_glide_seconds: rec.post_glide_seconds,
             outgoing_duration_seconds: rec.outgoing_duration_seconds,
+            beat_seconds: rec.beat_seconds,
+            reason: rec.reason,
         }
     }
 }
@@ -180,6 +197,10 @@ impl From<TransitionPlan> for TransitionPlanRec {
                 TransitionStyle::EqualPower => TransitionStyleRec::EqualPower,
                 TransitionStyle::DjFilter => TransitionStyleRec::DjFilter,
                 TransitionStyle::DjBlend => TransitionStyleRec::DjBlend,
+                TransitionStyle::EchoOut => TransitionStyleRec::EchoOut,
+                TransitionStyle::LoopRoll => TransitionStyleRec::LoopRoll,
+                TransitionStyle::ReverbWash => TransitionStyleRec::ReverbWash,
+                TransitionStyle::DropCut => TransitionStyleRec::DropCut,
             },
             bass_swap: plan.bass_swap,
             bass_swap_fraction: plan.bass_swap_fraction,
@@ -195,6 +216,8 @@ impl From<TransitionPlan> for TransitionPlanRec {
             dip_width: plan.dip_width,
             post_glide_seconds: plan.post_glide_seconds,
             outgoing_duration_seconds: plan.outgoing_duration_seconds,
+            beat_seconds: plan.beat_seconds,
+            reason: plan.reason,
         }
     }
 }
@@ -3054,28 +3077,7 @@ fn plan_automix_impl_with_tier(
                 .unwrap_or(0.0)
         },
     );
-    TransitionPlanRec {
-        style: match plan.style {
-            TransitionStyle::EqualPower => TransitionStyleRec::EqualPower,
-            TransitionStyle::DjFilter => TransitionStyleRec::DjFilter,
-            TransitionStyle::DjBlend => TransitionStyleRec::DjBlend,
-            TransitionStyle::Gapless => TransitionStyleRec::Gapless,
-        },
-        bass_swap: plan.bass_swap,
-        bass_swap_fraction: plan.bass_swap_fraction,
-        filter_sweep: plan.filter_sweep,
-        vocal_overlap: plan.vocal_overlap,
-        fade_seconds: plan.fade_seconds,
-        transition_end_seconds: plan.transition_end_seconds,
-        cue_seconds: plan.cue_seconds,
-        playback_rate: plan.playback_rate,
-        bed_fraction: plan.bed_fraction,
-        bed_gain_db: plan.bed_gain_db,
-        dip_depth: plan.dip_depth,
-        dip_width: plan.dip_width,
-        post_glide_seconds: plan.post_glide_seconds,
-        outgoing_duration_seconds: plan.outgoing_duration_seconds,
-    }
+    TransitionPlanRec::from(plan)
 }
 
 /// lofty-backed metadata read for the local library scanner (spec §4).
