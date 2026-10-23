@@ -53,7 +53,11 @@ struct DetailView: View {
     /// release header. Off until tapped, so a long list reads as a list first.
     @State private var searching = false
 
-    private var useDesktopHeader: Bool {
+    /// Whether the window is wide enough for the roomier header controls.
+    ///
+    /// A size class, not an idiom: an iPad in a narrow split view is a compact
+    /// window, and a Mac window can be narrowed to the same width.
+    private var isWide: Bool {
         #if os(macOS)
         true
         #else
@@ -114,17 +118,26 @@ struct DetailView: View {
         return GeometryReader { geo in
             let width = geo.size.width
             let height = geo.size.height
-            // Upstream's ratio math: ARTIST_PHOTO_RATIO = 0.95, SLEEVE_RATIO = 0.92
-            // Capped against window height (0.55) so the tracks aren't buried
-            let rawRatio: CGFloat = isArtist ? 0.95 : 0.92
-            let artHeight = min(width / rawRatio, height * 0.55)
+            // Upstream's ARTIST_PHOTO_RATIO = 0.95, capped against the window
+            // height so the tracks aren't buried under a portrait hero.
+            let artHeight = min(width / 0.95, height * 0.55)
+            // Where the title takes over the navigation bar. The release header
+            // is a stack rather than a fixed box, so its height is estimated from
+            // the sleeve it just laid out.
+            let headerHeight = isArtist ? artHeight + 44 : releaseSleeve(width) + 170
 
             ScrollView {
                 VStack(spacing: 0) {
-                    if useDesktopHeader && !isArtist {
-                        desktopHeaderView(page, tint: tint, isArtist: isArtist)
+                    if isArtist {
+                        artistHeader(page, tint: tint, artHeight: artHeight)
                     } else {
-                        headerView(page, tint: tint, isArtist: isArtist, artHeight: artHeight)
+                        releaseHeader(page, tint: tint, width: width)
+                    }
+
+                    if isArtist, let shelf = latestReleaseShelf(page), let card = shelf.items.first {
+                        latestReleaseCard(card)
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 10)
                     }
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -178,7 +191,7 @@ struct DetailView: View {
                             .padding(.top, 28)
                         }
 
-                        ForEach(page.sections) { shelf in
+                        ForEach(displaySections(page)) { shelf in
                             ShelfCarousel(shelf: shelf, inset: 28)
                                 .padding(.horizontal, 28)
                                 .padding(.top, 28)
@@ -190,7 +203,7 @@ struct DetailView: View {
                 .padding(.bottom, 36)
             }
             .onScrollGeometryChange(for: Bool.self) { geo in
-                geo.contentOffset.y > (artHeight - 50)
+                geo.contentOffset.y > (headerHeight - 50)
             } action: { _, isScrolled in
                 if scrolledPastHeader != isScrolled {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -199,7 +212,9 @@ struct DetailView: View {
                 }
             }
             #if os(iOS)
-            .ignoresSafeArea(edges: .top)
+            // Only the artist's hero runs under the status bar; a release header
+            // is a centred stack, and it starts below the navigation bar.
+            .ignoresSafeArea(edges: isArtist ? .top : [])
             #endif
             .background {
                 pageWash(tint: tint)
@@ -254,7 +269,7 @@ struct DetailView: View {
                 }
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                     .frame(width: 34, height: 34)
                     .background(.ultraThinMaterial, in: Circle())
@@ -265,94 +280,25 @@ struct DetailView: View {
         }
     }
 
-    /// Apple Music split header for iPad and Mac: artwork card on the left,
-    /// title, credits, metadata, and full action row on the right.
-    private func desktopHeaderView(
+    /// The artist page's hero: the photo edge to edge, dissolved into the page
+    /// wash at its foot, with the name and controls sitting on the join.
+    ///
+    /// Upstream's `ArtistHeader` plus `PageBackground`: an artist's picture is
+    /// the page's colour story rather than a framed sleeve, which is what tells
+    /// an artist page apart from a release at a glance.
+    private func artistHeader(
         _ page: DetailPageModel,
         tint: ArtworkPalette.PageTint,
-        isArtist: Bool
-    ) -> some View {
-        let lines = headerLines(page)
-        let credit = lines.credit.isEmpty ? (page.songs.first?.artist ?? "") : lines.credit
-        let artistId = page.songs.first?.artistId
-
-        return HStack(alignment: .bottom, spacing: 32) {
-            ZStack {
-                ArtworkView(url: page.thumbnailUrl, data: headerArt, side: 240)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .shadow(color: .black.opacity(0.24), radius: 16, y: 8)
-                if let canvasURL {
-                    CanvasPlayer(url: canvasURL, fallbackURL: canvasFallbackURL, isPlaying: true)
-                        .frame(width: 240, height: 240)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(isArtist ? "ARTIST" : (kind(of: page) == .playlist ? "PLAYLIST" : "ALBUM"))
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
-                    .tracking(1)
-
-                Text(page.title.isEmpty ? initialTitle : page.title)
-                    .font(.system(size: 32, weight: .bold))
-                    .lineLimit(2)
-
-                if !credit.isEmpty {
-                    if let artistId, kind(of: page) != .artist {
-                        NavigationLink(destination: DetailView(browseId: artistId, initialTitle: credit)) {
-                            Text(credit)
-                                .font(.title3.weight(.semibold))
-                                .foregroundStyle(tint.accent)
-                                .lineLimit(1)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Text(credit)
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(tint.accent)
-                            .lineLimit(1)
-                    }
-                }
-
-                if !lines.meta.isEmpty {
-                    Text(lines.meta)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                if isArtist, page.subscriberCountText != nil || page.monthlyListenerCount != nil {
-                    artistStatsRow(page: page, tint: tint)
-                }
-
-                if !page.songs.isEmpty {
-                    actionRow(page, tint: tint, isArtist: isArtist)
-                        .padding(.top, 8)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.horizontal, 32)
-        .padding(.top, 28)
-        .padding(.bottom, 20)
-        .frame(maxWidth: 860)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// Header zone: hero artwork with gradient fade, MergeBand glass, and pinned title/credit/actions.
-    private func headerView(
-        _ page: DetailPageModel,
-        tint: ArtworkPalette.PageTint,
-        isArtist: Bool,
         artHeight: CGFloat
     ) -> some View {
         let lines = headerLines(page)
+        let title = page.title.isEmpty ? initialTitle : page.title
         let credit = lines.credit.isEmpty ? (page.songs.first?.artist ?? "") : lines.credit
-        let artistId = page.songs.first?.artistId
+        // A page whose subtitle repeats its own name (which artist pages often
+        // do, by way of the top songs' credit) does not need to say it twice.
+        let showCredit = !credit.isEmpty && credit.localizedCaseInsensitiveCompare(title) != .orderedSame
 
         return ZStack(alignment: .bottom) {
-            // Hero artwork at the top
             ZStack(alignment: .top) {
                 heroImage(url: page.thumbnailUrl, data: headerArt, height: artHeight)
 
@@ -362,7 +308,8 @@ struct DetailView: View {
                         .clipped()
                 }
 
-                // Upstream's gradient: settling the foot of the picture onto the wash colour
+                // Upstream's gradient: settling the foot of the picture onto the
+                // wash colour the page is painted in.
                 LinearGradient(
                     stops: [
                         .init(color: .clear, location: 0.35),
@@ -383,34 +330,21 @@ struct DetailView: View {
                     .allowsHitTesting(false)
             }
 
-            // Foreground Text and Actions pinned to the bottom of the header
             VStack(spacing: 6) {
-                Text(page.title.isEmpty ? initialTitle : page.title)
-                    .font(isArtist ? .system(size: 32, weight: .bold) : .title2.weight(.bold))
+                Text(title)
+                    .font(.largeTitle.bold())
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .minimumScaleFactor(0.8)
                     .padding(.horizontal, 24)
 
-                if !credit.isEmpty {
-                    if let artistId, kind(of: page) != .artist {
-                        NavigationLink(destination: DetailView(browseId: artistId, initialTitle: credit)) {
-                            Text(credit)
-                                .font(.headline.weight(.semibold))
-                                .foregroundStyle(tint.accent)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(1)
-                        }
-                        .buttonStyle(.plain)
+                if showCredit {
+                    Text(credit)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(tint.accent)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(1)
                         .padding(.horizontal, 24)
-                    } else {
-                        Text(credit)
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(tint.accent)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(1)
-                            .padding(.horizontal, 24)
-                    }
                 }
 
                 if !lines.meta.isEmpty {
@@ -424,13 +358,13 @@ struct DetailView: View {
                         .padding(.horizontal, 24)
                 }
 
-                if isArtist, page.subscriberCountText != nil || page.monthlyListenerCount != nil {
+                if page.subscriberCountText != nil || page.monthlyListenerCount != nil {
                     artistStatsRow(page: page, tint: tint)
                         .padding(.top, 4)
                 }
 
                 if !page.songs.isEmpty {
-                    actionRow(page, tint: tint, isArtist: isArtist)
+                    actionRow(page, tint: tint, isArtist: true)
                         .padding(.top, 10)
                 }
             }
@@ -440,7 +374,86 @@ struct DetailView: View {
         .frame(height: artHeight + 44) // Upstream's HEADER_DROP = 44dp
     }
 
-    /// Single horizontal row of circular action buttons, matching upstream's ReleaseHeader and ActionRow.
+    /// A release header: the sleeve centred on its own shadow, the title, a
+    /// tappable credit, the "year · songs · length" line, then Play and Shuffle.
+    ///
+    /// This is the layout for both an album and a playlist, at every width —
+    /// Apple Music centres the sleeve on a phone and on a Mac alike; only the
+    /// sleeve and the controls' shape change with the room available.
+    private func releaseHeader(
+        _ page: DetailPageModel,
+        tint: ArtworkPalette.PageTint,
+        width: CGFloat
+    ) -> some View {
+        let lines = headerLines(page)
+        let credit = lines.credit.isEmpty ? (page.songs.first?.artist ?? "") : lines.credit
+        let artistId = page.songs.first?.artistId
+        let sleeve = releaseSleeve(width)
+        let info = releaseInfoLine(page)
+
+        return VStack(spacing: 14) {
+            ZStack {
+                ArtworkView(url: page.thumbnailUrl, data: headerArt, side: sleeve)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .shadow(color: .black.opacity(0.24), radius: 18, y: 9)
+                if let canvasURL {
+                    CanvasPlayer(url: canvasURL, fallbackURL: canvasFallbackURL, isPlaying: true)
+                        .frame(width: sleeve, height: sleeve)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+            }
+
+            VStack(spacing: 5) {
+                Text(page.title.isEmpty ? initialTitle : page.title)
+                    .font(.largeTitle.bold())
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.7)
+
+                if !credit.isEmpty {
+                    if let artistId {
+                        NavigationLink(destination: DetailView(browseId: artistId, initialTitle: credit)) {
+                            Text(credit)
+                                .font(.title3)
+                                .foregroundStyle(tint.accent)
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Text(credit)
+                            .font(.title3)
+                            .foregroundStyle(tint.accent)
+                            .lineLimit(1)
+                    }
+                }
+
+                if !info.isEmpty {
+                    Text(info)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 8)
+
+            if !page.songs.isEmpty {
+                actionRow(page, tint: tint, isArtist: false)
+                    .padding(.top, 6)
+            }
+        }
+        .frame(maxWidth: 860)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.top, isWide ? 24 : 10)
+        .padding(.bottom, 22)
+    }
+
+    /// The header's controls.
+    ///
+    /// A release on a wide window gets the two capsules Apple Music uses; a
+    /// phone gets the circular pair, which keeps the row inside a 375pt screen
+    /// at any text size. The artist page keeps its labelled Play beside
+    /// Subscribe, Follow's equivalent.
     private func actionRow(
         _ page: DetailPageModel,
         tint: ArtworkPalette.PageTint,
@@ -478,7 +491,25 @@ struct DetailView: View {
                         context: page.title, contextID: browseId, shuffleRequested: true, shuffleStart: true
                     )
                 }
+
+                artistMoreMenu(page)
             } else {
+                if isWide {
+                    PlayPill(iconOnly: false, isPlaying: controller.isPlaybackContextPlaying(browseId)) {
+                        playContext(page)
+                    }
+                    ShufflePill {
+                        playContext(page, shuffled: true)
+                    }
+                } else {
+                    PlayPill(iconOnly: true, isPlaying: controller.isPlaybackContextPlaying(browseId)) {
+                        playContext(page)
+                    }
+                    CircleIconButton(icon: Image(.bchShuffle), label: "Shuffle") {
+                        playContext(page, shuffled: true)
+                    }
+                }
+
                 if auth.signedIn, page.libraryPlaylistId != nil {
                     CircleIconButton(
                         icon: Image(systemName: saved ? "checkmark" : "plus"),
@@ -489,24 +520,6 @@ struct DetailView: View {
                     ) {
                         Task { await toggleSave(page) }
                     }
-                }
-
-                CircleIconButton(
-                    icon: Image(.bchShuffle),
-                    label: "Shuffle"
-                ) {
-                    controller.play(
-                        page.songs.map { toEntry($0, fallbackArt: fallbackArt(page)) },
-                        context: page.title, contextID: browseId, shuffleRequested: true, shuffleStart: true
-                    )
-                }
-
-                PlayPill(iconOnly: true, isPlaying: controller.isPlaybackContextPlaying(browseId)) {
-                    let entries = page.songs.map { toEntry($0, fallbackArt: fallbackArt(page)) }
-                    controller.togglePlaybackContext(
-                        entries, title: page.title, contextID: browseId,
-                        shuffleRequested: controller.shuffleEnabled
-                    )
                 }
 
                 CircleIconButton(
@@ -521,44 +534,81 @@ struct DetailView: View {
                     }
                 }
 
-                CircleMenuButton(label: "More actions") {
-                    Button(pinned ? "Unpin" : "Pin") {
-                        if PlaylistPinning.toggle(browseId: browseId) {
-                            pinned.toggle()
-                        } else {
-                            appModel.pinLimitAlert = true
-                        }
-                    }
-                    Button("Download") {
-                        Task {
-                            switch await DownloadStore.shared.downloadCollection(browseId: browseId) {
-                            case .started:
-                                toast.show("Downloading \(page.title)")
-                            case .blockedByWifiOnly:
-                                toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
-                            case .alreadyExists:
-                                toast.show("This collection is already downloading or downloaded", kind: .info)
-                            case .ignoredLocalTrack:
-                                break
-                            }
-                        }
-                    }
-                    if kind(of: page) == .playlist, page.playlistOwned == true {
-                        Button("Rename Playlist…") {
-                            renameTitle = page.title
-                            renamePresented = true
-                        }
-                        Button("Privacy: \(privacy.capitalized)") {
-                            privacyPresented = true
-                        }
-                        Button("Remove Duplicates") {
-                            Task { await removeDuplicates(page) }
-                        }
-                    }
-                }
+                releaseMoreMenu(page)
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    /// Plays or pauses this page as a context, with the current shuffle state.
+    private func playContext(_ page: DetailPageModel, shuffled: Bool = false) {
+        let entries = page.songs.map { toEntry($0, fallbackArt: fallbackArt(page)) }
+        if shuffled {
+            controller.play(
+                entries, context: page.title, contextID: browseId,
+                shuffleRequested: true, shuffleStart: true
+            )
+        } else {
+            controller.togglePlaybackContext(
+                entries, title: page.title, contextID: browseId,
+                shuffleRequested: controller.shuffleEnabled
+            )
+        }
+    }
+
+    /// An artist's overflow: the page's own actions, none of which belong in the
+    /// top bar because the bar is about the page and this is about the artist.
+    private func artistMoreMenu(_ page: DetailPageModel) -> some View {
+        CircleMenuButton(label: "More actions") {
+            if let urlString = page.url, let url = URL(string: urlString) {
+                ShareLink(item: url) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                Link(destination: url) {
+                    Label("Open in YouTube Music", systemImage: "arrow.up.right.square")
+                }
+            }
+        }
+    }
+
+    /// A release's overflow: pin, download and, for a playlist of one's own,
+    /// rename, privacy and de-duplication.
+    private func releaseMoreMenu(_ page: DetailPageModel) -> some View {
+        CircleMenuButton(label: "More actions") {
+            Button(pinned ? "Unpin" : "Pin") {
+                if PlaylistPinning.toggle(browseId: browseId) {
+                    pinned.toggle()
+                } else {
+                    appModel.pinLimitAlert = true
+                }
+            }
+            Button("Download") {
+                Task {
+                    switch await DownloadStore.shared.downloadCollection(browseId: browseId) {
+                    case .started:
+                        toast.show("Downloading \(page.title)")
+                    case .blockedByWifiOnly:
+                        toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
+                    case .alreadyExists:
+                        toast.show("This collection is already downloading or downloaded", kind: .info)
+                    case .ignoredLocalTrack:
+                        break
+                    }
+                }
+            }
+            if kind(of: page) == .playlist, page.playlistOwned == true {
+                Button("Rename Playlist…") {
+                    renameTitle = page.title
+                    renamePresented = true
+                }
+                Button("Privacy: \(privacy.capitalized)") {
+                    privacyPresented = true
+                }
+                Button("Remove Duplicates") {
+                    Task { await removeDuplicates(page) }
+                }
+            }
+        }
     }
 
     /// Sleek inline filter bar displayed when searching is toggled on.
@@ -701,6 +751,111 @@ struct DetailView: View {
             .allowsHitTesting(false)
         }
         .ignoresSafeArea()
+    }
+
+    /// The sleeve size a release header uses at this window width.
+    private func releaseSleeve(_ width: CGFloat) -> CGFloat {
+        isWide ? 240 : min(210, max(140, width * 0.5))
+    }
+
+    /// "2023 · 12 songs · 48 minutes" — the line under a release's credit.
+    ///
+    /// The year comes from the subtitle YouTube already sends; the count and the
+    /// length are this page's own rows, so a playlist shows its real running
+    /// time rather than a catalogue figure (F10).
+    private func releaseInfoLine(_ page: DetailPageModel) -> String {
+        let songs = page.songs
+        var pieces: [String] = []
+        if let year = releaseYear(page) { pieces.append(year) }
+        if !songs.isEmpty {
+            pieces.append("\(songs.count) \(songs.count == 1 ? "song" : "songs")")
+            let total = songs.reduce(0) { $0 + durationToSeconds($1.durationText) }
+            if total > 0 { pieces.append(lengthText(total)) }
+        }
+        return pieces.joined(separator: " · ")
+    }
+
+    /// The four-digit year in a page subtitle, when it has one.
+    private func releaseYear(_ page: DetailPageModel) -> String? {
+        page.subtitle
+            .split(whereSeparator: { $0 == "•" || $0 == "·" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { $0.count == 4 && $0.allSatisfy(\.isNumber) }
+    }
+
+    /// "48 minutes", or "1 hour 12 minutes" past the hour.
+    private func lengthText(_ seconds: Int) -> String {
+        let minutes = seconds / 60
+        if minutes < 60 {
+            return "\(minutes) \(minutes == 1 ? "minute" : "minutes")"
+        }
+        let hours = minutes / 60
+        let rest = minutes % 60
+        let hourLabel = "\(hours) \(hours == 1 ? "hour" : "hours")"
+        return rest == 0 ? hourLabel : "\(hourLabel) \(rest) minutes"
+    }
+
+    /// An artist's "Latest release" carousel, which the header promotes to a
+    /// card of its own when there is one.
+    private func latestReleaseShelf(_ page: DetailPageModel) -> FeedShelf? {
+        page.sections.first {
+            $0.title.localizedCaseInsensitiveContains("latest release") && !$0.items.isEmpty
+        }
+    }
+
+    /// The shelves to draw as carousels. The latest release has already been
+    /// shown once, under the header, so it is not shown again below.
+    private func displaySections(_ page: DetailPageModel) -> [FeedShelf] {
+        let promoted = latestReleaseShelf(page)?.id
+        return page.sections.filter { $0.id != promoted }
+    }
+
+    /// The promoted latest release: sleeve, title, credit, tappable through to
+    /// the release's own page.
+    @ViewBuilder
+    private func latestReleaseCard(_ card: ShelfCard) -> some View {
+        if let id = card.browseId, !id.isEmpty {
+            NavigationLink(destination: DetailView(browseId: id, initialTitle: card.title)) {
+                latestReleaseBody(card)
+            }
+            .buttonStyle(.plain)
+        } else {
+            latestReleaseBody(card)
+        }
+    }
+
+    private func latestReleaseBody(_ card: ShelfCard) -> some View {
+        HStack(spacing: 14) {
+            ArtworkView(url: card.thumbnailUrl, data: nil, side: 72)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .shadow(color: .black.opacity(0.16), radius: 6, y: 3)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Latest Release")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .tracking(0.6)
+                    .textCase(.uppercase)
+                Text(card.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                if let subtitle = card.subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 8)
+            Image(.bchChevronRight)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 12)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(12)
+        .frame(maxWidth: 860)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(.rect)
     }
 
     /// Upstream's `playtimeSummary`: "16 songs, 48 minutes"
@@ -1095,6 +1250,36 @@ private struct PlayPill: View {
     }
 }
 
+/// The secondary half of a release header's Play/Shuffle pair.
+///
+/// A capsule rather than a circle, so it reads as the peer of Play at a wide
+/// width; the phone layout keeps a circle, which fits beside the sleeve's title.
+private struct ShufflePill: View {
+    var size: CGFloat = 46
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(.bchShuffle)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size * 0.38, height: size * 0.38)
+                Text("Shuffle")
+                    .font(.body.weight(.semibold))
+            }
+            .padding(.horizontal, 20)
+            .frame(height: size)
+            .background(.thinMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(.primary.opacity(0.12), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Shuffle")
+        .help("Shuffle")
+    }
+}
+
 private struct CircleMenuButton<Content: View>: View {
     let label: String
     var size: CGFloat = 46
@@ -1108,7 +1293,7 @@ private struct CircleMenuButton<Content: View>: View {
                 .fill(Color.primary.opacity(0.12))
                 .overlay {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: size * 0.42, weight: .semibold))
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(Color.primary)
                 }
                 .frame(width: size, height: size)
