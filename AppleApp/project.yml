@@ -9,6 +9,7 @@ attributes:
   LastUpgradeCheck: "1520"
 options:
   createIntermediateGroups: true
+  developmentLanguage: en
   xcodeVersion: "15.0"
   deploymentTarget:
     iOS: "18.0"
@@ -20,6 +21,10 @@ settings:
     CURRENT_PROJECT_VERSION: "3"
     # Typed asset symbols (Image(.bchHome)) — Xcode 15+ asset codegen.
     ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: "YES"
+    # String Catalog localization (upstream ships 19 locales; translations
+    # carried over from its strings.xml where the English matches exactly).
+    LOCALIZATION_PREFERS_STRING_CATALOGS: "YES"
+    SWIFT_EMIT_LOC_STRINGS: "YES"
     # Each developer selects their own Team in Xcode's Signing & Capabilities.
     CODE_SIGN_STYLE: Automatic
     # The spec (§0) ports arm64 targets only: iosArm64, iosSimulatorArm64,
@@ -60,6 +65,8 @@ targets:
       - path: Resources/Models
         optional: true
         type: folder
+        buildPhase: resources
+      - path: Resources/Localization
         buildPhase: resources
       - path: Resources/AudioLicenses
         type: folder

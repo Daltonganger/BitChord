@@ -380,10 +380,22 @@ object InnertubeParser {
         }
     }
 
-    /** The token for the next page of a browse feed, null once exhausted. */
+    /**
+     * The token for the next page of a browse feed, null once exhausted.
+     *
+     * Two formats are in circulation (upstream #816): the command directly on
+     * the endpoint, and — newer — wrapped in a `commandExecutorCommand` next to
+     * a playlist-voting popup. Only the first renderer's endpoint is read, at
+     * exactly those two depths: a page with several shelves carries several
+     * renderers, and a token found deeper may page a different shelf.
+     */
     fun continuationToken(root: JsonElement): String? {
-        collectRenderers(root, "continuationItemRenderer").firstOrNull()
-            .o("continuationEndpoint").o("continuationCommand").s("token")
+        val endpoint = collectRenderers(root, "continuationItemRenderer").firstOrNull()
+            .o("continuationEndpoint")
+        (endpoint.o("continuationCommand")
+            ?: endpoint.o("commandExecutorCommand").a("commands")
+                ?.firstNotNullOfOrNull { it.o("continuationCommand") })
+            .s("token")
             ?.let { return it }
         return collectRenderers(root, "nextContinuationData").firstOrNull().s("continuation")
     }
@@ -697,9 +709,7 @@ object InnertubeParser {
             .distinctBy { it.videoId }
         val songs = parsed.filter { it.setVideoId != null }
         val suggested = parsed.filter { it.setVideoId == null }
-        val token = collectRenderers(scope, "continuationItemRenderer").firstOrNull()
-            .o("continuationEndpoint").o("continuationCommand").s("token")
-            ?: collectRenderers(scope, "nextContinuationData").firstOrNull().s("continuation")
+        val token = continuationToken(scope)
         return PlaylistShelfPage(songs, token, suggested)
     }
 

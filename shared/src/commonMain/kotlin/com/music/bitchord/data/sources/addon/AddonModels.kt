@@ -2,6 +2,10 @@ package com.music.bitchord.data.sources.addon
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
 
 /**
  * Port of upstream `data/sources/addon/AddonModels.kt` — the documents an addon
@@ -25,9 +29,25 @@ data class AddonManifest(
     val search: AddonSearchEndpoint? = null,
     val stream: AddonStreamEndpoint? = null,
     val links: List<AddonLink> = emptyList(),
+    /**
+     * `allowDownloads` (upstream v1.8) — whether the addon lets its streams be
+     * saved. `0`/`false` keeps it to playback: a download skips it and takes the
+     * next source. Absent means allowed.
+     */
+    val allowDownloads: JsonElement? = null,
+    /**
+     * `checkValidLossless` (upstream v1.8) — the addon is only to be used when
+     * the output can carry lossless audio (wired, USB, built-in, AirPlay; not a
+     * Bluetooth AAC link). Absent means no such requirement.
+     */
+    val checkValidLossless: JsonElement? = null,
 ) {
     /** What the sources screen shows. Never blank, even for a terse manifest. */
     val displayName: String get() = name.ifBlank { id.ifBlank { "Addon" } }
+
+    val downloadsAllowed: Boolean get() = allowDownloads.asFlag() ?: true
+
+    val requiresLosslessOutput: Boolean get() = checkValidLossless.asFlag() ?: false
 
     /**
      * Whether this addon can take a track from a query to audio.
@@ -148,4 +168,16 @@ data class AddonStream(
      */
     val isDolbyAtmos: Boolean
         get() = codec?.lowercase() in setOf("eac3-joc", "ec3-joc", "dolby-atmos")
+}
+
+/** `true`/`1`/`"1"`/`"true"` → true, `false`/`0` → false, anything else → null. */
+internal fun JsonElement?.asFlag(): Boolean? {
+    val primitive = this as? JsonPrimitive ?: return null
+    primitive.booleanOrNull?.let { return it }
+    primitive.intOrNull?.let { return it != 0 }
+    return when (primitive.content.trim().lowercase()) {
+        "1", "true", "yes" -> true
+        "0", "false", "no" -> false
+        else -> null
+    }
 }

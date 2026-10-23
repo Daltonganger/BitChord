@@ -1,5 +1,6 @@
 import AVFoundation
 import Observation
+import BitChordShared
 #if os(iOS)
 import UIKit
 #endif
@@ -32,6 +33,15 @@ final class AudioRouteState {
         // macOS does not expose AVAudioSession's confirmed spatial state.
         systemSpatialEnabled = nil
         #endif
+        // Addons that declare `checkValidLossless` sit out while this is false.
+        PlaybackCodecCapabilities.shared.setLosslessOutput(value: carriesLossless)
+    }
+
+    /// Whether this route can carry lossless audio. Bluetooth (AAC/SBC) is the
+    /// one common route that cannot; wired, USB, built-in, HDMI and AirPlay can.
+    var carriesLossless: Bool {
+        let lowered = kind.lowercased()
+        return !lowered.contains("bluetooth")
     }
 
     var spatialDescription: String {
