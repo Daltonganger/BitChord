@@ -127,9 +127,10 @@ object SpotifyImport {
      *
      * With a session this walks the Web API's pages of 100, so a playlist of
      * 400 tracks is four requests and the count the host shows is the real one.
-     * Without one the public web player's own page is read instead — a share
-     * link has to work for someone who never set up a cookie, and what that page
-     * carries is the whole list Spotify itself shows.
+     * Without one the public embed page is read instead — a share link has to
+     * work for someone who never set up a cookie. That page stops at 100 tracks,
+     * so a longer playlist is finished through the web player's own query with
+     * the anonymous token the page hands out (see [remainingPublicTracks]).
      */
     suspend fun loadPlaylist(id: String): Playlist =
         if (SpotifyToken.accessToken() != null) loadPlaylistFromApi(id) else loadPublicPlaylist(id)
@@ -210,7 +211,87 @@ object SpotifyImport {
                 )
             }
             .orEmpty()
-        return Playlist(id, name, tracks)
+        if (tracks.size < EMBED_TRACK_LIMIT) return Playlist(id, name, tracks)
+        // The page's own anonymous token reads the rest. If Spotify refuses it,
+        // the 100 already read still import rather than failing the whole list.
+        val token = sessionToken(json.parseToJsonElement(payload))
+            ?: return Playlist(id, name, tracks)
+        val rest = runCatching { remainingPublicTracks(id, token, tracks.size) }.getOrDefault(emptyList())
+        return Playlist(id, name, tracks + rest)
+    }
+
+    /** Tracks the embed page lists before it cuts off. */
+    private const val EMBED_TRACK_LIMIT = 100
+    private const val PATHFINDER = "https://api-partner.spotify.com/pathfinder/v1/query"
+    /** The web player's persisted `fetchPlaylist` query (upstream uses the same). */
+    private const val FETCH_PLAYLIST_HASH = "19ff1327c29e99c208c86d7a9d8f1929cfdf3d3202a0ff4253c821f1901aa94d"
+
+    /** `props.pageProps.state.settings.session.accessToken` on the embed page. */
+    private fun sessionToken(root: kotlinx.serialization.json.JsonElement): String? =
+        (root as? JsonObject)?.get("props")?.jsonObject
+            ?.get("pageProps")?.jsonObject
+            ?.get("state")?.jsonObject
+            ?.get("settings")?.jsonObject
+            ?.get("session")?.jsonObject
+            ?.get("accessToken")?.jsonPrimitive?.contentOrNull
+            ?.takeIf { it.isNotBlank() }
+
+    /** Every track from [start] to the end, a page of 100 at a time. */
+    private suspend fun remainingPublicTracks(id: String, token: String, start: Int): List<Track> {
+        val out = mutableListOf<Track>()
+        var offset = start
+        while (true) {
+            val response = Http.getRaw(
+                PATHFINDER,
+                headers = mapOf(
+                    "Authorization" to "Bearer $token",
+                    "App-platform" to "WebPlayer",
+                    "Accept" to "application/json",
+                    "User-Agent" to BROWSER_UA,
+                ),
+                query = mapOf(
+                    "operationName" to "fetchPlaylist",
+                    "variables" to """{"uri":"spotify:playlist:$id","offset":$offset,"limit":$PAGE,"enableWatchFeedEntrypoint":false}""",
+                    "extensions" to """{"persistedQuery":{"version":1,"sha256Hash":"$FETCH_PLAYLIST_HASH"}}""",
+                ),
+            )
+            if (response.status !in 200..299) break
+            val (items, total) = parsePathfinderPage(response.body ?: break)
+            out += items.tracks
+            offset += items.read
+            if (items.read == 0 || total == null || offset >= total) break
+        }
+        return out
+    }
+
+    /** One `fetchPlaylist` page: its tracks, how many rows it held, and the total. */
+    data class PathfinderPage(val tracks: List<Track>, val read: Int)
+
+    /** Pure, for tests: a `fetchPlaylist` response body → its tracks and the playlist's total. */
+    fun parsePathfinderPage(body: String): Pair<PathfinderPage, Int?> {
+        val content = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
+            ?.get("data")?.jsonObject
+            ?.get("playlistV2")?.jsonObject
+            ?.get("content")?.jsonObject
+            ?: return PathfinderPage(emptyList(), 0) to null
+        val items = (content["items"] as? kotlinx.serialization.json.JsonArray).orEmpty()
+        val tracks = items.mapNotNull { item ->
+            val data = (item as? JsonObject)?.get("itemV2")?.jsonObject?.get("data")?.jsonObject
+                ?: return@mapNotNull null
+            val title = data["name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            if (title.isEmpty()) return@mapNotNull null
+            Track(
+                title = title,
+                artists = (data["artists"]?.jsonObject?.get("items") as? kotlinx.serialization.json.JsonArray)
+                    ?.mapNotNull { (it as? JsonObject)?.get("profile")?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull }
+                    ?.joinToString(", ")
+                    .orEmpty(),
+                durationMs = data["trackDuration"]?.jsonObject?.get("totalMilliseconds")?.jsonPrimitive?.longOrNull ?: 0L,
+                album = data["albumOfTrack"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull,
+            )
+        }
+        val total = content["totalCount"]?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+        return PathfinderPage(tracks, items.size) to total
     }
 
     /** The object anywhere in a page's JSON that carries a `trackList`. */

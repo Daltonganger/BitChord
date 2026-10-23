@@ -1888,6 +1888,7 @@ struct SavedPlaylistsView: View {
     @State private var dataGeneration: Int64?
     @State private var loading = true
     @State private var error: String?
+    @State private var showSpotifyImport = false
 
     private var items: [ShelfCard] {
         libraryShelf(titled: "playlists", in: shelves)?.items ?? []
@@ -1939,6 +1940,19 @@ struct SavedPlaylistsView: View {
             }
         }
         #endif
+        .toolbar {
+            if auth.signedIn {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Import from Spotify", systemImage: "square.and.arrow.down") {
+                        showSpotifyImport = true
+                    }
+                    .help("Import a Spotify playlist by link")
+                }
+            }
+        }
+        .sheet(isPresented: $showSpotifyImport) {
+            SpotifyImportSheet()
+        }
         .task(id: auth.sessionEpoch) { await load() }
     }
 
