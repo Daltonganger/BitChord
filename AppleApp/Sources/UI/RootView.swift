@@ -25,6 +25,9 @@ struct RootView: View {
     @State private var homeFeed = FeedLoader(.home)
     #if os(iOS)
     @Namespace private var nowPlayingZoom
+    /// Regular width is the iPad layout — on any device. A Max phone turned
+    /// sideways is a regular-width window too, and it has the room.
+    @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
     @AppStorage(OnboardingView.doneKey) private var onboardingDone = false
     @State private var onboardingPresented = false
@@ -339,7 +342,7 @@ struct RootView: View {
                 Label("Search", systemImage: "magnifyingglass")
             }
             #else
-            if UIDevice.current.userInterfaceIdiom == .pad {
+            if sizeClass == .regular {
                 Tab("Home", systemImage: "house.fill", value: AppModel.Tab.home) {
                     HomeView(feed: homeFeed).modifier(iPadPlaybackChrome())
                 }
@@ -508,7 +511,7 @@ struct RootView: View {
         if tab == .library { return .libraryYouTube }
         return tab
         #else
-        if UIDevice.current.userInterfaceIdiom == .pad && tab == .library {
+        if sizeClass == .regular && tab == .library {
             return .libraryYouTube
         }
         return tab
@@ -620,18 +623,23 @@ private final class MacWindowToolbarView: NSView {
 /// The accessory is tab-level, so it is unaffected by iPad sidebar
 /// collapse/expand; inset mounting broke that and overlapped the tab bar.
 struct PlaybackPillMount: ViewModifier {
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    #endif
+
     func body(content: Content) -> some View {
         #if os(iOS)
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            // iPad mounts per tab (iPadPlaybackChrome): the tab-level
-            // accessory container spans full width and stretches the pill,
-            // and a TabView-level inset never reflows with the sidebar.
-            content
-        } else if #available(iOS 26.0, *) {
+        if #available(iOS 26.0, *) {
+            // One mount for every iOS device from 26: the system bottom
+            // accessory reflows with the sidebar on its own.
             content.tabViewBottomAccessory {
                 PlaybackPill()
                     .frame(maxWidth: .infinity)
             }
+        } else if sizeClass == .regular {
+            // Before 26 an iPad mounts per tab (iPadPlaybackChrome): the
+            // TabView-level inset never reflows with the sidebar.
+            content
         } else {
             fallbackMount(content)
         }
@@ -662,8 +670,13 @@ struct PlaybackPillMount: ViewModifier {
 /// compact pill instead of the full-width stretch of the tab-level
 /// accessory container. No-op on iPhone, which mounts once at the TabView.
 struct iPadPlaybackChrome: ViewModifier {
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    @ViewBuilder
     func body(content: Content) -> some View {
-        if UIDevice.current.userInterfaceIdiom == .pad {
+        // From 26 the pill is the system's bottom accessory, mounted once at the
+        // TabView; this is only the pre-26 per-tab fallback.
+        if sizeClass == .regular, #unavailable(iOS 26.0) {
             content.safeAreaInset(edge: .bottom) {
                 PlaybackPill()
                     .frame(maxWidth: 620)
@@ -684,10 +697,11 @@ struct iPadPlaybackChrome: ViewModifier {
 struct NowPlayingTakeover: ViewModifier {
     @Binding var isPresented: Bool
     var zoomNamespace: Namespace.ID
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     func body(content: Content) -> some View {
         Group {
-            if UIDevice.current.userInterfaceIdiom == .pad {
+            if sizeClass == .regular {
                 // Full screen, unconditionally: `.page` sheet sizing renders
                 // as a floating card on iPadOS 27, and only a cover is
                 // guaranteed edge to edge.
@@ -707,9 +721,11 @@ struct NowPlayingTakeover: ViewModifier {
 }
 
 private struct NowPlayingSheetSizing: ViewModifier {
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
     @ViewBuilder
     func body(content: Content) -> some View {
-        if UIDevice.current.userInterfaceIdiom == .pad {
+        if sizeClass == .regular {
             content
                 .presentationDetents([.large])
                 .presentationSizing(.page)

@@ -34,6 +34,7 @@ struct MiniPlayerView: View {
                     }
                     .buttonStyle(.plain)
                     .help(controller.isLiked ? "Remove from Liked" : "Like")
+                    .accessibilityLabel(controller.isLiked ? "Remove from Liked" : "Like")
                 }
             }
             progress
@@ -111,7 +112,7 @@ struct MiniPlayerView: View {
     private func transportButton(_ symbol: String, help: String, size: CGFloat = 17, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: size, weight: .semibold))
+                .scaledFont(size: size, weight: .semibold)
                 .frame(width: 36, height: 30)
                 .contentShape(.rect)
         }

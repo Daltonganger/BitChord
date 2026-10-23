@@ -769,7 +769,7 @@ struct LibraryView: View {
                                 HistoryView()
                             } label: {
                                 Image(systemName: "clock")
-                                    .font(.system(size: 15, weight: .medium))
+                                    .scaledFont(size: 15, weight: .medium)
                                     .foregroundStyle(.primary)
                                     .frame(width: 40, height: 34)
                                     .contentShape(.rect)
@@ -785,7 +785,7 @@ struct LibraryView: View {
                                 pickFolder()
                             } label: {
                                 Image(systemName: "plus")
-                                    .font(.system(size: 15, weight: .medium))
+                                    .scaledFont(size: 15, weight: .medium)
                                     .foregroundStyle(.primary)
                                     .frame(width: 40, height: 34)
                                     .contentShape(.rect)
@@ -794,7 +794,7 @@ struct LibraryView: View {
                             .accessibilityLabel("Scan a folder")
                         }
                         .padding(.horizontal, 6)
-                        .background(.ultraThinMaterial, in: Capsule())
+                        .chromeGlass(in: Capsule())
                         .overlay(Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
 
                         TopBarAccountButton()
@@ -810,6 +810,7 @@ struct LibraryView: View {
                                 .frame(width: 15)
                         }
                         .help("Scan a folder")
+                        .accessibilityLabel("Scan a Folder")
                     }
                     #endif
                 }
@@ -957,7 +958,7 @@ struct LibraryLandingView: View {
                     .fill(Color.accentColor.opacity(0.12))
                     .frame(width: 56, height: 56)
                 Image(systemName: "person.crop.circle.badge.plus")
-                    .font(.system(size: 26, weight: .semibold))
+                    .scaledFont(size: 26, weight: .semibold)
                     .foregroundStyle(.tint)
             }
             Text("Sign in for your library")
@@ -1098,7 +1099,7 @@ struct OnDeviceCard<Destination: View>: View {
                         .fill(tintColor.opacity(0.12))
                         .frame(width: 160, height: 160)
                     Image(systemName: systemImage)
-                        .font(.system(size: 46, weight: .medium))
+                        .scaledFont(size: 46, weight: .medium)
                         .foregroundStyle(tintColor)
                 }
                 .overlay(
@@ -1270,6 +1271,7 @@ struct DownloadsView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Clear Search")
                 }
             }
             .padding(.horizontal, 10)
@@ -1285,7 +1287,7 @@ struct DownloadsView: View {
             } label: {
                 Label("Sort", systemImage: "arrow.up.arrow.down")
                     .labelStyle(.iconOnly)
-                    .font(.system(size: 13, weight: .medium))
+                    .scaledFont(size: 13, weight: .medium)
                     .foregroundStyle(.primary)
                     .frame(width: 32, height: 32)
                     .background(.quaternary, in: Circle())
@@ -1430,10 +1432,10 @@ struct LocalMusicView: View {
                         pickFolder()
                     } label: {
                         Image(systemName: "plus")
-                            .font(.system(size: 15, weight: .medium))
+                            .scaledFont(size: 15, weight: .medium)
                             .foregroundStyle(.primary)
                             .frame(width: 34, height: 34)
-                            .background(.ultraThinMaterial, in: Circle())
+                            .chromeGlass(in: Circle())
                             .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
                     }
                     .buttonStyle(ProfileCircleButtonStyle())
@@ -1454,6 +1456,7 @@ struct LocalMusicView: View {
                             .frame(width: 15)
                     }
                     .help("Scan a folder")
+                    .accessibilityLabel("Scan a Folder")
                 }
             }
             #endif
@@ -1465,7 +1468,7 @@ struct LocalMusicView: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 if local.scanned {
                     tabPicker
-                        .background(.ultraThinMaterial)
+                        .chromeGlass(in: Rectangle())
                 }
             }
     }
@@ -2013,7 +2016,7 @@ struct OnDeviceView: View {
                     .fill(tint.opacity(0.12))
                     .frame(width: 48, height: 48)
                 Image(systemName: systemImage)
-                    .font(.system(size: 20, weight: .medium))
+                    .scaledFont(size: 20, weight: .medium)
                     .foregroundStyle(tint)
             }
             VStack(alignment: .leading, spacing: 3) {
@@ -2164,10 +2167,10 @@ struct UnifiedSongsView: View {
                     pickFolder()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 15, weight: .medium))
+                        .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .background(.ultraThinMaterial, in: Circle())
+                        .chromeGlass(in: Circle())
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
                 }
                 .buttonStyle(ProfileCircleButtonStyle())
@@ -2188,6 +2191,7 @@ struct UnifiedSongsView: View {
                         .frame(width: 15)
                 }
                 .help("Scan a folder")
+                .accessibilityLabel("Scan a Folder")
             }
         }
         #endif
@@ -2312,10 +2316,10 @@ struct UnifiedAlbumsView: View {
                     pickFolder()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 15, weight: .medium))
+                        .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .background(.ultraThinMaterial, in: Circle())
+                        .chromeGlass(in: Circle())
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
                 }
                 .buttonStyle(ProfileCircleButtonStyle())
@@ -2336,6 +2340,7 @@ struct UnifiedAlbumsView: View {
                         .frame(width: 15)
                 }
                 .help("Scan a folder")
+                .accessibilityLabel("Scan a Folder")
             }
         }
         #endif
@@ -2540,10 +2545,10 @@ struct UnifiedArtistsView: View {
                     pickFolder()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 15, weight: .medium))
+                        .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .background(.ultraThinMaterial, in: Circle())
+                        .chromeGlass(in: Circle())
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
                 }
                 .buttonStyle(ProfileCircleButtonStyle())
@@ -2564,6 +2569,7 @@ struct UnifiedArtistsView: View {
                         .frame(width: 15)
                 }
                 .help("Scan a folder")
+                .accessibilityLabel("Scan a Folder")
             }
         }
         #endif
@@ -3112,10 +3118,10 @@ private struct LocalPlaylistsView: View {
                     showImportPicker = true
                 } label: {
                     Image(systemName: "square.and.arrow.down")
-                        .font(.system(size: 15, weight: .medium))
+                        .scaledFont(size: 15, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .background(.ultraThinMaterial, in: Circle())
+                        .chromeGlass(in: Circle())
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
                 }
                 .buttonStyle(ProfileCircleButtonStyle())
@@ -3126,10 +3132,10 @@ private struct LocalPlaylistsView: View {
                         appModel.playlistPicker = PlaylistPickerRequest(videoId: "", title: "")
                     } label: {
                         Image(systemName: "plus")
-                            .font(.system(size: 15, weight: .medium))
+                            .scaledFont(size: 15, weight: .medium)
                             .foregroundStyle(.primary)
                             .frame(width: 34, height: 34)
-                            .background(.ultraThinMaterial, in: Circle())
+                            .chromeGlass(in: Circle())
                             .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
                     }
                     .buttonStyle(ProfileCircleButtonStyle())
@@ -3377,10 +3383,10 @@ struct LibraryGridView: View {
                     }
                 } label: {
                     Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 14, weight: .medium))
+                        .scaledFont(size: 14, weight: .medium)
                         .foregroundStyle(.primary)
                         .frame(width: 34, height: 34)
-                        .background(.ultraThinMaterial, in: Circle())
+                        .chromeGlass(in: Circle())
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
                 }
                 .buttonStyle(ProfileCircleButtonStyle())

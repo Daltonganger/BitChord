@@ -587,7 +587,7 @@ struct RepeatGlyph: View {
                 .frame(width: size, height: size)
             if mode == .one {
                 Text("1")
-                    .font(.system(size: max(7, size * 0.42), weight: .bold, design: .rounded))
+                    .scaledFont(size: max(7, size * 0.42), weight: .bold, design: .rounded)
                     .offset(y: size * 0.02)
             }
         }

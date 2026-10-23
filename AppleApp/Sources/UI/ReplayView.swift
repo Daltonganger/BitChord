@@ -717,6 +717,7 @@ private struct ReplayStoriesView: View {
                         .foregroundStyle(.white)
                         .padding(12)
                 }
+                .accessibilityLabel("Close")
                 .padding(.top, 22)
                 .padding(.trailing, 8)
             }
@@ -1009,26 +1010,26 @@ private struct ReplayPosterView: View {
                 // artefact, like a chart's axis labels, not interface text.
                 VStack(alignment: .leading, spacing: 16 * k) {
                     Text("BITCHORD REPLAY")
-                        .font(.system(size: 30 * k, weight: .bold))
+                        .scaledFont(size: 30 * k, weight: .bold)
                         .tracking(2 * k)
                         .foregroundStyle(.white.opacity(0.7))
                     Text(model.holder)
-                        .font(.system(size: 68 * k, weight: .bold))
+                        .scaledFont(size: 68 * k, weight: .bold)
                         .foregroundStyle(.white)
                     Text(model.summary.label)
-                        .font(.system(size: 40 * k))
+                        .scaledFont(size: 40 * k)
                         .foregroundStyle(.white.opacity(0.7))
                     Text("\(ReplayModel.grouped(model.summary.minutes)) minutes")
-                        .font(.system(size: 128 * k, weight: .heavy))
+                        .scaledFont(size: 128 * k, weight: .heavy)
                         .foregroundStyle(.white)
                     VStack(alignment: .leading, spacing: 8 * k) {
                         ForEach(Array(model.summary.songs.prefix(5).enumerated()), id: \.element.id) { index, song in
                             HStack(spacing: 24 * k) {
                                 Text("\(index + 1).")
-                                    .font(.system(size: 44 * k))
+                                    .scaledFont(size: 44 * k)
                                     .foregroundStyle(.white.opacity(0.5))
                                 Text(song.title)
-                                    .font(.system(size: 44 * k))
+                                    .scaledFont(size: 44 * k)
                                     .foregroundStyle(.white)
                                     .lineLimit(1)
                             }

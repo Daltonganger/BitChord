@@ -146,6 +146,7 @@ struct ShelfCarousel: View {
     /// The side padding of the page the shelf sits in; see [ShelfScroller].
     var inset: CGFloat = 24
     @Environment(PlaybackController.self) private var controller
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -153,7 +154,15 @@ struct ShelfCarousel: View {
             ShelfScroller(inset: inset) {
                 LazyHStack(alignment: .top, spacing: 14) {
                     ForEach(shelf.items) { card in
-                        ShelfCardView(card: card, preferTrack: preferTrack)
+                        if sizeClass == .regular {
+                            // A wide window shows fewer, larger sleeves: the card
+                            // is a quarter of the run, and the artwork follows the
+                            // room rather than staying a phone-sized 160pt.
+                            ShelfCardView(card: card, artworkSide: 220, preferTrack: preferTrack)
+                                .containerRelativeFrame(.horizontal, count: 4, spacing: 14)
+                        } else {
+                            ShelfCardView(card: card, preferTrack: preferTrack)
+                        }
                     }
                 }
                 .padding(.vertical, 2)
@@ -210,7 +219,7 @@ struct ShelfScroller<Content: View>: View {
                 withAnimation(.smooth(duration: 0.35)) { position.scrollTo(x: target) }
             } label: {
                 Image(systemName: forward ? "chevron.right" : "chevron.left")
-                    .font(.system(.body, weight: .semibold))
+                    .font(.body.weight(.semibold))
                     .frame(width: 34, height: 34)
                     .background(.regularMaterial, in: .circle)
                     .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
@@ -226,6 +235,9 @@ struct ShelfScroller<Content: View>: View {
 
 struct ShelfCardView: View {
     let card: ShelfCard
+    /// The sleeve's side, and with it the card's width. A carousel on a wide
+    /// window passes a larger one; everywhere else this is the phone size.
+    var artworkSide: CGFloat = Theme.Metrics.shelfCard
     @Environment(PlaybackController.self) private var controller
     /// Whether the pointer is over the card. A card is a target, not just a
     /// picture, and on the Mac that has to show before the click.
@@ -287,7 +299,7 @@ struct ShelfCardView: View {
     private var cardContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .topTrailing) {
-                ArtworkView(url: card.thumbnailUrl, data: nil, side: 160)
+                ArtworkView(url: card.thumbnailUrl, data: nil, side: artworkSide)
                     .clipShape(.rect(cornerRadius: 10, style: .continuous))
                     .shadow(color: .black.opacity(0.15), radius: 5, y: 2)
                 if isPinned {
@@ -310,7 +322,7 @@ struct ShelfCardView: View {
                     .lineLimit(1)
             }
         }
-        .frame(width: 160, alignment: .leading)
+        .frame(width: artworkSide, alignment: .leading)
         // The highlight reaches past the card's own bounds so the sleeve and the
         // two lines under it read as one target.
         .background {

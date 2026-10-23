@@ -352,6 +352,7 @@ struct SourcesView: View {
                 Image(systemName: "line.3.horizontal")
                     .foregroundStyle(.secondary)
                     .help("Change this addon's position")
+                    .accessibilityLabel("Reorder")
             }
         )
         #else

@@ -272,7 +272,7 @@ struct DetailView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                     .frame(width: 34, height: 34)
-                    .background(.ultraThinMaterial, in: Circle())
+                    .chromeGlass(in: Circle())
                     .overlay(Circle().strokeBorder(Color.white.opacity(0.22), lineWidth: 0.6))
             }
             .buttonStyle(ProfileCircleButtonStyle())
@@ -627,18 +627,20 @@ struct DetailView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Clear Search")
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.ultraThinMaterial)
+                .fill(.clear)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
                 )
         }
+        .chromeGlass(in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .padding(.horizontal, 24)
         .padding(.bottom, 12)
     }
@@ -669,9 +671,10 @@ struct DetailView: View {
         .padding(.vertical, 5)
         .background {
             Capsule()
-                .fill(.ultraThinMaterial)
+                .fill(.clear)
                 .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
         }
+        .chromeGlass(in: Capsule())
     }
 
     @ViewBuilder

@@ -640,7 +640,7 @@ struct SearchView: View {
                                 .fill(.quaternary)
                                 .overlay {
                                     Image(systemName: "magnifyingglass")
-                                        .font(.system(size: 18, weight: .medium))
+                                        .scaledFont(size: 18, weight: .medium)
                                         .foregroundStyle(.secondary)
                                 }
                                 .frame(width: 52, height: 52)
@@ -675,7 +675,7 @@ struct SearchView: View {
                 historyRevision &+= 1
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledFont(size: 11, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .frame(width: 28, height: 28)
                     .contentShape(Circle())

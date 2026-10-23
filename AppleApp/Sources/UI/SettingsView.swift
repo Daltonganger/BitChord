@@ -908,7 +908,7 @@ struct SettingsView: View {
                     subtitle: localFolderName ?? "No folder chosen"
                 ) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .scaledFont(size: 12, weight: .semibold)
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -2002,7 +2002,7 @@ private struct SettingsGlyph: View {
     var body: some View {
         Group {
             if let asset { Image(asset).resizable().scaledToFit() }
-            else { Image(systemName: symbol).font(.system(size: 21)) }
+            else { Image(systemName: symbol).scaledFont(size: 21) }
         }
         .foregroundStyle(.primary)
         .frame(width: 29, height: 29)

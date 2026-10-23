@@ -83,7 +83,7 @@ struct OnboardingView: View {
         VStack(spacing: 18) {
             Spacer(minLength: 20)
             Image(systemName: "person.crop.circle")
-                .font(.system(size: 56, weight: .light))
+                .scaledFont(size: 56, weight: .light)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             Text("What should we call you?")
@@ -114,7 +114,7 @@ struct OnboardingView: View {
         VStack(spacing: 18) {
             Spacer(minLength: 20)
             Image(systemName: "music.note.house")
-                .font(.system(size: 56, weight: .light))
+                .scaledFont(size: 56, weight: .light)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             Text("Connect your YouTube Music account")
