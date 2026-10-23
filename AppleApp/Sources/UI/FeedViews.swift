@@ -150,6 +150,9 @@ struct ShelfCarousel: View {
     var inset: CGFloat = 24
     @Environment(PlaybackController.self) private var controller
     @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The shelf's own width, measured: an inspector or a split view narrows it
+    /// without changing the window.
+    @State private var width: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -157,20 +160,23 @@ struct ShelfCarousel: View {
             ShelfScroller(inset: inset) {
                 LazyHStack(alignment: .top, spacing: 14) {
                     ForEach(items ?? shelf.items) { card in
-                        if sizeClass == .regular {
-                            // A wide window shows fewer, larger sleeves: the card
-                            // is a quarter of the run, and the artwork follows the
-                            // room rather than staying a phone-sized 160pt.
-                            ShelfCardView(card: card, artworkSide: 220, preferTrack: preferTrack)
-                                .containerRelativeFrame(.horizontal, count: 4, spacing: 14)
-                        } else {
-                            ShelfCardView(card: card, preferTrack: preferTrack)
-                        }
+                        ShelfCardView(card: card, artworkSide: cardSide, preferTrack: preferTrack)
                     }
                 }
                 .padding(.vertical, 2)
             }
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+    }
+
+    /// A wide shelf shows four sleeves across, sized to the room it has rather
+    /// than staying phone-sized. The sleeve *is* the card's width, so it is
+    /// computed here instead of framing a fixed sleeve into a narrower slot,
+    /// which is what let artwork spill over its neighbour.
+    private var cardSide: CGFloat {
+        guard sizeClass == .regular, width > 0 else { return Theme.Metrics.shelfCard }
+        let quarter = (width - 3 * 14) / 4
+        return min(240, max(Theme.Metrics.shelfCard, quarter.rounded(.down)))
     }
 }
 

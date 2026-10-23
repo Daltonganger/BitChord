@@ -392,8 +392,11 @@ struct DetailView: View {
         width: CGFloat
     ) -> some View {
         let lines = headerLines(page)
-        let credit = lines.credit.isEmpty ? (page.songs.first?.artist ?? "") : lines.credit
-        let artistId = page.songs.first?.artistId
+        // Only an album borrows its first track's artist when the header names
+        // nobody: a playlist's first song is not its author.
+        let borrowsCredit = lines.credit.isEmpty && kind(of: page) == .album
+        let credit = borrowsCredit ? (page.songs.first?.artist ?? "") : lines.credit
+        let artistId = kind(of: page) == .album ? page.songs.first?.artistId : nil
         let sleeve = releaseSleeve(width)
         let info = releaseInfoLine(page)
 
