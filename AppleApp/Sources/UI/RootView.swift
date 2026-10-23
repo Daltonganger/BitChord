@@ -19,6 +19,8 @@ struct RootView: View {
     @State private var updateChecker = UpdateChecker.shared
     #if os(macOS)
     @Environment(\.openSettings) private var openSettings
+    /// Which side panel is open beside the library, if any (M4).
+    @State private var macInspector: MacInspectorKind?
     #endif
     @State private var homeFeed = FeedLoader(.home)
     #if os(iOS)
@@ -165,6 +167,19 @@ struct RootView: View {
         }
         #if os(macOS)
         .frame(minWidth: 860, minHeight: 600)
+        // A menu item that asks for the queue or the lyrics opens the inspector
+        // — unless the full player is up, in which case it owns both panes and
+        // answers the request itself.
+        .onChange(of: appModel.queueRevealRequested) { _, requested in
+            guard requested, !appModel.nowPlayingPresented else { return }
+            macInspector = .queue
+            appModel.queueRevealRequested = false
+        }
+        .onChange(of: appModel.lyricsRevealRequested) { _, requested in
+            guard requested, !appModel.nowPlayingPresented else { return }
+            macInspector = .lyrics
+            appModel.lyricsRevealRequested = false
+        }
         #endif
         .preferredColorScheme(appModel.preferredScheme)
         .environment(\.locale, appModel.appLanguage.isEmpty ? .autoupdatingCurrent : Locale(identifier: appModel.appLanguage))
@@ -236,7 +251,7 @@ struct RootView: View {
         TabView(selection: tabBinding) {
             #if os(macOS)
             Tab(value: AppModel.Tab.home) {
-                HomeView(feed: homeFeed).modifier(MacPlaybackChrome())
+                HomeView(feed: homeFeed)
             } label: {
                 // Navigation is one icon family: SF Symbols, as the system
                 // sidebar and tab bar draw them (upstream's own tab glyphs are
@@ -245,13 +260,13 @@ struct RootView: View {
                 Label("Home", systemImage: "house")
             }
             Tab(value: AppModel.Tab.explore) {
-                ExploreView().modifier(MacPlaybackChrome())
+                ExploreView()
             } label: {
                 Label("Explore", systemImage: "square.grid.2x2")
             }
             TabSection("Library") {
                 Tab(value: AppModel.Tab.libraryYouTube) {
-                    LibraryView(lockedSection: .youtube).modifier(MacPlaybackChrome())
+                    LibraryView(lockedSection: .youtube)
                 } label: {
                     // Upstream has no distinct Recent glyph; the `bchLibrary`
                     // shelves are already taken by Albums below. The repeat-clock
@@ -259,19 +274,19 @@ struct RootView: View {
                     Label("Recent", systemImage: "clock.arrow.circlepath")
                 }
                 Tab(value: AppModel.Tab.librarySongs) {
-                    LibraryView(lockedSection: .songs).modifier(MacPlaybackChrome())
+                    LibraryView(lockedSection: .songs)
                 } label: {
                     Label("Songs", systemImage: "music.note")
                 }
                 Tab(value: AppModel.Tab.libraryAlbums) {
-                    LibraryView(lockedSection: .albums).modifier(MacPlaybackChrome())
+                    LibraryView(lockedSection: .albums)
                 } label: {
                     // Songs keeps the music note and Albums keeps the library
                     // shelves — the more fitting half of each conflicted pair.
                     Label("Albums", systemImage: "square.stack")
                 }
                 Tab(value: AppModel.Tab.libraryArtists) {
-                    LibraryView(lockedSection: .artists).modifier(MacPlaybackChrome())
+                    LibraryView(lockedSection: .artists)
                 } label: {
                     // Upstream has no distinct Artists glyph and the music note
                     // is already taken by Songs above; the mic reads as the
@@ -279,27 +294,27 @@ struct RootView: View {
                     Label("Artists", systemImage: "music.mic")
                 }
                 Tab(value: AppModel.Tab.libraryPlaylists) {
-                    LibraryView(lockedSection: .playlists).modifier(MacPlaybackChrome())
+                    LibraryView(lockedSection: .playlists)
                 } label: {
                     Label("Playlists", systemImage: "music.note.list")
                 }
                 Tab(value: AppModel.Tab.librarySubscriptions) {
-                    LibraryView(lockedSection: .subscriptions).modifier(MacPlaybackChrome())
+                    LibraryView(lockedSection: .subscriptions)
                 } label: {
                     Label("Subscriptions", systemImage: "bell")
                 }
                 Tab(value: AppModel.Tab.libraryPodcasts) {
-                    LibraryView(lockedSection: .podcasts).modifier(MacPlaybackChrome())
+                    LibraryView(lockedSection: .podcasts)
                 } label: {
                     Label("Podcasts", systemImage: "radio")
                 }
                 Tab(value: AppModel.Tab.libraryOnDevice) {
-                    LibraryView(lockedSection: .ondevice).modifier(MacPlaybackChrome())
+                    LibraryView(lockedSection: .ondevice)
                 } label: {
                     Label("On Device", systemImage: "externaldrive")
                 }
                 Tab(value: AppModel.Tab.libraryHistory) {
-                    LibraryView(lockedSection: .history).modifier(MacPlaybackChrome())
+                    LibraryView(lockedSection: .history)
                 } label: {
                     Label("History", systemImage: "clock")
                 }
@@ -308,7 +323,7 @@ struct RootView: View {
                 // this is configured.
                 if WebDavStore.shared.isConfigured {
                     Tab(value: AppModel.Tab.libraryWebDav) {
-                        LibraryView(lockedSection: .webdav).modifier(MacPlaybackChrome())
+                        LibraryView(lockedSection: .webdav)
                     } label: {
                         // An SF Symbol, not one of the `bch` images the other rows use.
                         // Upstream puts Material's `Cloud` on its WebDAV row and has no
@@ -319,7 +334,7 @@ struct RootView: View {
                 }
             }
             Tab(value: AppModel.Tab.search, role: .search) {
-                SearchView().modifier(MacPlaybackChrome())
+                SearchView()
             } label: {
                 Label("Search", systemImage: "magnifyingglass")
             }
@@ -407,9 +422,39 @@ struct RootView: View {
         .overlay(alignment: .topLeading) {
             MacWindowToolbar(isPlayerPresented: appModel.nowPlayingPresented)
                 .frame(width: 0, height: 0)
+            MacSidebarWidth()
+                .frame(width: 0, height: 0)
+        }
+        // Lyrics and the queue are a trailing panel, not another screen: the
+        // library stays visible and the inspector sits beside it.
+        .inspector(isPresented: Binding(
+            get: { macInspector != nil },
+            set: { if !$0 { macInspector = nil } }
+        )) {
+            MacInspectorPane(kind: macInspector ?? .queue)
+                .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
         }
         .toolbar {
             if !appModel.nowPlayingPresented {
+                // Music's arrangement: the transport at the leading edge, the
+                // readout in the middle, the panel and output controls trailing.
+                ToolbarItem(placement: .navigation) {
+                    MacTransportControls()
+                }
+                ToolbarItem(placement: .principal) {
+                    MacNowPlayingLCD()
+                }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    MacInspectorToggles(selection: $macInspector)
+                    if !controller.hideVolumeBar {
+                        MacVolumeControl()
+                    }
+                    AirPlayRouteButton()
+                        .frame(width: 22, height: 22)
+                        .frame(width: 28, height: 24)
+                        .help("AirPlay")
+                        .accessibilityLabel("AirPlay")
+                }
                 ToolbarItem {
                     Button {
                         appModel.downloadManagerPresented = true
@@ -417,6 +462,7 @@ struct RootView: View {
                         Image(systemName: "arrow.down.circle")
                     }
                     .help("Downloads")
+                    .accessibilityLabel("Downloads")
                 }
                 ToolbarItem {
                     Button {
@@ -425,6 +471,7 @@ struct RootView: View {
                         Image(systemName: "gearshape")
                     }
                     .help("Settings")
+                    .accessibilityLabel("Settings")
                 }
             }
         }
@@ -589,12 +636,12 @@ struct PlaybackPillMount: ViewModifier {
             fallbackMount(content)
         }
         #else
-        // macOS: each tab content mounts the pill via `MacPlaybackChrome` so
-        // it sits in the content column rather than crossing the sidebar.
+        // macOS has no pill: the transport lives in the window toolbar.
         content
         #endif
     }
 
+    #if os(iOS)
     private func fallbackMount(_ content: Content) -> some View {
         content.safeAreaInset(edge: .bottom) {
             PlaybackPill()
@@ -606,12 +653,12 @@ struct PlaybackPillMount: ViewModifier {
                 .frame(maxWidth: .infinity)
         }
     }
+    #endif
 }
 
 #if os(iOS)
-/// iPad per-tab pill mount. Lives inside the detail column — like
-/// MacPlaybackChrome on macOS — so sidebar collapse/expand reflows it and it
-/// stays centered on the main view. Content-sized at 620pt like Music's
+/// iPad per-tab pill mount. Lives inside the detail column so sidebar
+/// collapse/expand reflows it and it stays centered on the main view. Content-sized at 620pt like Music's
 /// compact pill instead of the full-width stretch of the tab-level
 /// accessory container. No-op on iPhone, which mounts once at the TabView.
 struct iPadPlaybackChrome: ViewModifier {
@@ -626,22 +673,6 @@ struct iPadPlaybackChrome: ViewModifier {
             }
         } else {
             content
-        }
-    }
-}
-#endif
-
-#if os(macOS)
-/// Pins the playback pill to the tab's content column — the same place Music
-/// keeps it — instead of spanning the whole window and covering the sidebar.
-struct MacPlaybackChrome: ViewModifier {
-    func body(content: Content) -> some View {
-        content.safeAreaInset(edge: .bottom, spacing: 0) {
-            PlaybackPill()
-                .frame(maxWidth: 900)
-                .padding(.horizontal, 18)
-                .padding(.bottom, 12)
-                .frame(maxWidth: .infinity)
         }
     }
 }

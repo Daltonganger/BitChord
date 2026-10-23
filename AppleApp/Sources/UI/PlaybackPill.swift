@@ -8,19 +8,16 @@ import UIKit
 /// platforms. Ports upstream's `MiniPlayer.kt`: artwork thumbnail (tap →
 /// Now Playing), title/artist, transport. The pill is **always visible** —
 /// with nothing playing it shows the empty state, exactly as Music keeps its
-/// bottom pill around. The macOS variant carries Music's full cluster:
-/// shuffle / prev / play / next / repeat on the left, lyrics + volume right.
+/// bottom pill around. The Mac does not use it: its transport lives in the
+/// window toolbar (`MacTransportControls`), so this view is iOS-only.
+#if os(iOS)
 struct PlaybackPill: View {
     @Environment(PlaybackController.self) private var controller
     @Environment(AppModel.self) private var appModel
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
-        #if os(macOS)
-        macOSPill
-        #else
         iOSPill
-        #endif
     }
 
     // ---- iOS: mini-player above the tab bar --------------------------------
@@ -87,123 +84,6 @@ struct PlaybackPill: View {
     #endif
 
     // ---- macOS: Music's floating glass pill --------------------------------
-    #if os(macOS)
-    private var macOSPill: some View {
-        HStack(spacing: 18) {
-            HStack(spacing: 4) {
-                pillButton("Shuffle", icon: .bchShuffle) {
-                    controller.toggleShuffle()
-                }
-                .foregroundStyle(controller.shuffleEnabled ? Color.accentColor : .primary)
-
-                pillButton("Previous", system: "backward.fill") {
-                    controller.previous()
-                }
-                .disabled(!controller.canPlayPrevious)
-
-                if controller.isBuffering {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 32, height: 32)
-                        .help("Loading")
-                } else {
-                    pillButton(
-                        controller.isPlaying ? "Pause" : "Play",
-                        system: controller.isPlaying ? "pause.fill" : "play.fill",
-                        glyph: 17
-                    ) {
-                        controller.togglePlayPause()
-                    }
-                    .disabled(controller.current == nil)
-                }
-
-                pillButton("Next", system: "forward.fill") {
-                    controller.next()
-                }
-                .disabled(!controller.canPlayNext)
-
-                Button {
-                    controller.cycleRepeat()
-                } label: {
-                    RepeatGlyph(mode: controller.repeatMode, size: 15)
-                        .frame(width: 32, height: 32)
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(controller.repeatMode == .off ? .primary : Color.accentColor)
-                .help(controller.repeatMode == .one ? "Repeat one" : controller.repeatMode == .all ? "Repeat all" : "Repeat off")
-
-                partyButton
-            }
-            .foregroundStyle(.primary)
-
-            MacNowPlayingSlot(
-                artwork: { artworkOrPlaceholder },
-                info: { info }
-            )
-            .frame(minWidth: 180, maxWidth: 360)
-
-            Button {
-                appModel.nowPlayingPresented = true
-            } label: {
-                Image(.bchLyrics)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 15, height: 15)
-                    .frame(width: 28, height: 28)
-                    .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Lyrics")
-
-            playerActionsButton
-            queueButton
-
-            if !controller.hideVolumeBar {
-                PillSlider(volume: Binding(
-                    get: { controller.volume },
-                    set: { controller.volume = $0 }
-                ))
-                .frame(width: 128)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(chromeFill)
-        }
-        .clipShape(.rect(cornerRadius: 18, style: .continuous))
-        .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// Shared 32pt hit target; glyphs sit at 15pt so shuffle, skip and
-    /// repeat weigh the same. Play is the one exception, one step larger.
-    private func pillButton(
-        _ label: String,
-        icon: ImageResource? = nil,
-        system: String? = nil,
-        glyph: CGFloat = 15,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Group {
-                if let icon {
-                    Image(icon).resizable().scaledToFit().frame(width: glyph, height: glyph)
-                } else if let system {
-                    Image(systemName: system)
-                        .font(.system(size: glyph, weight: .semibold))
-                }
-            }
-            .frame(width: 32, height: 32)
-            .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .help(label)
-    }
-    #endif
 
     // ---- Shared pieces ------------------------------------------------------
 
@@ -526,109 +406,6 @@ struct PlaybackPill: View {
         }
     }
     #endif
-}
-
-#if os(macOS)
-/// The now-playing slot inside the original pill chrome. At rest: artwork +
-/// title, with a 2pt seek line only as wide as this slot. Hover: that line
-/// thickens and the times replace the artwork, without touching the pill shape.
-private struct MacNowPlayingSlot<Artwork: View, Info: View>: View {
-    @Environment(PlaybackController.self) private var controller
-    @Environment(AppModel.self) private var appModel
-    @ViewBuilder var artwork: Artwork
-    @ViewBuilder var info: Info
-
-    @State private var hovering = false
-    @State private var dragging = false
-
-    init(@ViewBuilder artwork: () -> Artwork, @ViewBuilder info: () -> Info) {
-        self.artwork = artwork()
-        self.info = info()
-    }
-
-    private var scrubbing: Bool { (hovering || dragging) && controller.duration > 0 }
-
-    var body: some View {
-        ZStack(alignment: .bottom) {
-            HStack(spacing: 10) {
-                artwork
-                info
-                Spacer(minLength: 0)
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
-            .opacity(scrubbing ? 0.35 : 1)
-            .blur(radius: scrubbing ? 1.5 : 0)
-            .allowsHitTesting(!scrubbing)
-            .contentShape(.rect)
-            .onTapGesture { appModel.nowPlayingPresented = true }
-
-            if controller.duration > 0 {
-                VStack(spacing: 3) {
-                    if scrubbing {
-                        HStack {
-                            Text(clock(controller.position))
-                            Spacer(minLength: 0)
-                            Text(clock(max(controller.duration - controller.position, 0), remaining: true))
-                        }
-                        .font(.caption2.monospacedDigit().weight(.medium))
-                        .foregroundStyle(.white.opacity(0.9))
-                    }
-                    SlotSeekLine(
-                        progress: min(max(controller.position / controller.duration, 0), 1),
-                        thick: scrubbing,
-                        onSeek: { fraction in
-                            controller.seek(to: fraction * controller.duration)
-                        },
-                        onDragging: { dragging = $0 }
-                    )
-                }
-                .contentShape(.rect)
-                .onHover { hovering = $0 }
-            }
-        }
-        .frame(height: 44)
-        .clipped()
-        .animation(.easeInOut(duration: 0.16), value: scrubbing)
-    }
-
-    private func clock(_ seconds: Double, remaining: Bool = false) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return remaining ? "-0:00" : "0:00" }
-        let total = Int(seconds.rounded(.down))
-        let body = "\(total / 60):\(String(format: "%02d", total % 60))"
-        return remaining ? "-\(body)" : body
-    }
-}
-
-private struct SlotSeekLine: View {
-    var progress: Double
-    var thick: Bool
-    var onSeek: (Double) -> Void
-    var onDragging: (Bool) -> Void
-
-    var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let h: CGFloat = thick ? 8 : 2
-            ZStack(alignment: .leading) {
-                Capsule().fill(.primary.opacity(thick ? 0.28 : 0.18))
-                Capsule()
-                    .fill(.primary.opacity(thick ? 0.95 : 0.55))
-                    .frame(width: max(0, w * min(max(progress, 0), 1)))
-            }
-            .frame(height: h)
-            .frame(maxHeight: .infinity, alignment: .bottom)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { g in
-                        onDragging(true)
-                        onSeek(min(max(g.location.x / max(w, 1), 0), 1))
-                    }
-                    .onEnded { _ in onDragging(false) }
-            )
-        }
-        .frame(height: 8)
-    }
 }
 #endif
 

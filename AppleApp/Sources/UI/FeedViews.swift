@@ -227,6 +227,9 @@ struct ShelfScroller<Content: View>: View {
 struct ShelfCardView: View {
     let card: ShelfCard
     @Environment(PlaybackController.self) private var controller
+    /// Whether the pointer is over the card. A card is a target, not just a
+    /// picture, and on the Mac that has to show before the click.
+    @State private var hovering = false
 
     /// Which end of a card carrying *both* a video id and a browse id wins.
     ///
@@ -308,7 +311,15 @@ struct ShelfCardView: View {
             }
         }
         .frame(width: 160, alignment: .leading)
+        // The highlight reaches past the card's own bounds so the sleeve and the
+        // two lines under it read as one target.
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(hovering ? Color.primary.opacity(0.06) : .clear)
+                .padding(-6)
+        }
         .contentShape(.rect)
+        .onHover { hovering = $0 }
         .shelfCardContextMenu(card)
     }
 }
