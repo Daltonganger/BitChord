@@ -109,7 +109,7 @@ struct SignInCompletionStep: View {
                         profileCard(profile)
                     } else if flow.taking {
                         Image(systemName: "person.crop.circle")
-                            .font(.system(size: 64, weight: .light))
+                            .scaledFont(size: 64, weight: .light)
                             .foregroundStyle(.secondary)
                     } else if flow.checkingPage || flow.loadingProfile {
                         VStack(spacing: 16) {
@@ -121,7 +121,7 @@ struct SignInCompletionStep: View {
                     } else {
                         VStack(spacing: 12) {
                             Image(systemName: "person.crop.circle")
-                                .font(.system(size: 48, weight: .light))
+                                .scaledFont(size: 48, weight: .light)
                                 .foregroundStyle(.secondary)
                             Text("Review your profile on Google")
                                 .font(.headline)

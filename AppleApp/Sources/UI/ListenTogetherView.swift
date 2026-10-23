@@ -172,7 +172,7 @@ struct ListenTogetherView: View {
         Section {
             VStack(spacing: 10) {
                 Text(party.code)
-                    .font(.system(size: 32, weight: .semibold, design: .monospaced))
+                    .scaledFont(size: 32, weight: .semibold, design: .monospaced)
                     .tracking(6)
                     .textSelection(.enabled)
                     .padding(.vertical, 8)
@@ -653,7 +653,7 @@ private struct PartyTransportButton: View {
         Button(action: action) {
             VStack(spacing: 4) {
                 Image(systemName: systemImage)
-                    .font(.system(size: prominent ? 22 : 18, weight: .semibold))
+                    .scaledFont(size: prominent ? 22 : 18, weight: .semibold)
                 Text(label)
                     .font(.caption2)
                     .lineLimit(1)
@@ -826,7 +826,7 @@ struct PartyAvatar: View {
 
     private var initial: some View {
         Text(name.trimmingCharacters(in: .whitespaces).first.map(String.init)?.uppercased() ?? "?")
-            .font(.system(size: size * 0.42, weight: .medium))
+            .scaledFont(size: size * 0.42, weight: .medium)
             .foregroundStyle(.secondary)
     }
 }

@@ -29,7 +29,7 @@ struct AutomixModelRow: View {
                         .fill(iconColor.opacity(0.12))
                         .frame(width: 32, height: 32)
                     Image(systemName: iconName)
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(iconColor)
                 }
 
@@ -176,7 +176,7 @@ private struct AutomixModelCard: View {
                         .fill(iconBgColor.opacity(0.12))
                         .frame(width: 40, height: 40)
                     Image(systemName: iconName)
-                        .font(.system(size: 18, weight: .semibold))
+                        .scaledFont(size: 18, weight: .semibold)
                         .foregroundStyle(iconBgColor)
                 }
 
@@ -329,14 +329,14 @@ private struct AutomixModelCard: View {
         switch status {
         case .installed:
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 20))
+                .scaledFont(size: 20)
                 .foregroundStyle(.green)
         case .downloading:
             Button {
                 store.cancel(id)
             } label: {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
+                    .scaledFont(size: 18)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -348,7 +348,7 @@ private struct AutomixModelCard: View {
                 store.start(id, allowMetered: AutomixModelsPolicy.allowMetered)
             } label: {
                 Image(systemName: "arrow.down.circle.fill")
-                    .font(.system(size: 22))
+                    .scaledFont(size: 22)
                     .foregroundStyle(iconBgColor)
             }
             .buttonStyle(.plain)
@@ -402,7 +402,7 @@ struct AutomixModelsSheet: View {
                                     .shadow(color: Color.purple.opacity(0.3), radius: 12, y: 6)
 
                                 Image(systemName: "waveform.badge.sparkles")
-                                    .font(.system(size: 28, weight: .semibold))
+                                    .scaledFont(size: 28, weight: .semibold)
                                     .foregroundStyle(.white)
                             }
                             .padding(.top, 16)

@@ -84,7 +84,7 @@ struct AccountProfileSheet: View {
                                     .fill(Color.gray.opacity(0.18))
                                     .frame(width: 32, height: 32)
                                 Image(systemName: "gearshape.fill")
-                                    .font(.system(size: 16, weight: .medium))
+                                    .scaledFont(size: 16, weight: .medium)
                                     .foregroundStyle(.primary)
                             }
                             VStack(alignment: .leading, spacing: 2) {
@@ -187,15 +187,15 @@ struct AccountProfileSheet: View {
 
                 HStack(spacing: 4) {
                     Text("YouTube Music")
-                        .font(.system(size: 11, weight: .semibold))
+                        .scaledFont(size: 11, weight: .semibold)
                         .foregroundStyle(Color.accentColor)
                     if let profileName = auth.listeningAs?.activeProfile?.name,
                        profileName != auth.accountName {
                         Text("•")
-                            .font(.system(size: 10))
+                            .scaledFont(size: 10)
                             .foregroundStyle(.secondary)
                         Text(profileName)
-                            .font(.system(size: 11, weight: .regular))
+                            .scaledFont(size: 11, weight: .regular)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -214,14 +214,15 @@ struct AccountProfileSheet: View {
             HStack(spacing: 14) {
                 ZStack {
                     Circle()
-                        .fill(.ultraThinMaterial)
+                        .fill(.clear)
                     Circle()
                         .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.75)
                     Image(systemName: "person.fill")
-                        .font(.system(size: 22, weight: .medium))
+                        .scaledFont(size: 22, weight: .medium)
                         .foregroundStyle(.secondary)
                 }
                 .frame(width: 50, height: 50)
+                .chromeGlass(in: Circle())
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Sign In to YouTube Music")
@@ -281,7 +282,7 @@ struct AccountProfileSheet: View {
 
                 if isSelected {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 14, weight: .semibold))
+                        .scaledFont(size: 14, weight: .semibold)
                         .foregroundStyle(Color.accentColor)
                         .accessibilityLabel("Listening as this channel")
                 }
@@ -419,14 +420,15 @@ struct TopBarAccountButton: View {
             // Pure glass circle — "the glass thing itself"
             ZStack {
                 Circle()
-                    .fill(.ultraThinMaterial)
+                    .fill(.clear)
                 Circle()
                     .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.7)
                 Image(systemName: "person.fill")
-                    .font(.system(size: 14, weight: .semibold))
+                    .scaledFont(size: 14, weight: .semibold)
                     .foregroundStyle(.primary.opacity(0.65))
             }
             .frame(width: 34, height: 34)
+            .chromeGlass(in: Circle())
             .clipShape(Circle())
             .contentShape(Circle())
             .shadow(color: .black.opacity(0.08), radius: 2, x: 0, y: 1)
@@ -466,7 +468,7 @@ struct AccountAvatarButton: View {
             Avatar(url: profile?.avatar, name: profile?.name ?? "Account", side: 34)
                 .overlay(alignment: .bottomTrailing) {
                     Image(systemName: "person.crop.circle.badge.checkmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .scaledFont(size: 11, weight: .semibold)
                         .foregroundStyle(.white, .black.opacity(0.55))
                         .offset(x: 2, y: 2)
                 }
@@ -492,7 +494,7 @@ struct AccountAvatarButton: View {
     }
 }
 
-/// A round image that falls back to a monogram, with ultraThinMaterial backing.
+/// A round image that falls back to a monogram, on a chrome backing.
 struct Avatar: View {
     let url: String?
     let name: String
@@ -501,7 +503,7 @@ struct Avatar: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(.ultraThinMaterial)
+                .fill(.clear)
 
             Group {
                 if let url, let address = URL(string: url) {
@@ -518,12 +520,13 @@ struct Avatar: View {
             }
         }
         .frame(width: side, height: side)
+        .chromeGlass(in: Circle())
         .clipShape(Circle())
     }
 
     private var monogram: some View {
         Text(name.trimmingCharacters(in: .whitespaces).prefix(1).uppercased())
-            .font(.system(size: side * 0.42, weight: .semibold))
+            .scaledFont(size: side * 0.42, weight: .semibold)
             .foregroundStyle(.white.opacity(0.9))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.white.opacity(0.14))

@@ -40,12 +40,14 @@ struct TopResultSection: View {
                     menu
                 } label: {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 16, weight: .semibold))
+                        .scaledFont(size: 16, weight: .semibold)
                         .foregroundStyle(.secondary)
                         .frame(width: 36, height: 36)
                         .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
+                .help("More")
+                .accessibilityLabel("More")
             }
             actionsRow
         }

@@ -175,7 +175,7 @@ struct AudioPipelineSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .foregroundStyle(.white.opacity(0.7))
                     .frame(width: 28, height: 28)
                     .background(.white.opacity(0.10), in: Circle())
@@ -373,7 +373,7 @@ struct AudioOutputRow: View {
         Button(action: onOpen) {
             HStack(spacing: 13) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 16, weight: .medium))
+                    .scaledFont(size: 16, weight: .medium)
                     .foregroundStyle(.white.opacity(0.7))
                     .frame(width: 40, height: 40)
                     .background(.white.opacity(0.08), in: Circle())
@@ -389,7 +389,7 @@ struct AudioOutputRow: View {
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledFont(size: 13, weight: .semibold)
                     .foregroundStyle(.white.opacity(0.35))
             }
             .contentShape(Rectangle())

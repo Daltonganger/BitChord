@@ -37,7 +37,7 @@ struct LyricsOffsetSheet: View {
                 // this is a control adjusted by feel while a track plays, and
                 // the number is the feedback.
                 Text(LyricsOffsetBridge.format(offsetMs))
-                    .font(.system(size: 44, weight: .bold, design: .rounded))
+                    .scaledFont(size: 44, weight: .bold, design: .rounded)
                     .monospacedDigit()
                     .contentTransition(.numericText())
                     .animation(.snappy, value: offsetMs)
@@ -128,7 +128,7 @@ struct LyricsOffsetSheet: View {
             : offsetMs >= LyricsOffsetBridge.maxMs
         return Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 17, weight: .bold))
+                .scaledFont(size: 17, weight: .bold)
                 .frame(width: 44, height: 44)
                 .background(.quaternary, in: Circle())
         }

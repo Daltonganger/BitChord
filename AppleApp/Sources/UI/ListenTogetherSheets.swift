@@ -555,7 +555,7 @@ struct PartyLanding: View {
             GlowingPartyAvatar(url: avatarUrl, size: 104)
             Spacer().frame(height: 20)
             Text(PartyCopy.landingTitle)
-                .font(.system(size: 30, weight: .bold))
+                .scaledFont(size: 30, weight: .bold)
                 .multilineTextAlignment(.center)
             Spacer().frame(height: 8)
             Text(PartyCopy.landingSubtitle)
@@ -779,7 +779,7 @@ struct MemberAvatarStack: View {
                 ZStack {
                     Circle().fill(Color.accentColor)
                     Text("+\(extra)")
-                        .font(.system(size: faceSize * 0.34, weight: .semibold))
+                        .scaledFont(size: faceSize * 0.34, weight: .semibold)
                         .foregroundStyle(.white)
                 }
                 .frame(width: faceSize, height: faceSize)

@@ -22,6 +22,9 @@ struct NowPlayingView: View {
     @Environment(AppModel.self) private var appModel
     @Environment(PartyStore.self) private var party
     @Environment(\.dismiss) private var dismiss
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    #endif
     @Environment(AuthController.self) private var auth
     @Environment(ToastCenter.self) private var toast
     // Upstream restores the last expanded-player surface and starts on MAIN
@@ -199,7 +202,7 @@ struct NowPlayingView: View {
                 AirPlayRouteButton()
                     .frame(width: 22, height: 22)
                     .frame(width: 32, height: 32)
-                    .background(.ultraThinMaterial, in: Circle())
+                    .chromeGlass(in: Circle())
                     .help("AirPlay")
             }
         }
@@ -215,9 +218,11 @@ struct NowPlayingView: View {
             width >= PlayerLayout.tabletMinWidth
     }
 
+    /// A regular-width window: an iPad, or a Max phone on its side. The player
+    /// lays out for the room it has, not for the device's name.
     private var isIPad: Bool {
         #if os(iOS)
-        UIDevice.current.userInterfaceIdiom == .pad
+        sizeClass == .regular
         #else
         false
         #endif
@@ -530,10 +535,10 @@ struct NowPlayingView: View {
             }
         } label: {
             Image(systemName: "wand.and.stars")
-                .font(.system(size: 16, weight: .semibold))
+                .scaledFont(size: 16, weight: .semibold)
                 .foregroundStyle(.white.opacity(0.9))
                 .frame(width: 42, height: 42)
-                .background(.ultraThinMaterial, in: Circle())
+                .chromeGlass(in: Circle())
                 .contentShape(Circle())
         }
         .menuStyle(.borderlessButton)
@@ -1035,7 +1040,7 @@ struct NowPlayingView: View {
                 showOutputDevice = true
             } label: {
                 Image(systemName: "headphones")
-                    .font(.system(size: 23, weight: .regular))
+                    .scaledFont(size: 23, weight: .regular)
                     .foregroundStyle(.white.opacity(0.88))
                     .frame(width: outputPartyButtonWidth, height: 44)
                     .contentShape(Rectangle())
@@ -1053,7 +1058,7 @@ struct NowPlayingView: View {
                     controller.setMixWithOtherAudio(enabled)
                 } label: {
                     Image(systemName: "waveform")
-                        .font(.system(size: 23, weight: .regular))
+                        .scaledFont(size: 23, weight: .regular)
                         .foregroundStyle(.white.opacity(controller.mixWithOtherAudio ? 1 : 0.75))
                         .frame(width: outputPartyButtonWidth, height: 44)
                         .background(.white.opacity(controller.mixWithOtherAudio ? 0.14 : 0))
@@ -1082,7 +1087,7 @@ struct NowPlayingView: View {
                 }
             } label: {
                 Image(systemName: "person.fill")
-                    .font(.system(size: 22, weight: .regular))
+                    .scaledFont(size: 22, weight: .regular)
                     .foregroundStyle(.white.opacity(party.inParty ? 1 : 0.75))
                     .frame(width: outputPartyButtonWidth, height: 44)
                     .background(.white.opacity(party.inParty ? 0.14 : 0))
@@ -1130,7 +1135,7 @@ struct NowPlayingView: View {
             } label: {
                 Group {
                     if controller.repeatMode == .one {
-                        Text("1").font(.system(size: 19, weight: .bold))
+                        Text("1").scaledFont(size: 19, weight: .bold)
                     } else {
                         Image(.bchRepeat).resizable().scaledToFit().frame(width: 22, height: 22)
                     }
@@ -1340,7 +1345,7 @@ struct NowPlayingView: View {
     private var deckVolumeRow: some View {
         HStack(spacing: 10) {
             Image(systemName: controller.volume == 0 ? "speaker.slash.fill" : "speaker.fill")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledFont(size: 12, weight: .semibold)
                 .foregroundStyle(.white.opacity(0.7))
                 .frame(width: 16, height: 16)
                 .playerGlyph()
@@ -1374,7 +1379,7 @@ struct NowPlayingView: View {
             }
             .frame(height: 14)
             Image(systemName: "speaker.wave.3.fill")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledFont(size: 12, weight: .semibold)
                 .foregroundStyle(.white.opacity(0.7))
                 .frame(width: 16, height: 16)
                 .playerGlyph()
@@ -1490,7 +1495,7 @@ struct NowPlayingView: View {
             }
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 13, weight: .semibold))
+                .scaledFont(size: 13, weight: .semibold)
                 .foregroundStyle(.white)
                 .frame(width: 32, height: 32)
                 .background(.white.opacity(0.14), in: Circle())
@@ -1589,7 +1594,7 @@ struct GlassCircleButton: View {
                 if let icon {
                     Image(icon).resizable().scaledToFit().frame(width: 15, height: 15)
                 } else if let system {
-                    Image(systemName: system).font(.system(size: 12, weight: .semibold))
+                    Image(systemName: system).scaledFont(size: 12, weight: .semibold)
                 }
             }
             .foregroundStyle(.white)
@@ -1896,13 +1901,14 @@ struct UpNextPane: View {
                 }
             } label: {
                 Image(systemName: "ellipsis")
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledFont(size: 13, weight: .semibold)
                     .foregroundStyle(.white)
                     .frame(width: 34, height: 34)
                     .background(.white.opacity(0.14), in: Circle())
             }
             .buttonStyle(.plain)
             .help("More")
+            .accessibilityLabel("More")
         }
         .padding(.horizontal, 24)
     }
@@ -2628,7 +2634,7 @@ private struct WordSyncedLine: View {
     var body: some View {
         VStack(alignment: isSecondVoice ? .trailing : .leading, spacing: 4) {
             Text(leadRendered)
-                .font(.system(size: 34, weight: .bold, design: .default))
+                .scaledFont(size: 34, weight: .bold, design: .default)
                 .multilineTextAlignment(isSecondVoice ? .trailing : .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 // The frame and the scale anchor follow the side as well. A second
@@ -2641,7 +2647,7 @@ private struct WordSyncedLine: View {
                 .onTapGesture { onTap?() }
             if let backing = backingRendered {
                 Text(backing)
-                    .font(.system(size: 24, weight: .semibold, design: .default))
+                    .scaledFont(size: 24, weight: .semibold, design: .default)
                     .multilineTextAlignment(isSecondVoice ? .trailing : .leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .opacity(0.45)
@@ -2745,7 +2751,7 @@ private struct ToolbarVolumeSlider: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: volume == 0 ? "speaker.slash.fill" : "speaker.fill")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledFont(size: 12, weight: .semibold)
                 .frame(width: 16, height: 16)
             ZStack(alignment: .leading) {
                 Capsule()

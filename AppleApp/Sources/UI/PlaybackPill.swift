@@ -153,12 +153,12 @@ struct PlaybackPill: View {
         } label: {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "person.2.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .frame(width: 32, height: 32)
                     .contentShape(.rect)
                 if party.inParty, party.state.members.count > 1 {
                     Text("\(party.state.members.count)")
-                        .font(.system(size: 9, weight: .bold))
+                        .scaledFont(size: 9, weight: .bold)
                         .monospacedDigit()
                         .foregroundStyle(.white)
                         .padding(.horizontal, 3)
@@ -205,7 +205,7 @@ struct PlaybackPill: View {
 
     private var playerActionLabel: some View {
         Image(systemName: "ellipsis")
-            .font(.system(size: 15, weight: .semibold))
+            .scaledFont(size: 15, weight: .semibold)
             .frame(width: 32, height: 32)
             .contentShape(Circle())
             .foregroundStyle(.secondary)
@@ -246,6 +246,11 @@ struct PlaybackPill: View {
         if reduceTransparency || reduceBlur {
             return AnyShapeStyle(Color.primary.opacity(0.12))
         }
+        if #available(iOS 26.0, *) {
+            // The system bottom accessory is glass already; a material inside it
+            // would be a second, opaque surface inside the first.
+            return AnyShapeStyle(.clear)
+        }
         return AnyShapeStyle(.ultraThinMaterial)
     }
 
@@ -272,10 +277,10 @@ struct PlaybackPill: View {
     /// as do iOS 26 and the pre-26 fallback.
     private struct MiniPlayerChrome: ViewModifier {
         var fill: AnyShapeStyle
+        @Environment(\.horizontalSizeClass) private var sizeClass
 
         func body(content: Content) -> some View {
-            if #available(iOS 27.0, *),
-               UIDevice.current.userInterfaceIdiom == .phone {
+            if #available(iOS 27.0, *), sizeClass == .compact {
                 content
             } else {
                 content
@@ -298,19 +303,20 @@ struct PlaybackPill: View {
                     ProgressView().controlSize(.small).frame(width: 22, height: 22)
                 } else {
                     Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 20, weight: .semibold))
+                        .scaledFont(size: 20, weight: .semibold)
                 }
             }
             .buttonStyle(.plain)
             .frame(width: 40, height: 40)
             .disabled(controller.current == nil && !controller.isBuffering)
+            .accessibilityLabel(controller.isPlaying ? "Pause" : "Play")
 
             Button {
                 Haptics.play(.skipNext)
                 controller.next()
             } label: {
                 Image(systemName: "forward.fill")
-                    .font(.system(size: 19, weight: .semibold))
+                    .scaledFont(size: 19, weight: .semibold)
             }
             .buttonStyle(.plain)
             .frame(width: 40, height: 40)
@@ -318,6 +324,7 @@ struct PlaybackPill: View {
                 PartyStore.shared.state.controlsLocked ? Color.primary.opacity(0.3) : Color.primary
             )
             .disabled(!controller.canPlayNext || PartyStore.shared.state.controlsLocked)
+            .accessibilityLabel("Next")
 
             partyButton.frame(width: 40, height: 40)
         }
@@ -332,12 +339,13 @@ struct PlaybackPill: View {
                 controller.previous()
             } label: {
                 Image(systemName: "backward.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .frame(width: 34, height: 34)
                     .contentShape(.rect)
             }
             .buttonStyle(.plain)
             .disabled(!controller.canPlayPrevious)
+            .accessibilityLabel("Previous")
 
             if controller.isBuffering {
                 ProgressView()
@@ -349,12 +357,13 @@ struct PlaybackPill: View {
                     controller.togglePlayPause()
                 } label: {
                     Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 18, weight: .semibold))
+                        .scaledFont(size: 18, weight: .semibold)
                         .frame(width: 34, height: 34)
                         .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
                 .disabled(controller.current == nil && !controller.isBuffering)
+                .accessibilityLabel(controller.isPlaying ? "Pause" : "Play")
             }
 
             Button {
@@ -363,7 +372,7 @@ struct PlaybackPill: View {
                 controller.next()
             } label: {
                 Image(systemName: "forward.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .frame(width: 34, height: 34)
                     .contentShape(.rect)
             }
@@ -372,6 +381,7 @@ struct PlaybackPill: View {
                 PartyStore.shared.state.controlsLocked ? Color.primary.opacity(0.3) : Color.primary
             )
             .disabled(!controller.canPlayNext || PartyStore.shared.state.controlsLocked)
+            .accessibilityLabel("Next")
         }
         .foregroundStyle(.primary)
     }
@@ -418,7 +428,7 @@ struct PillSlider: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: volume == 0 ? "speaker.slash.fill" : "speaker.fill")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledFont(size: 12, weight: .semibold)
                 .foregroundStyle(.secondary)
                 .frame(width: 16, height: 16)
             GeometryReader { geo in
