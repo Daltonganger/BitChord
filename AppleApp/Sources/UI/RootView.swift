@@ -35,9 +35,12 @@ struct RootView: View {
     #endif
     @AppStorage(OnboardingView.doneKey) private var onboardingDone = false
     @State private var onboardingPresented = false
+    /// The one selected row in the window, shared by every list.
+    @State private var rowSelection = RowSelection()
 
     var body: some View {
         shell
+        .environment(\.rowSelection, rowSelection)
         .task {
             // First run only. Someone upgrading — signed in, or with a queue
             // to come back to — has already onboarded themselves.
