@@ -45,7 +45,12 @@ object SourceRegistry {
 
     /** Every configured source, enabled or not. */
     private val _configs = MutableStateFlow<List<SourceConfig>>(emptyList())
-    val configs: StateFlow<List<SourceConfig>> = _configs.asStateFlow()
+    private val configFlow: StateFlow<List<SourceConfig>> = _configs.asStateFlow()
+    val configs: StateFlow<List<SourceConfig>>
+        get() {
+            init()
+            return configFlow
+        }
 
     /**
      * Built instances, keyed by config id, rebuilt whenever [_configs] changes.
@@ -57,12 +62,12 @@ object SourceRegistry {
     @Volatile
     private var instances: Map<String, MusicSource> = emptyMap()
 
-    @Volatile
-    private var initialised = false
+    // Lazy waits for restoration to finish before another thread can read it.
+    private val restored: Unit by lazy { restore() }
 
-    fun init() {
-        if (initialised) return
-        initialised = true
+    fun init() { restored }
+
+    private fun restore() {
         val stored = readStored()
         val jioOptInDone = PlatformSettings.getBoolean(KEY_JIOSAAVN_OPT_IN_V1, false)
         val after = sourcesForInit(
@@ -214,9 +219,13 @@ object SourceRegistry {
 
     // ── Editing ─────────────────────────────────────────────────────────
 
-    fun add(config: SourceConfig) = publish(_configs.value + config.tidied())
+    fun add(config: SourceConfig) {
+        init()
+        publish(_configs.value + config.tidied())
+    }
 
     fun update(config: SourceConfig) {
+        init()
         val tidied = config.tidied()
         publish(_configs.value.map { if (it.id == tidied.id) tidied else it })
     }
@@ -256,6 +265,7 @@ object SourceRegistry {
      * position is worse than no switch, so it is not offered one.
      */
     fun setEnabled(configId: String, enabled: Boolean) {
+        init()
         if (!enabled && config(configId)?.kind == SourceKind.YOUTUBE) return
         publish(_configs.value.map { if (it.id == configId) it.copy(enabled = enabled) else it })
     }
@@ -276,6 +286,7 @@ object SourceRegistry {
      * set.
      */
     fun reorderAddons(orderedIds: List<String>) {
+        init()
         val addons = _configs.value.filter { it.kind.isUserAdded }
         if (addons.size < 2) return
         val byId = addons.associateBy { it.id }
@@ -387,6 +398,7 @@ object SourceRegistry {
      * itself.
      */
     fun duplicateOf(url: String, exceptId: String? = null): SourceConfig? {
+        init()
         val wanted = canonicalUrl(url)
         if (wanted.isEmpty()) return null
         return _configs.value.firstOrNull {
