@@ -282,6 +282,7 @@ struct SpotifyImportSheet: View {
         if let failure {
             error = failure
         } else {
+            NotificationCenter.default.post(name: .libraryPlaylistsChanged, object: nil)
             toast.show("Imported “\(name)” with \(ids.count) of \(rows.count) tracks")
             dismiss()
         }

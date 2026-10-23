@@ -54,12 +54,15 @@ enum LibraryActions {
         }
     }
 
+    @MainActor
     static func createPlaylist(title: String, privacy: String, videoId: String?) async -> String? {
-        await withCheckedContinuation { cont in
+        let json = await withCheckedContinuation { cont in
             LibraryActionsBridge.shared.createPlaylist(title: title, privacy: privacy, videoId: videoId, callback: JsonCB(invalidateOnSuccess: true) { json, _ in
                 cont.resume(returning: json)
             })
         }
+        if json != nil { NotificationCenter.default.post(name: .libraryPlaylistsChanged, object: nil) }
+        return json
     }
 
     static func deletePlaylist(playlistId: String) async -> String? {

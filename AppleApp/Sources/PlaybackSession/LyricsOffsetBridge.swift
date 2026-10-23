@@ -70,4 +70,9 @@ extension Notification.Name {
     /// that only took effect on the next track would be unusable for adjusting
     /// against the track you are listening to.
     static let lyricsOffsetChanged = Notification.Name("bitchord.lyricsOffsetChanged")
+
+    /// A playlist was created in the account (by hand or by an import). The
+    /// Playlists page and the Mac sidebar load their lists once, so without
+    /// this a new playlist only appeared after relaunching.
+    static let libraryPlaylistsChanged = Notification.Name("bitchord.libraryPlaylistsChanged")
 }

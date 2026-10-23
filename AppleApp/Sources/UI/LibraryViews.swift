@@ -1954,6 +1954,9 @@ struct SavedPlaylistsView: View {
             SpotifyImportSheet()
         }
         .task(id: auth.sessionEpoch) { await load() }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryPlaylistsChanged)) { _ in
+            Task { await load(force: true) }
+        }
     }
 
     private func load(force: Bool = false) async {
