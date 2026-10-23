@@ -6,6 +6,10 @@ enum PlaybackQueuePolicy {
     enum HeroState { case inactive, playing, paused }
 
     static let autoplayRefillThreshold = 3
+    /// How many recommendations the tail is topped up to.
+    static let autoplayTarget = 8
+    /// Upcoming rows nothing automatic may move: the listener can see them.
+    static let committedRows = 2
 
     static func shouldRefillAutoplay(upcomingCount: Int) -> Bool {
         upcomingCount < autoplayRefillThreshold
@@ -62,8 +66,16 @@ enum PlaybackQueuePolicy {
         return result
     }
 
-    static func withoutUpcomingAutoplay(_ queue: [QueueEntry], after index: Int) -> [QueueEntry] {
-        queue.enumerated().filter { $0.offset <= index || !$0.element.fromAutoplay }.map(\.element)
+    /// Room left in the recommendation tail before it reaches [autoplayTarget].
+    static func fillRoom(_ queue: [QueueEntry], after index: Int) -> Int {
+        autoplayTarget - autoplayIndices(queue, after: index).count
+    }
+
+    /// A fill's only effect on the queue: new entries appended. Nothing already
+    /// queued is removed, moved or replaced, and nothing is queued twice.
+    static func appendingFill(_ queue: [QueueEntry], extras: [QueueEntry]) -> [QueueEntry] {
+        var known = Set(queue.map(\.id))
+        return queue + extras.filter { known.insert($0.id).inserted }
     }
 
     static func score(transitionFit: Double?, affinity: Double, playedAt: Double?, now: Double) -> Double {

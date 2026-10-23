@@ -109,6 +109,15 @@ final class PlaybackController {
     }
 
     var isPlaying: Bool { state == .playing }
+    /// The listener paused while the track was still loading: finish the load,
+    /// then sit paused at its start instead of discarding it.
+    private var holdAfterLoad = false
+    /// How often each track has been reloaded after its download failed.
+    private var failedDownloadResumes: [String: Int] = [:]
+    /// Recommendations that have had their one Automix ordering pass.
+    private var settledAutoplayIds: Set<String> = []
+    /// The selection whose load is in flight, cleared once it lands or fails.
+    private var loadingGeneration: UInt64?
     var isBuffering: Bool { state == .buffering }
 #if os(iOS)
     private(set) var mixWithOtherAudio = PlatformSettings.shared.getBoolean(
@@ -226,6 +235,8 @@ final class PlaybackController {
     private(set) var racingLossless = false
     /// Automix analysis tier for stats-for-nerds: `beatmatched`, `dj`, or `plain`.
     private(set) var analysisTier: String?
+    /// The planner's own words for why the next transition is what it is.
+    private(set) var transitionReason: String?
     /// Analysis backends for the last planned pair: outgoing / incoming
     /// (`music_understanding`, `beat_this`, `dsp`, `disk_cache`).
     private(set) var analysisSources: String?
@@ -1146,7 +1157,17 @@ final class PlaybackController {
         noteLocalIntent()
         startEngineIfNeeded()
         if state == .buffering {
-            pausePlayback()
+            // Pausing a track that is still loading keeps the load: the bytes
+            // and the resolved URL are the expensive part, and throwing them
+            // away made the next tap start from nothing.
+            holdAfterLoad = true
+            state = .paused
+            nowPlaying.updateRate(0, position: position)
+            return
+        }
+        if holdAfterLoad, loadingGeneration == playGeneration {
+            holdAfterLoad = false
+            state = .buffering
             return
         }
         if current == nil {
@@ -1175,9 +1196,7 @@ final class PlaybackController {
             // Reflect intent immediately so a second tap cancels this resume.
             state = .playing
             let engine = self.engine
-#if os(iOS)
             let retainedActiveSession = AudioSessionManager.isActive
-#endif
             let task = Task.detached(priority: .userInitiated) { [weak self] in
                 // The engine still owns the loaded source here. Its current
                 // format snapshot is enough to prepare the output after the
@@ -1192,7 +1211,10 @@ final class PlaybackController {
                         preferredSampleRate: matchRate
                             ? (sourceFormat.sampleRate > 0 ? Double(sourceFormat.sampleRate) : nil)
                             : nil,
-                        restartRouting: true
+                        // Re-arbitrating the route on every resume is what made
+                        // Mac resume slow and clicky; a route change is caught
+                        // by the route observer, not by un-pausing.
+                        restartRouting: false
                     )
                 } catch {
                     await MainActor.run { [weak self] in
@@ -1205,21 +1227,27 @@ final class PlaybackController {
                 do {
                     _ = try gate.performIfCurrent(generation: selection) {
                         if usesDolby { return }
-#if os(iOS)
-                        // Keep RemoteIO's buffered audio and decoder history
-                        // when the activated hardware format still agrees;
-                        // rebuilding would discard that ring and re-seek AAC.
+                        // Keep the output's buffered audio and decoder history
+                        // when the hardware format still agrees; rebuilding
+                        // would discard that ring and re-seek AAC.
                         let output = engine.outputDevice()
+#if os(iOS)
+                        let formatAgrees = sessionFormat.map {
+                            Double(output.sampleRate) == $0.rate && output.channels == $0.channels
+                        } ?? false
+#else
+                        // macOS has no session format; the output opened for
+                        // this track's rate is still right for it.
+                        let formatAgrees = !matchRate || sourceFormat.sampleRate == 0
+                            || output.sampleRate == sourceFormat.sampleRate
+#endif
                         if retainedActiveSession, AudioSessionManager.isActive,
-                           let sessionFormat, output.started,
-                           Double(output.sampleRate) == sessionFormat.rate,
-                           output.channels == sessionFormat.channels {
+                           output.started, formatAgrees {
                             let message = "resume retained output \(output.sampleRate) Hz / \(output.channels) ch"
                             PlaybackDebugLog.shared.record(message)
                             NSLog("[BitChord] %@", message)
                             return
                         }
-#endif
                         try engine.prepareTrackOutput(
                             sourceRate: sourceFormat.sampleRate,
                             sourceChannels: sourceFormat.channels,
@@ -1265,6 +1293,17 @@ final class PlaybackController {
         }
     }
 
+    /// A load that finished after the listener paused it: loaded, not audible.
+    private func settleHeldLoad() {
+        holdAfterLoad = false
+        try? engine.pause()
+        dolbyRenderer?.pause()
+        state = .paused
+        positionSampledAt = Date()
+        nowPlaying.updateRate(0, position: position)
+        persistSession()
+    }
+
     private func pausePlayback(releaseAudioSession: Bool = false) {
         resumeGeneration &+= 1
         wasInterrupted = false
@@ -1287,18 +1326,15 @@ final class PlaybackController {
         }
         nowPlaying.updateRate(0, position: position)
         persistSession()
-#if os(iOS)
-        // Ordinary pause is a resumable media session. Deactivation drops
-        // native eligibility and invalidates RemoteIO; retain activation until
-        // playback is abandoned or another app interrupts this session.
+        // Ordinary pause is a resumable media session. On iOS deactivation
+        // drops native eligibility and invalidates RemoteIO; on macOS it gives
+        // up the route, which resume then has to win back. Keep it until
+        // playback is abandoned (macOS lets go after 30 idle seconds anyway).
         if releaseAudioSession || loading {
             deactivateAudioSessionIfIdle()
         } else {
             debugLog.record("paused playback retains audio session active=\(AudioSessionManager.isActive)")
         }
-#else
-        deactivateAudioSessionIfIdle()
-#endif
     }
 
     private func deactivateAudioSessionIfIdle() {
@@ -1947,6 +1983,8 @@ final class PlaybackController {
         duration = 0
         lastError = nil
         state = .buffering
+        holdAfterLoad = false
+        loadingGeneration = generation
         if refreshAutoplay {
             maybeAutoplay(force: true)
         } else {
@@ -2074,12 +2112,14 @@ final class PlaybackController {
                     guard let self, self.playGeneration == generation else { return }
                     do {
                         self.prepareNowPlayingForPlayback(entry: entry, duration: info.durationSeconds, position: resume)
-                        try engine.play()
+                        let hold = self.holdAfterLoad
+                        if !hold { try engine.play() }
                         self.currentLoudnessDb = resolved.loudnessDb
                         self.loadDidSucceed(
                             entry: entry, index: index, info: info,
                             startAt: resume, headers: resolved.headers
                         )
+                        if hold { self.settleHeldLoad() }
                     } catch {
                         self.loadDidFail(entry: entry, error: error)
                     }
@@ -2119,8 +2159,10 @@ final class PlaybackController {
                 self.lastError = "The Dolby source stopped serving playable audio."
             }
             prepareNowPlayingForPlayback(entry: entry, duration: info.durationSeconds, position: start)
-            renderer.play()
+            let hold = holdAfterLoad
+            if !hold { renderer.play() }
             loadDidSucceed(entry: entry, index: index, info: info, startAt: start, headers: [:])
+            if hold { settleHeldLoad() }
         } catch {
             renderer.stop()
             if dolbyRenderer === renderer { dolbyRenderer = nil }
@@ -2435,7 +2477,7 @@ final class PlaybackController {
         }
         do {
             let localPath = try await streamViaKtor(
-                videoId: videoId, url: stream.url, headers: stream.headers, codec: stream.mimeType.lowercased().contains("opus") ? "Opus" : "AAC", kbps: stream.kbps, relativeLoudnessDb: stream.loudnessDb, youtubeVideoId: videoId, durationSeconds: stream.durationSeconds)
+                videoId: videoId, url: stream.url, headers: stream.headers, codec: stream.mimeType.lowercased().contains("opus") ? "Opus" : "AAC", kbps: stream.kbps, relativeLoudnessDb: stream.loudnessDb, youtubeVideoId: videoId, durationSeconds: stream.durationSeconds, maxKbps: prefs.maxKbps)
             return ResolvedSource(
                 source: localPath, headers: [:], kbps: stream.kbps,
                 durationSec: stream.durationSeconds, loudnessDb: stream.loudnessDb, origin: .youtube, youtubeVideoId: videoId
@@ -2454,7 +2496,7 @@ final class PlaybackController {
                 )
                 do {
                     let localPath = try await streamViaKtor(
-                        videoId: videoId, url: fresh.url, headers: fresh.headers, codec: fresh.mimeType.lowercased().contains("opus") ? "Opus" : "AAC", kbps: fresh.kbps, relativeLoudnessDb: fresh.loudnessDb, youtubeVideoId: videoId, durationSeconds: fresh.durationSeconds)
+                        videoId: videoId, url: fresh.url, headers: fresh.headers, codec: fresh.mimeType.lowercased().contains("opus") ? "Opus" : "AAC", kbps: fresh.kbps, relativeLoudnessDb: fresh.loudnessDb, youtubeVideoId: videoId, durationSeconds: fresh.durationSeconds, maxKbps: prefs.maxKbps)
                     return ResolvedSource(
                         source: localPath, headers: [:], kbps: fresh.kbps,
                         durationSec: fresh.durationSeconds, loudnessDb: fresh.loudnessDb, origin: .youtube, youtubeVideoId: videoId
@@ -2591,12 +2633,12 @@ final class PlaybackController {
     /// appending; [StreamFileCache] is filled when the last one lands so a
     /// re-tap does not fetch again.
     private static func streamViaKtor(
-        videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil
+        videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, maxKbps: Int = Int(Int32.max)
     ) async throws -> String {
         let taskKey = videoId + "|" + StreamFileCache.qualityIdentity + "|" + DiskCache.hashName(url)
         let task: Task<String, Error> = streamGate.lock.withLock {
             if let existing = streamGate.tasks[taskKey] { return existing }
-            let created = Task { try await streamViaKtorOnce(videoId: videoId, url: url, headers: headers, codec: codec, kbps: kbps, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds) }
+            let created = Task { try await streamViaKtorOnce(videoId: videoId, url: url, headers: headers, codec: codec, kbps: kbps, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds, maxKbps: maxKbps) }
             streamGate.tasks[taskKey] = created
             return created
         }
@@ -2615,39 +2657,44 @@ final class PlaybackController {
     }
 
     private static func streamViaKtorOnce(
-        videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil
+        videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, maxKbps: Int = Int(Int32.max)
     ) async throws -> String {
         let qualityIdentity = StreamFileCache.qualityIdentity
         return try await withCheckedThrowingContinuation { continuation in
             let lock = NSLock()
             var resumed = false
-            StreamDownloadBridge.shared.streamToFile(
-                url: url,
-                headers: headers,
-                ready: DownloadCallbackAdapter { path, message in
-                    lock.lock()
-                    defer { lock.unlock() }
-                    guard !resumed else { return }
-                    resumed = true
-                    if let path {
-                        streamGate.lock.withLock { streamGate.growing[videoId] = path; streamGate.growingQuality[videoId] = qualityIdentity; streamGate.growingKbps[videoId] = kbps }
-                        Task { await StreamFileCache.shared.noteGrowing(videoId: videoId, path: path, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds) }
-                        continuation.resume(returning: path)
-                    } else {
-                        continuation.resume(throwing: InnertubeStreamResolver.StreamError(
-                            message: message ?? "Stream failed"))
-                    }
-                },
-                done: DownloadCallbackAdapter { path, message in
-                    if let path {
-                        Task { await StreamFileCache.shared.store(videoId, path: path, sourceIdentity: DiskCache.hashName(url), codec: codec, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds) }
-                    } else if let message {
-                        print("[Playback] stream tail failed for \(videoId): \(message)")
-                        streamGate.lock.withLock { streamGate.growing[videoId] = nil }
-                        Task { await StreamFileCache.shared.dropGrowing(videoId: videoId) }
-                    }
+            let ready = DownloadCallbackAdapter { path, message in
+                lock.lock()
+                defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                if let path {
+                    streamGate.lock.withLock { streamGate.growing[videoId] = path; streamGate.growingQuality[videoId] = qualityIdentity; streamGate.growingKbps[videoId] = kbps }
+                    Task { await StreamFileCache.shared.noteGrowing(videoId: videoId, path: path, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds) }
+                    continuation.resume(returning: path)
+                } else {
+                    continuation.resume(throwing: InnertubeStreamResolver.StreamError(
+                        message: message ?? "Stream failed"))
                 }
-            )
+            }
+            let done = DownloadCallbackAdapter { path, message in
+                if let path {
+                    Task { await StreamFileCache.shared.store(videoId, path: path, sourceIdentity: DiskCache.hashName(url), codec: codec, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds) }
+                } else if let message {
+                    print("[Playback] stream tail failed for \(videoId): \(message)")
+                    streamGate.lock.withLock { streamGate.growing[videoId] = nil }
+                    Task { await StreamFileCache.shared.dropGrowing(videoId: videoId) }
+                }
+            }
+            // With the YouTube id the bridge can answer a mid-track refusal with a
+            // fresh URL for the same rendition instead of cutting the song short.
+            if let youtubeVideoId {
+                StreamDownloadBridge.shared.streamTrackToFile(
+                    videoId: youtubeVideoId, maxKbps: Int32(clamping: maxKbps),
+                    url: url, headers: headers, ready: ready, done: done)
+                return
+            }
+            StreamDownloadBridge.shared.streamToFile(url: url, headers: headers, ready: ready, done: done)
         }
     }
 
@@ -2669,6 +2716,7 @@ final class PlaybackController {
         headers: [String: String]
     ) {
         NSLog("[BitChord] loaded track at %.2fs (duration %.2fs)", startAt, info.durationSeconds)
+        loadingGeneration = nil
         playingIndex = index
         current = entry
         historyVideoID = youtubeVideoID(for: entry)
@@ -2739,6 +2787,8 @@ final class PlaybackController {
     }
 
     private func loadDidFail(entry: QueueEntry, error: Error) {
+        loadingGeneration = nil
+        holdAfterLoad = false
         lastError = "Couldn't play “\(entry.title)” — \(error.localizedDescription)"
         // Somebody (pause, another load, sleep, interruption) owns the
         // transport now; their state stands and only the message is new.
@@ -2968,10 +3018,20 @@ final class PlaybackController {
                         ), expectedSource: expectedSource)
                     }) != nil else { return }
                     NSLog(
-                        "[BitChord] automix plan %d for %@%@: %@, cue %.2fs, fade %.2fs, end %.1fs",
+                        "[BitChord] automix plan %d for %@%@: %@, cue %.2fs, fade %.2fs, end %.1fs — %@",
                         attempt, next.title, selfMix ? " (self-mix)" : "",
                         String(describing: plan.style),
-                        plan.cueSeconds, plan.fadeSeconds, plan.transitionEndSeconds
+                        plan.cueSeconds, plan.fadeSeconds, plan.transitionEndSeconds,
+                        plan.reason
+                    )
+                    // The transition log Automix never had: which technique each
+                    // pair got and why, persisted with the rest of the playback
+                    // record so "it only ever fades" can be counted, not argued.
+                    PlaybackDebugLog.shared.record(
+                        "automix \(Self.tierName(plan)) [plan \(attempt)] → \(next.title): "
+                            + String(format: "cue %.1fs, window %.1fs, end %.1fs. ", plan.cueSeconds, plan.fadeSeconds, plan.transitionEndSeconds)
+                            + (plan.reason.isEmpty ? "no reason given" : plan.reason),
+                        about: nextId
                     )
                     await MainActor.run { [weak self] in
                         guard let self, self.queueNextRevision == revision else { return }
@@ -3116,6 +3176,7 @@ final class PlaybackController {
         // selection. Empty source keeps backward compatibility with callers
         // that do not report one.
         if !source.isEmpty, let loaded = loadedSourcePath, loaded != source { return }
+        if resumeAfterFailedDownload(source: source.isEmpty ? loadedSourcePath : source) { return }
         if historyVideoID != nil {
             PlaybackTrackerBridge.shared.onPlaybackFinished(positionSeconds: Int64(position))
         }
@@ -3162,6 +3223,28 @@ final class PlaybackController {
             nowPlaying.stop()
             deactivateAudioSessionIfIdle()
         }
+    }
+
+    /// A "natural end" that is really a download that gave up part-way (the
+    /// bridge leaves `.failed` beside the file). Reload the same track at the
+    /// same position — a fresh resolve, so a fresh URL — instead of moving on
+    /// as if the song had finished. Once per track, so a source that keeps
+    /// failing still lets the queue advance.
+    private func resumeAfterFailedDownload(source: String?) -> Bool {
+        guard let source, FileManager.default.fileExists(atPath: source + ".failed"),
+              let current, queue.indices.contains(playingIndex),
+              failedDownloadResumes[current.id, default: 0] < 2 else { return false }
+        let at = playbackPosition
+        guard duration <= 0 || at < duration - 3 else { return false }
+        failedDownloadResumes[current.id, default: 0] += 1
+        PlaybackDebugLog.shared.record("download failed at \(Int(at))s of \(Int(duration))s; reloading to resume", about: current.id)
+        let cacheId = youtubeVideoID(for: current) ?? current.id
+        Task { await StreamFileCache.shared.dropGrowing(videoId: cacheId) }
+        dolbyRenderer?.stop()
+        dolbyRenderer = nil
+        engineLoadedId = nil
+        loadCurrent(playingIndex, startAt: max(0, at - 0.5), refreshAutoplay: false)
+        return true
     }
 
     /// Reopen the current queue item after a natural end. Seeking a finished
@@ -3537,6 +3620,15 @@ final class PlaybackController {
         let failure = await LibraryActions.rate(videoId: videoId, status: status)
         if generation == PageSession.generation() {
             if failure != nil { LikeStore.shared.set(videoId, previous) }
+            // The one rating that edits what is already queued: a disliked
+            // recommendation leaves the tail. Nothing else moves.
+            if failure == nil, status == "DISLIKE" {
+                let before = queue.count
+                queue = queue.enumerated().filter {
+                    $0.offset <= playingIndex || !$0.element.fromAutoplay || youtubeVideoID(for: $0.element) != videoId
+                }.map(\.element)
+                if queue.count != before { persistSession(); syncEngineQueueNext() }
+            }
             refreshAfterRating(failure: failure, sessionGeneration: generation)
         }
         return failure
@@ -3602,7 +3694,16 @@ final class PlaybackController {
         )
     }
 
+    /// The queue is a promise: once a recommendation is in it, it stays where
+    /// it is until the listener plays, skips, moves or removes it. What the
+    /// listener does — a skip, a like, a new pick — steers the *next* fill,
+    /// because the next fill is seeded from whatever is playing then. It never
+    /// rewrites the fill already shown.
     private func maybeAutoplay(force: Bool = false, lowWaterRefill: Bool = false) {
+        if force {
+            // A forced fill tops the tail up to its target; it does not replace it.
+            guard PlaybackQueuePolicy.fillRoom(queue, after: playingIndex) > 0 else { return }
+        }
         guard let context = recommendationContext,
               force || (lowWaterRefill && PlaybackQueuePolicy.shouldRefillAutoplay(
                   upcomingCount: queue.count - playingIndex - 1
@@ -3613,13 +3714,13 @@ final class PlaybackController {
             Task { @MainActor in
                 guard let self, let json, let currentContext = self.recommendationContext,
                       self.autoplayRefresh.accepts(request, current: currentContext) else { return }
-                // An explicit action replaces stale suggestions but keeps the
-                // played prefix and user/list entries. Natural low-water refills
-                // append behind everything already queued.
-                let kept = force
-                    ? PlaybackQueuePolicy.withoutUpcomingAutoplay(self.queue, after: self.playingIndex)
-                    : self.queue
+                // Fills only ever append. Anything already queued — list rows,
+                // the listener's own additions, earlier recommendations — keeps
+                // its place.
+                let kept = self.queue
                 guard kept.indices.contains(self.playingIndex) else { return }
+                let room = PlaybackQueuePolicy.fillRoom(kept, after: self.playingIndex)
+                guard room > 0 || !force else { return }
                 // QueueBuilder reads the final existing entry as the station seed.
                 // Its filtering snapshot ends with the current song; actual queue
                 // positions and manual/list priority are unchanged.
@@ -3627,7 +3728,8 @@ final class PlaybackController {
                 let existing = (try? JSONEncoder().encode(filteringEntries.map { $0.asSongJSON(videoIDOverride: self.youtubeVideoID(for: $0)) }))
                     .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
                 let extraJson = QueueBuilderBridge.shared.extendJson(
-                    existingJson: existing, candidatesJson: json, limit: Int32(8)
+                    existingJson: existing, candidatesJson: json,
+                    limit: Int32(max(room, PlaybackQueuePolicy.autoplayRefillThreshold))
                 )
                 guard let data = extraJson.data(using: .utf8),
                       let songs = try? JSONDecoder().decode([SongDTO].self, from: data) else { return }
@@ -3640,7 +3742,11 @@ final class PlaybackController {
                         fromAutoplay: true
                     )
                 }
-                self.queue = kept + extras
+                // Ordered by taste once, as a batch, before anyone has seen it.
+                let scores = self.tasteScores(extras)
+                let ordered = PlaybackQueuePolicy.ranked(Array(extras.indices), scores: scores).map { extras[$0] }
+                guard !ordered.isEmpty else { return }
+                self.queue = PlaybackQueuePolicy.appendingFill(kept, extras: ordered)
                 self.persistSession()
                 self.syncEngineQueueNext()
                 self.scheduleSequencing()
@@ -3677,20 +3783,18 @@ final class PlaybackController {
         }
     }
 
+    /// Automix ordering for a *new* batch of recommendations only, once.
+    ///
+    /// It used to re-rank every upcoming list row and recommendation on every
+    /// queue change — twice, by taste and then by analysis — so a song the
+    /// listener had spotted two places down could move or vanish because they
+    /// liked something else. List order is the list's (Automix orders a list once,
+    /// when it is chosen), the next couple of rows are committed, and each batch
+    /// of recommendations is settled after its single analysis pass.
     private func scheduleSequencing() {
         sequencingTask?.cancel()
         sequencingGeneration &+= 1
         guard automixSequencingEnabled, let current else { return }
-        let initial = queue
-        let initialScores = tasteScores(initial)
-        for positions in [PlaybackQueuePolicy.listIndices(initial, after: playingIndex),
-                          PlaybackQueuePolicy.autoplayIndices(initial, after: playingIndex)] {
-            queue = PlaybackQueuePolicy.replacing(
-                queue, at: positions,
-                with: PlaybackQueuePolicy.ranked(positions, scores: initialScores).map { initial[$0] }
-            )
-        }
-        if queue != initial { persistSession(); syncEngineQueueNext() }
         let generation = sequencingGeneration
         let snapshot = queue
         let index = playingIndex
@@ -3699,9 +3803,11 @@ final class PlaybackController {
         let currentPath = loadedSourcePath
         let fade = Double(PlatformSettings.shared.getInt(key: "crossfade_seconds", default: 0))
         let skipVocals = automixPerformanceMode == "EFFICIENT"
-        let listPositions = PlaybackQueuePolicy.listIndices(snapshot, after: index)
-        let autoplayPositions = PlaybackQueuePolicy.autoplayIndices(snapshot, after: index)
-        guard listPositions.count > 1 || autoplayPositions.count > 1 else { return }
+        let listPositions: [Int] = []
+        let autoplayPositions = PlaybackQueuePolicy.autoplayIndices(snapshot, after: index).filter {
+            $0 > index + PlaybackQueuePolicy.committedRows && !settledAutoplayIds.contains(snapshot[$0].id)
+        }
+        guard autoplayPositions.count > 1 else { return }
         // Taste/freshness gives every candidate an order immediately. Decode and
         // analyse only a bounded window of audio already available on this device.
         let fallback = tasteScores(snapshot)
@@ -3747,6 +3853,7 @@ final class PlaybackController {
                   self.automixSequencingEnabled, self.queue == snapshot, self.playingIndex == index,
                   self.playGeneration == playbackGeneration, self.current?.id == current.id,
                   PageSession.generation() == sessionGeneration else { return }
+            self.settledAutoplayIds.formUnion(autoplayPositions.map { snapshot[$0].id })
             let scores = transitionFits.isEmpty ? fallback : self.tasteScores(snapshot, transitionFits: transitionFits)
             var ordered = snapshot
             for positions in [listPositions, autoplayPositions] {
@@ -4322,6 +4429,7 @@ final class PlaybackController {
             ? String(format: " @%.3fx", plan.playbackRate)
             : ""
         analysisTier = Self.tierName(plan) + rateNote
+        transitionReason = plan.reason.isEmpty ? nil : plan.reason
         let sources = lastAutomixAnalysisSources()
         if sources.count >= 2 {
             analysisSources = "\(sources[0]) → \(sources[1])"
@@ -4386,17 +4494,21 @@ final class PlaybackController {
     /// must not cut across.
     private static func isRealMix(_ plan: TransitionPlanRec) -> Bool {
         switch plan.style {
-        case .djBlend, .djFilter: return true
+        case .djBlend, .djFilter, .echoOut, .loopRoll, .reverbWash, .dropCut: return true
         case .equalPower, .gapless: return plan.fadeSeconds >= 1
         }
     }
 
-    private static func tierName(_ plan: TransitionPlanRec) -> String {
+    nonisolated private static func tierName(_ plan: TransitionPlanRec) -> String {
         switch plan.style {
         case .djBlend: return "beatmatched blend"
         case .djFilter: return "filter ride"
         case .gapless: return "gapless"
         case .equalPower: return "crossfade"
+        case .echoOut: return "echo out"
+        case .loopRoll: return "loop roll"
+        case .reverbWash: return "reverb wash"
+        case .dropCut: return "cut on the one"
         }
     }
 
@@ -5022,7 +5134,7 @@ extension PlaybackController {
         checks["successful_rating_refreshes"] = replies.count == beforeRating + 1
         replies.last!.1(songs(["fresh-tail1"]), nil)
         await settle()
-        checks["rating_replaces_only_unplayed_tail"] = queue.map(\.id) == ["test-seed01", "manual-song", "suggestion1", "fresh-tail1"]
+        checks["rating_appends_without_replacing_tail"] = queue.map(\.id) == ["test-seed01", "manual-song", "suggestion1", "fresh-tail1"]
         let outgoing = replies.last!
 
         let threeUpcoming = (0..<3).map {
