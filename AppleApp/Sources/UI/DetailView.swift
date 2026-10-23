@@ -1047,7 +1047,12 @@ struct DetailView: View {
         let kinds = Set(["album", "single", "ep", "playlist", "artist", "podcast", "episode", "song", "video"])
         let year = parts.last { $0.count == 4 && $0.allSatisfy(\.isNumber) }
         let kindWord = parts.first { kinds.contains($0.lowercased()) }
-        let credit = parts.filter { $0 != year && $0 != kindWord }.joined(separator: ", ")
+        // A playlist you own lists its privacy where others list an author;
+        // it is not a name to credit or link.
+        let privacy = Set(["private", "unlisted", "public"])
+        let credit = parts
+            .filter { $0 != year && $0 != kindWord && !privacy.contains($0.lowercased()) }
+            .joined(separator: ", ")
         let kindLabel = kindWord ?? {
             switch kind(of: page) {
             case .album: return "Album"

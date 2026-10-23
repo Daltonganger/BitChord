@@ -183,10 +183,37 @@ struct ChromeGlass<S: Shape>: ViewModifier {
     }
 }
 
+/// The fill behind a control that sits in a toolbar. From iOS/macOS 26 the
+/// toolbar draws its own glass around each item, so drawing [ChromeGlass] as
+/// well stacks a second pane inside the first; there it draws nothing. Earlier
+/// systems have no toolbar glass and get the material.
+struct ToolbarChrome<S: Shape>: ViewModifier {
+    let shape: S
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *) {
+            content
+        } else if reduceTransparency {
+            content.background(shape.fill(Theme.Materials.opaque))
+        } else {
+            content
+                .background(shape.fill(.ultraThinMaterial))
+                .overlay(shape.stroke(Color.white.opacity(0.22), lineWidth: 0.6))
+        }
+    }
+}
+
 extension View {
     /// Draws the chrome fill in `shape` behind this view.
     func chromeGlass<S: Shape>(in shape: S) -> some View {
         modifier(ChromeGlass(shape: shape))
+    }
+
+    /// [chromeGlass] for a control inside a toolbar item; see [ToolbarChrome].
+    func toolbarChrome<S: Shape>(in shape: S) -> some View {
+        modifier(ToolbarChrome(shape: shape))
     }
 }
 
