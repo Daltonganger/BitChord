@@ -427,6 +427,32 @@ struct EmptyStateView: View {
     }
 }
 
+/// The one selected row in a window.
+///
+/// Selection cannot live in each row: a `@State` per row keeps every row that
+/// has ever been clicked highlighted, so three clicks leave three rows selected.
+/// A Mac list has one selection — a click replaces it — and that is a single id
+/// the window owns and every row reads.
+@Observable
+final class RowSelection {
+    var id: String?
+
+    func select(_ id: String) {
+        self.id = id
+    }
+}
+
+private struct RowSelectionKey: EnvironmentKey {
+    static let defaultValue: RowSelection? = nil
+}
+
+extension EnvironmentValues {
+    var rowSelection: RowSelection? {
+        get { self[RowSelectionKey.self] }
+        set { self[RowSelectionKey.self] = newValue }
+    }
+}
+
 /// A queue row: artwork, title/artist, duration; hover highlight, context
 /// menu (macOS nuance from UI spec §5). Rows always show a sleeve — album
 /// tracks that omit per-song art inherit the page cover at the call site.
@@ -444,11 +470,7 @@ struct SongRow: View {
     @Environment(ToastCenter.self) private var toast
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var hovering = false
-    #if os(macOS)
-    /// The Mac list selection. A click selects the row the way a Mac list does;
-    /// the second click of a double click is what starts playback.
-    @State private var selected = false
-    #endif
+    @Environment(\.rowSelection) private var rowSelection
 
     /// How many lines a track's text may take.
     ///
@@ -460,10 +482,10 @@ struct SongRow: View {
     private var titleLines: Int? { dynamicTypeSize.isAccessibilitySize ? 2 : 1 }
 
     private var active: Bool { isCurrent || controller.current?.id == entry.id }
-    /// Whether a Mac click has selected this row.
+    /// Whether this is the window's selected row.
     private var isSelected: Bool {
         #if os(macOS)
-        selected
+        rowSelection?.id == entry.id
         #else
         false
         #endif
@@ -478,7 +500,13 @@ struct SongRow: View {
                 // Double click first: SwiftUI resolves the more specific gesture,
                 // so a play does not also land as a selection click.
                 .onTapGesture(count: 2) { play() }
-                .onTapGesture { selected = true }
+                .onTapGesture { rowSelection?.select(entry.id) }
+                // A row that can only be clicked is not a Mac row: it is
+                // focusable, Return and Space play it, and VoiceOver's "press"
+                // does the same through the default action.
+                .focusable()
+                .onKeyPress(.return) { play(); return .handled }
+                .onKeyPress(.space) { play(); return .handled }
             #else
             // A phone row is the play button itself: there is no pointer to
             // select with, and a double click would mean starting it twice.
@@ -496,6 +524,13 @@ struct SongRow: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(active || isSelected ? [.isButton, .isSelected] : .isButton)
+        #if os(macOS)
+        // The element ignores its children, so its actions belong on the element
+        // rather than inside the row: VoiceOver's press and "Play" both start it,
+        // as they did when the row was a Button.
+        .accessibilityAction { play() }
+        .accessibilityAction(named: "Play") { play() }
+        #endif
         .songContextMenu(entry, playlistBrowseId: playlistBrowseId, playlistOwned: playlistOwned)
         #if os(iOS)
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
@@ -588,7 +623,7 @@ struct SongRow: View {
         #if os(macOS)
         // A selected row outranks the playing and hover tints: it is the row the
         // next double click would play.
-        if selected { return Color.accentColor.opacity(0.16) }
+        if isSelected { return Color.accentColor.opacity(0.16) }
         #endif
         if active { return Color.primary.opacity(0.08) }
         if hovering { return Color.primary.opacity(0.05) }
