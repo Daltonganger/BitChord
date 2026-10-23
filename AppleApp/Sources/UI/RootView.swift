@@ -441,7 +441,10 @@ struct RootView: View {
             macPlaylists = []
             return
         }
-        macPlaylists = await LibraryActions.userPlaylists()
+        // One row per playlist id: the list can repeat one (ForEach then draws
+        // it more than once), while two playlists may share a title.
+        var seen = Set<String>()
+        macPlaylists = await LibraryActions.userPlaylists().filter { seen.insert($0.playlistId).inserted }
     }
     #endif
 

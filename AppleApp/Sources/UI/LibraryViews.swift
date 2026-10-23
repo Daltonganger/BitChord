@@ -341,6 +341,12 @@ private struct RecentTrackRow: View {
                     .frame(width: 36, height: 36)
                     .contentShape(Circle())
             }
+            #if os(macOS)
+            // Without this the Mac draws a boxed pop-up button with a chevron.
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            #endif
             .tint(.gray)
             .accessibilityLabel("More actions for \(card.title)")
         }

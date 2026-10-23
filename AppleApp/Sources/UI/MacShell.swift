@@ -89,6 +89,11 @@ struct MacTransportControls: View {
             MacPartyButton()
         }
         .labelStyle(.iconOnly)
+        // Keep each button its own element. Once a pushed page puts its back
+        // button in the navigation area, AppKit otherwise reports every button
+        // in this item under the first one's name ("Shuffle").
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Playback Controls")
     }
 
     private var repeatHelp: String {
