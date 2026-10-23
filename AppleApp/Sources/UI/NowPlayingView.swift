@@ -937,11 +937,13 @@ struct NowPlayingView: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .shadow(color: .black.opacity(0.45), radius: 6, y: 1)
-                Text(creditLine)
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineLimit(1)
-                    .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
+                ArtistCreditText(
+                    credit: controller.current?.artist ?? "",
+                    font: .subheadline,
+                    color: .white.opacity(0.75),
+                    suffix: albumSuffix
+                )
+                .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
             }
             Spacer(minLength: 8)
             if auth.signedIn, controller.current?.videoId != nil {
@@ -1257,12 +1259,16 @@ struct NowPlayingView: View {
     /// One line rather than two because the deck has room for one: a title on
     /// two lines already, and a second line under it pushes the scrubber down and
     /// the deck is supposed to be the same height whatever is playing.
-    private var creditLine: String {
-        let artist = controller.current?.artist ?? ""
+    /// The album, as the tail of the credit line: " — Album", or nothing.
+    ///
+    /// Kept off [ArtistCreditText]'s links deliberately. The album is named here
+    /// rather than linked because the deck has no album destination that the
+    /// artist links do not already dominate.
+    private var albumSuffix: String? {
         let album = controller.current?.albumName ?? ""
-        if artist.isEmpty { return album }
-        if album.isEmpty { return artist }
-        return "\(artist) — \(album)"
+        let artist = controller.current?.artist ?? ""
+        if album.isEmpty { return nil }
+        return artist.isEmpty ? album : " — \(album)"
     }
 
     /// Upstream `AppSettings.fullBleedArtwork`: the portrait sleeve runs as a
@@ -2707,6 +2713,25 @@ struct LyricsPane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // A share card belongs to the song and the lyric it quoted. A new track,
+        // or a different lyric source for the same one, makes the old card
+        // describe something else — and it would still be sitting in the share
+        // preview under the new song's name.
+        .onChange(of: trackId) { _, _ in clearShareSelection() }
+        .onChange(of: lyricsSignature) { _, _ in clearShareSelection() }
+    }
+
+    /// What makes one lyric document different from another. A source change
+    /// usually brings a different number of lines, and always a different first
+    /// timestamp or credit.
+    private var lyricsSignature: String {
+        "\(lines.count)|\(lines.first?.timeMs ?? 0)|\(sourceLabel ?? "")"
+    }
+
+    private func clearShareSelection() {
+        guard !selection.isEmpty || shareImage != nil else { return }
+        selection.removeAll()
+        shareImage = nil
     }
 
     /// The quote bar: what has been picked, and the way to share it.
