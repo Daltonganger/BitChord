@@ -271,6 +271,9 @@ struct RootView: View {
             }
         }
         .task(id: auth.sessionEpoch) { await loadMacPlaylists() }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryPlaylistsChanged)) { _ in
+            Task { await loadMacPlaylists() }
+        }
         .onAppear {
             // Reopen the row the window was left on.
             macSide = MacSide(tab: resolvedTab(AppModel.Tab(rawValue: selection) ?? .home))
