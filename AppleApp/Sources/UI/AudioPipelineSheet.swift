@@ -83,8 +83,14 @@ struct AudioPipelineSheet: View {
                         row("Bit-perfect", bitPerfectStatus)
                     }
                     rule
+                    stage(5, "shuffle", "Automix") {
+                        row("Next Transition", controller.analysisTier ?? "—")
+                        row("Why", controller.transitionReason ?? "—")
+                        row("Analysis", controller.analysisSources ?? "—")
+                    }
+                    rule
                     TimelineView(.periodic(from: .now, by: 1)) { _ in
-                        stage(5, "waveform.path.ecg", "Playback Diagnostics") {
+                        stage(6, "waveform.path.ecg", "Playback Diagnostics") {
                             row("Buffered", "\(controller.outputHealth.bufferedFrames) frames")
                             row("Silent callbacks", "\(controller.outputHealth.callbackUnderruns)")
                             row("Output rebuilds", "\(controller.outputHealth.outputRebuilds)")
