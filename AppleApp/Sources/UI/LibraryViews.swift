@@ -2993,6 +2993,7 @@ private struct LocalPlaylistsView: View {
     @State private var loading = true
     @State private var imported = ImportedPlaylistStore.shared
     @State private var showImportPicker = false
+    @State private var showSpotifyImport = false
     @State private var importDraft: PlaylistImportDraft?
     @State private var matchingImport = false
     @State private var showImportMessage = false
@@ -3015,6 +3016,10 @@ private struct LocalPlaylistsView: View {
                     )
                     Button("Import Playlist File", systemImage: "square.and.arrow.down") {
                         showImportPicker = true
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Import from Spotify", systemImage: "music.note.list") {
+                        showSpotifyImport = true
                     }
                     .buttonStyle(.bordered)
                     if auth.signedIn {
@@ -3056,6 +3061,12 @@ private struct LocalPlaylistsView: View {
                     Section {
                         Button("Import Playlist File", systemImage: "square.and.arrow.down") {
                             showImportPicker = true
+                        }
+                        // The link-based counterpart to the CSV export: Spotify
+                        // playlists matched track by track instead of a file the
+                        // listener had to export first.
+                        Button("Import from Spotify", systemImage: "music.note.list") {
+                            showSpotifyImport = true
                         }
                     }
                     if !files.isEmpty {
@@ -3165,6 +3176,9 @@ private struct LocalPlaylistsView: View {
             allowsMultipleSelection: false
         ) { result in
             prepareImport(result)
+        }
+        .sheet(isPresented: $showSpotifyImport) {
+            SpotifyImportSheet()
         }
         .sheet(item: $importDraft) { draft in
             PlaylistImportReviewView(draft: draft) { error in
