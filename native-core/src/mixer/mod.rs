@@ -1419,22 +1419,37 @@ pub struct DeckLoudness {
     pub applied_normalization_db: Option<f64>,
 }
 
-#[derive(Clone, Copy)]
-enum Level {
-    Absolute(f64),
-    Relative(f64),
-}
-
 impl DeckLoudness {
-    /// The level the deck plays at once normalization has had its say.
-    fn level(self) -> Option<Level> {
-        let applied = self.applied_normalization_db.filter(|v| v.is_finite()).unwrap_or(0.0);
-        if let Some(lufs) = self.lufs.filter(|v| v.is_finite()) {
-            return Some(Level::Absolute(lufs + applied));
-        }
-        self.relative_db
+    fn applied(self) -> f64 {
+        self.applied_normalization_db
             .filter(|v| v.is_finite())
-            .map(|db| Level::Relative(db + applied))
+            .unwrap_or(0.0)
+    }
+
+    /// The level this deck plays at, in the measure the two decks share.
+    ///
+    /// A measured LUFS figure is the better evidence, so it is used whenever
+    /// both decks have one. When only one does — which is the normal case while
+    /// a transition is being armed, because the measurement is delivered for the
+    /// *playing* deck and the incoming one has only just been opened — the
+    /// player's relative figures are used instead, provided both decks have one.
+    /// Comparing nothing because the two happen to be known in different forms
+    /// would decline a match that both figures could have made.
+    fn shared_level(incoming: Self, outgoing: Self) -> Option<(f64, f64)> {
+        let (ai, ao) = (incoming.applied(), outgoing.applied());
+        if let (Some(li), Some(lo)) = (
+            incoming.lufs.filter(|v| v.is_finite()),
+            outgoing.lufs.filter(|v| v.is_finite()),
+        ) {
+            return Some((li + ai, lo + ao));
+        }
+        if let (Some(ri), Some(ro)) = (
+            incoming.relative_db.filter(|v| v.is_finite()),
+            outgoing.relative_db.filter(|v| v.is_finite()),
+        ) {
+            return Some((ri + ai, ro + ao));
+        }
+        None
     }
 
     /// The gain, in dB, that puts the incoming deck at the outgoing deck's
@@ -1445,11 +1460,7 @@ impl DeckLoudness {
     /// bad measurement — a spoken intro, a silent tail — than a track that far
     /// off, and a wrong correction that large is worse than none.
     pub fn match_gain_db(incoming: DeckLoudness, outgoing: DeckLoudness) -> Option<f64> {
-        let (a, b) = match (incoming.level()?, outgoing.level()?) {
-            (Level::Absolute(a), Level::Absolute(b)) => (a, b),
-            (Level::Relative(a), Level::Relative(b)) => (a, b),
-            _ => return None,
-        };
+        let (a, b) = DeckLoudness::shared_level(incoming, outgoing)?;
         let delta = b - a;
         if !delta.is_finite() {
             return None;
@@ -1791,6 +1802,11 @@ pub struct NerdSnapshot {
     /// or no figure). The pipeline panel reads this, not the switch — the
     /// switch is the request, this is the answer.
     pub loudness_gain_db: Option<f32>,
+    /// The level correction the last armed transition applied to its incoming
+    /// deck, in dB (`None` = none was armed: no comparable figures, or already
+    /// level). Kept after the handoff, like the swap correlation, because it is
+    /// a fact about the join that was made.
+    pub transition_match_db: Option<f32>,
     /// Pearson correlation between the two encodings of the last source swap,
     /// measured on the samples that were actually blended. `None` until a swap
     /// has run. This is data about the catalogue — how alike two encoders of one
@@ -1825,8 +1841,10 @@ impl MixerState {
             self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
         );
         if let Ok(mut nerd) = self.nerd.lock() {
-            // Preserved: it describes the last swap, not this track.
+            // Preserved: they describe the last swap and the last transition,
+            // not this track.
             let correlation = nerd.swap_correlation;
+            let transition_match = nerd.transition_match_db;
             *nerd = NerdSnapshot {
                 codec: info.codec.clone(),
                 sample_rate: info.sample_rate,
@@ -1835,6 +1853,7 @@ impl MixerState {
                 kbps: info.kbps,
                 loudness_gain_db: gain_db,
                 swap_correlation: correlation,
+                transition_match_db: transition_match,
                 ..NerdSnapshot::default()
             };
         }
@@ -2155,6 +2174,11 @@ impl MixerState {
         ) {
             Ok(mut voice) => {
                 voice.gain = 0.0;
+                voice.normalization_mode = self.loudness_mode;
+                voice.arm_transition_match(
+                    self.current.as_ref(),
+                    self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
+                );
                 let track = self
                     .current
                     .as_ref()
@@ -2260,13 +2284,18 @@ impl MixerState {
         ) {
             Ok(mut voice) => {
                 voice.gain = 0.0; // silent until the fade lifts it
-                // The match is measured after normalization, so it has to know
-                // whether normalization is on — the same condition the blend's
-                // `mix_into` calls use.
+                // The match is measured after normalization, so the voice has to
+                // know what normalization it will get before the correction is
+                // worked out — a freshly opened voice is in `Off`.
+                voice.normalization_mode = self.loudness_mode;
                 voice.arm_transition_match(
                     self.current.as_ref(),
                     self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
                 );
+                let match_db = voice.match_db;
+                if let Ok(mut nerd) = self.nerd.lock() {
+                    nerd.transition_match_db = (match_db.abs() >= 0.05).then_some(match_db);
+                }
                 log::info!("armed next track: {}", request.title);
                 self.incoming = Some(voice);
                 self.transition = Some(TransitionState {
@@ -4059,6 +4088,138 @@ mod tests {
         level_wav(&loud, 8.0, 1_000.0, 0.5);
         level_wav(&quiet, 8.0, 1_500.0, 0.25);
         (loud, quiet)
+    }
+
+    /// The production path, end to end: the playing deck gets its measurement
+    /// from `SetLoudnessMeasurement`, the queued deck is opened by the arming
+    /// path with only the player's relative figure — and the two still match.
+    ///
+    /// No voice is configured by hand here: the tracks go in through `Load` and
+    /// `QueueNext`, exactly as the engine receives them, and the correction is
+    /// read back from the published nerd snapshot.
+    #[test]
+    fn the_queue_path_matches_a_measured_deck_to_a_relative_one() {
+        // Short files: the blend is scheduled at the end of the first one, and
+        // the mixer runs in real time.
+        let dir = std::env::temp_dir().join(format!("bitchord-mixer-queue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let loud = dir.join("a.wav");
+        let quiet = dir.join("b.wav");
+        level_wav(&loud, 3.0, 1_000.0, 0.5);
+        level_wav(&quiet, 3.0, 1_500.0, 0.25);
+
+        let events = std::sync::Arc::new(RecordedEvents::default());
+        let (tx, rx) = crossbeam_channel::unbounded::<Command>();
+        let (consumer_side, mut consumer) = rtrb::RingBuffer::<f32>::new(44_100 * 2 * 4);
+        let buffered = std::sync::Arc::new(AtomicU64::new(0));
+        let position = std::sync::Arc::new(AtomicU64::new(0));
+        let duration = std::sync::Arc::new(AtomicU64::new(0));
+        let shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let nerd = std::sync::Arc::new(Mutex::new(NerdSnapshot::default()));
+
+        let handle = std::thread::spawn({
+            let events = events.clone();
+            let buffered = buffered.clone();
+            let position = position.clone();
+            let duration = duration.clone();
+            let shutdown = shutdown.clone();
+            let nerd = nerd.clone();
+            move || {
+                run_mixer(
+                    rx,
+                    consumer_side,
+                    buffered,
+                    position,
+                    duration,
+                    44_100,
+                    events,
+                    shutdown,
+                    std::sync::Arc::new(AtomicBool::new(false)),
+                    std::sync::Arc::new(AtomicBool::new(false)),
+                    nerd,
+                )
+            }
+        });
+
+        let source = |path: &std::path::Path, loudness: f64| TrackSource {
+            source: path.display().to_string(),
+            title: path.display().to_string(),
+            artist: String::new(),
+            start_seconds: 0.0,
+            plan: TransitionPlan::default(),
+            headers: std::collections::HashMap::new(),
+            claimed_kbps: 0,
+            loudness_db: Some(loudness),
+            duration_seconds: 3.0,
+        };
+        tx.send(Command::Load {
+            request: source(&loud, 0.0),
+            reply: crossbeam_channel::bounded(1).0,
+        })
+        .unwrap();
+        // The current deck is the only one production measures.
+        tx.send(Command::SetLoudnessMeasurement(measured(-14.0)))
+            .unwrap();
+        // The queued deck is opened by the arming path and has only the player's
+        // relative figure.
+        tx.send(Command::QueueNext {
+            request: source(&quiet, -6.0),
+        })
+        .unwrap();
+
+        // The mixer blocks on a full ring, so the drain never stops. Arming is
+        // what this test is about: it happens as the outgoing deck approaches
+        // its end, well before the fade itself. Waiting for the handoff as well
+        // would make the test about the crossfade's schedule.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        // The device callback's side of the ring: every popped sample has to
+        // leave the shared counter, or the mixer believes the ring is full and
+        // never looks at its command channel again.
+        fn drain(consumer: &mut rtrb::Consumer<f32>, buffered: &AtomicU64) {
+            while consumer.pop().is_ok() {
+                let current = buffered.load(Ordering::Relaxed);
+                if current > 0 {
+                    let _ = buffered.compare_exchange(
+                        current,
+                        current - 1,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+        }
+
+        let mut armed = None;
+        loop {
+            drain(&mut consumer, &buffered);
+            armed = nerd.lock().unwrap().transition_match_db;
+            if armed.is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the transition was never armed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // `Command::Shutdown` only stops the voices; the thread watches its own
+        // flag, and the drain has to continue until it has seen it — the mixer
+        // is blocked on a full ring otherwise.
+        shutdown.store(true, Ordering::Release);
+        let stop = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !handle.is_finished() {
+            drain(&mut consumer, &buffered);
+            assert!(std::time::Instant::now() < stop, "the mixer did not stop");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        handle.join().unwrap();
+
+        assert_eq!(
+            armed,
+            Some(6.0),
+            "a measured outgoing deck and a relative incoming one declined to match"
+        );
     }
 
     #[test]

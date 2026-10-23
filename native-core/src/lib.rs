@@ -287,6 +287,10 @@ pub struct NerdStatsRec {
     /// Applied loudness correction in dB (`None` = unity: switch off or no
     /// figure). The pipeline panel reads this, not the setting.
     pub loudness_gain_db: Option<f32>,
+    /// The level correction the last armed transition applied to its incoming
+    /// deck, in dB. `None` when none was armed — no comparable figures, or the
+    /// decks were already level.
+    pub transition_match_db: Option<f32>,
     /// Pearson correlation between the two encodings of the last source swap,
     /// measured on the samples that were blended. `None` until one has run.
     /// The swap fades a recording into another copy of itself, so this is what
@@ -1408,6 +1412,7 @@ impl PlayerEngine {
             channels: snap.channels,
             kbps: snap.kbps,
             loudness_gain_db: snap.loudness_gain_db,
+            transition_match_db: snap.transition_match_db,
             swap_correlation: snap.swap_correlation,
             active_stages: snap.active_stages,
             converter_delay_frames: snap.converter_delay_frames,
