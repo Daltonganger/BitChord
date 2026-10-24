@@ -158,26 +158,47 @@ do {
     store.refresh()
     let previous = directory.appendingPathComponent(name + ".prev")
     check("old graph is kept as the fallback", FileManager.default.fileExists(atPath: previous.path))
-    check("the new graph is not installed", store.status(of: .beat) == .notInstalled)
+    check("the fallback is visible as an update", store.status(of: .beat) == .outdated, "\(store.status(of: .beat))")
     check(
-        "the analyser still points at the old graph",
-        store.analyzerPaths.beat == previous.path,
+        "the old graph stays in use until the new one verifies",
+        store.analyzerPaths.beat == previous.path
+            && sha256(of: URL(fileURLWithPath: store.analyzerPaths.beat)) == oldSha,
         store.analyzerPaths.beat
     )
+
+    // A relaunch rediscovers the parked graph, not just the store that made it.
+    let relaunched = AutomixModelStore(directory: directory, specs: [newSpec])
+    relaunched.refresh()
+    check("a relaunch still reports the update", relaunched.status(of: .beat) == .outdated, "\(relaunched.status(of: .beat))")
+    check("a relaunch still uses the old graph", relaunched.analyzerPaths.beat == previous.path)
+
     // A failed replacement download must not take the working graph away.
     let failing = AutomixModelStore(
         directory: directory,
         specs: [spec(.beat, path: "corrupt.bin", name: name, sha: fixture.goodSHA, size: fixture.size)]
     )
+    failing.refresh()
     await failing.download(.beat, allowMetered: true)
-    check("a failed download keeps the fallback", FileManager.default.fileExists(atPath: previous.path))
-    check("the analyser still has the old graph", failing.analyzerPaths.beat == previous.path)
+    check("the failed update is reported", {
+        if case .failed = failing.status(of: .beat) { return true }
+        return false
+    }(), "\(failing.status(of: .beat))")
+    check(
+        "a failed download keeps the old graph",
+        FileManager.default.fileExists(atPath: previous.path)
+            && failing.analyzerPaths.beat == previous.path
+            && failing.isUsingPreviousGraph(.beat)
+    )
+
     // A verified replacement swaps atomically and drops the fallback.
-    await store.download(.beat, allowMetered: true)
-    check("the replacement installs", store.status(of: .beat).isInstalled, "\(store.status(of: .beat))")
+    await relaunched.download(.beat, allowMetered: true)
+    check("the replacement installs", relaunched.status(of: .beat).isInstalled, "\(relaunched.status(of: .beat))")
     check("the fallback is removed once the replacement verifies", !FileManager.default.fileExists(atPath: previous.path))
-    if let path = store.installedPath(.beat) {
-        check("the analyser points at the new graph", store.analyzerPaths.beat == path)
+    if let path = relaunched.installedPath(.beat) {
+        check(
+            "the analyser points at the new graph",
+            relaunched.analyzerPaths.beat == path && sha256(of: URL(fileURLWithPath: path)) == fixture.goodSHA
+        )
     }
 }
 

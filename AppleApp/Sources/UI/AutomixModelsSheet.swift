@@ -47,6 +47,10 @@ struct AutomixModelRow: View {
                     Label("Installed", systemImage: "checkmark.circle.fill")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.green)
+                } else if store.isUsingPreviousGraph(id) {
+                    Label("Update available", systemImage: "arrow.down.circle.fill")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
                 }
             }
 
@@ -54,6 +58,13 @@ struct AutomixModelRow: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if store.isUsingPreviousGraph(id) {
+                Text("Update available. Using the previous version")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             controls(spec: spec, status: status)
         }
@@ -125,6 +136,15 @@ struct AutomixModelRow: View {
                 Button("Verify") { store.verify(id) }
                     .font(.footnote)
                     .buttonStyle(.plain)
+                Button("Remove") { store.remove(id) }
+                    .font(.footnote)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+            }
+
+        case .outdated:
+            HStack(spacing: 12) {
+                action("Update") { store.start(id, allowMetered: AutomixModelsPolicy.allowMetered) }
                 Button("Remove") { store.remove(id) }
                     .font(.footnote)
                     .buttonStyle(.plain)
@@ -237,6 +257,16 @@ private struct AutomixModelCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            } else if case .outdated = status {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Text("Update available. Using the previous version")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
             } else if case .blockedByWifi = status {
                 HStack(spacing: 8) {
                     Image(systemName: "wifi.slash")
@@ -343,6 +373,16 @@ private struct AutomixModelCard: View {
             .help("Cancel download")
         case .verifying:
             EmptyView()
+        case .outdated:
+            Button {
+                store.start(id, allowMetered: AutomixModelsPolicy.allowMetered)
+            } label: {
+                Image(systemName: "arrow.down.circle.fill")
+                    .scaledFont(size: 22)
+                    .foregroundStyle(iconBgColor)
+            }
+            .buttonStyle(.plain)
+            .help("Update \(spec.displayName)")
         case .notInstalled, .paused, .blockedByWifi, .failed:
             Button {
                 store.start(id, allowMetered: AutomixModelsPolicy.allowMetered)

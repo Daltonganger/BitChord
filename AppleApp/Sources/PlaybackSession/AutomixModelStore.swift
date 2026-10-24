@@ -99,6 +99,10 @@ final class AutomixModelStore {
         case downloading(Double)
         case verifying
         case installed
+        /// The pinned graph is not installed, but the graph this store verified under
+        /// the previous manifest is on disk as `.prev` and is what the analyser loads.
+        /// The update is offered; the old graph stays in use until the new one verifies.
+        case outdated
         /// Refused because the connection is metered and the caller did not allow it.
         case blockedByWifi
         case failed(String)
@@ -180,8 +184,21 @@ final class AutomixModelStore {
 
     func status(of id: ModelID) -> Status { status[id] ?? .notInstalled }
 
+    /// The pinned graph is installed. The launch offer uses this meaning: a fallback
+    /// is usable but still an update waiting to happen, so it keeps offering.
     var beatInstalled: Bool { status(of: .beat).isInstalled }
     var vocalsInstalled: Bool { status(of: .vocals).isInstalled }
+
+    /// A graph the analyser can load — the pinned one, or the previous manifest's.
+    var beatAvailable: Bool { status(of: .beat).isInstalled || isUsingPreviousGraph(.beat) }
+
+    /// True when the pinned graph is missing but the previous manifest's verified
+    /// graph is on disk and is what `analyzerPaths` returns.
+    func isUsingPreviousGraph(_ id: ModelID) -> Bool {
+        guard !status(of: id).isInstalled else { return false }
+        let previous = directory.appendingPathComponent(previousName(for: spec(id)), isDirectory: false)
+        return FileManager.default.fileExists(atPath: previous.path)
+    }
 
     var anyBusy: Bool { ModelID.allCases.contains { status(of: $0).isBusy } }
 
@@ -247,20 +264,28 @@ final class AutomixModelStore {
             let spec = spec(id)
             let file = fileURL(for: spec)
             let part = partURL(for: spec)
+            let fallback = directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+            var hasPrevious = FileManager.default.fileExists(atPath: fallback.path)
 
             if FileManager.default.fileExists(atPath: file.path) {
                 let size = sizeOnDisk(of: spec.fileName)
                 if size == spec.byteCount, records[spec.fileName]?.sha256 == spec.sha256 {
                     // The new graph is in place; the fallback copy is dead weight.
-                    try? FileManager.default.removeItem(
-                        at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
-                    )
+                    if hasPrevious {
+                        try? FileManager.default.removeItem(at: fallback)
+                        hasPrevious = false
+                        changed = true
+                    }
                     status[id] = .installed
                     continue
                 }
                 if size == spec.byteCount, hashMatches(file, spec: spec) {
                     records[spec.fileName] = Record(sha256: spec.sha256, bytes: spec.byteCount, installedAt: Date())
                     saveRecords()
+                    if hasPrevious {
+                        try? FileManager.default.removeItem(at: fallback)
+                        hasPrevious = false
+                    }
                     status[id] = .installed
                     changed = true
                     continue
@@ -273,12 +298,20 @@ final class AutomixModelStore {
                 if let previous = records[spec.fileName],
                    previous.bytes == size,
                    hashMatches(file, sha256: previous.sha256) {
-                    let fallback = directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
-                    try? FileManager.default.removeItem(at: fallback)
-                    try? FileManager.default.moveItem(at: file, to: fallback)
-                    records[spec.fileName] = nil
-                    saveRecords()
-                    changed = true
+                    do {
+                        // Whatever is already parked cannot be more recent than the
+                        // graph that was just verified; the move replaces it.
+                        try? FileManager.default.removeItem(at: fallback)
+                        try FileManager.default.moveItem(at: file, to: fallback)
+                        records[spec.fileName] = nil
+                        saveRecords()
+                        hasPrevious = true
+                        changed = true
+                    } catch {
+                        // The verified old graph could not be parked. Leave it and
+                        // its record alone; deleting a working graph because a rename
+                        // failed is worse than retrying the move next launch.
+                    }
                 } else {
                     try? FileManager.default.removeItem(at: file)
                     records[spec.fileName] = nil
@@ -297,12 +330,12 @@ final class AutomixModelStore {
                     if case .installed = outcome { changed = true }
                 } else if partSize > spec.byteCount {
                     try? FileManager.default.removeItem(at: part)
-                    status[id] = .notInstalled
+                    status[id] = hasPrevious ? .outdated : .notInstalled
                 } else {
                     status[id] = .paused(partSize)
                 }
             } else {
-                status[id] = .notInstalled
+                status[id] = hasPrevious ? .outdated : .notInstalled
             }
         }
 
@@ -449,19 +482,30 @@ final class AutomixModelStore {
         let spec = spec(id)
         let file = fileURL(for: spec)
         guard FileManager.default.fileExists(atPath: file.path) else {
-            status[id] = .notInstalled
-            return false
+            let hasPrevious = isUsingPreviousGraph(id)
+            status[id] = hasPrevious ? .outdated : .notInstalled
+            return hasPrevious
         }
         status[id] = .verifying
         if sizeOnDisk(of: spec.fileName) == spec.byteCount, hashMatches(file, spec: spec) {
             records[spec.fileName] = Record(sha256: spec.sha256, bytes: spec.byteCount, installedAt: Date())
             saveRecords()
+            // The pinned graph is verified; a fallback, if any, is dead weight.
+            try? FileManager.default.removeItem(
+                at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+            )
             status[id] = .installed
             return true
         }
         try? FileManager.default.removeItem(at: file)
         records[spec.fileName] = nil
         saveRecords()
+        // A verified old graph is not "not usable"; the analyser can stay on it.
+        if isUsingPreviousGraph(id) {
+            status[id] = .outdated
+            onChanged?()
+            return true
+        }
         status[id] = .failed("The downloaded file did not match its checksum and was removed.")
         onChanged?()
         return false
@@ -518,12 +562,18 @@ final class AutomixModelStore {
         let destination = fileURL(for: spec)
         do {
             if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
+                // One filesystem operation: the pinned name never disappears, so a
+                // running analyser cannot look up a path that does not exist.
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: part)
+            } else {
+                // The migration case: the old graph was parked as `.prev` during
+                // refresh, so this is a plain rename on the same volume.
+                try FileManager.default.moveItem(at: part, to: destination)
             }
-            try FileManager.default.moveItem(at: part, to: destination)
         } catch {
             return .failed(error.localizedDescription)
         }
+        // Only now is the fallback spent: the verified pinned graph is in place.
         try? FileManager.default.removeItem(
             at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
         )
