@@ -80,18 +80,7 @@ struct SongActionButtons: View {
             }
         }
         if !entry.isLocal {
-            Button("Download") {
-                switch DownloadStore.shared.download(entry) {
-                case .started:
-                    toast.show("Downloading \(entry.title)")
-                case .blockedByWifiOnly:
-                    toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
-                case .alreadyExists:
-                    toast.show("\(entry.title) is already downloading or downloaded", kind: .info)
-                case .ignoredLocalTrack:
-                    break
-                }
-            }
+            downloadRow(entry)
         }
         if let albumId = entry.albumId {
             Button("Open Album") {
@@ -121,6 +110,60 @@ struct SongActionButtons: View {
             return URL(string: "https://music.youtube.com/watch?v=\(vid)")!
         }
         return URL(string: "https://music.youtube.com")!
+    }
+
+    /// Upstream's `DownloadRow`: the one row that tells the truth about where
+    /// this song's download is — queued (Cancel), running (Count), failed
+    /// (Retry), saved (Delete) — instead of a Download button that lies the
+    /// moment a download exists. The label is read when the menu opens; a
+    /// context menu does not re-render live.
+    @ViewBuilder
+    private func downloadRow(_ entry: QueueEntry) -> some View {
+        let store = DownloadStore.shared
+        let asset = store.asset(for: entry)
+        let activeJob = store.jobs.first { job in
+            job.entry.source == entry.source && job.entry.id == entry.id
+                && (job.status == .queued || job.status == .running)
+        }
+        let failedJob = store.jobs.first { job in
+            job.entry.source == entry.source && job.entry.id == entry.id && job.status == .failed
+        }
+        if let activeJob {
+            Button("Cancel Download") {
+                store.cancel(activeJob.id)
+                toast.show("Cancelled \(entry.title)")
+            }
+        } else if let failedJob {
+            Button("Retry Download") {
+                let result = store.download(entry)
+                if result == .started { toast.show("Retrying \(entry.title)") }
+            }
+        } else if let asset {
+            Button("Delete Download", role: .destructive) {
+                let title = entry.title
+                toast.requestConfirmation(ConfirmationRequest(
+                    title: "Delete the download?",
+                    message: "“\(title)” will be removed from this device. It will download again when played.",
+                    confirm: "Delete Download"
+                ) {
+                    DownloadStore.shared.delete(asset.path)
+                    toast.show("Deleted \(title)")
+                })
+            }
+        } else {
+            Button("Download") {
+                switch store.download(entry) {
+                case .started:
+                    toast.show("Downloading \(entry.title)")
+                case .blockedByWifiOnly:
+                    toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
+                case .alreadyExists:
+                    toast.show("\(entry.title) is already downloading or downloaded", kind: .info)
+                case .ignoredLocalTrack:
+                    break
+                }
+            }
+        }
     }
 
     private func likeTitle(_ videoId: String) -> String {
