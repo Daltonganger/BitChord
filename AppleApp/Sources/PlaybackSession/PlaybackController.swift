@@ -3933,16 +3933,38 @@ final class PlaybackController {
             // A forced fill tops the tail up to its target; it does not replace it.
             guard PlaybackQueuePolicy.fillRoom(queue, after: playingIndex) > 0 else { return }
         }
-        guard let context = recommendationContext,
-              force || (lowWaterRefill && PlaybackQueuePolicy.shouldRefillAutoplay(
-                  upcomingCount: queue.count - playingIndex - 1
-              )),
-              let request = autoplayRefresh.begin(context, force: force) else { return }
+        let due = force || (lowWaterRefill && PlaybackQueuePolicy.shouldRefillAutoplay(
+            upcomingCount: queue.count - playingIndex - 1
+        ))
+        guard due else { return }
+        guard let context = recommendationContext else {
+            if autoplayEnabled {
+                PlaybackDebugLog.shared.record(
+                    "autoplay: no context (repeatAll=\(repeatMode == .all) state=\(state) youtube=\(current.flatMap { youtubeVideoID(for: $0) } != nil))",
+                    about: current?.id
+                )
+            }
+            return
+        }
+        guard let request = autoplayRefresh.begin(context, force: force) else { return }
         let videoId = String(context.source.dropFirst(3))
+        PlaybackDebugLog.shared.record("autoplay: fill requested (force=\(force) count=\(queue.count) index=\(playingIndex))", about: current?.id)
         fetchRecommendations(videoId: videoId) { [weak self] json, _ in
             Task { @MainActor in
-                guard let self, let json, let currentContext = self.recommendationContext,
-                      self.autoplayRefresh.accepts(request, current: currentContext) else { return }
+                guard let self else { return }
+                guard let json else {
+                    PlaybackDebugLog.shared.record("autoplay: recommendations fetch returned nothing", about: videoId)
+                    return
+                }
+                guard let currentContext = self.recommendationContext,
+                      self.autoplayRefresh.accepts(request, current: currentContext) else {
+                    let now = self.recommendationContext
+                    PlaybackDebugLog.shared.record(
+                        "autoplay: fill discarded (source=\(now?.source == context.source) index=\(now?.index == context.index) playGen=\(now?.playbackGeneration == context.playbackGeneration) queueRev=\(now?.queueEditRevision == context.queueEditRevision) session=\(now?.sessionGeneration == context.sessionGeneration) latest=\(now != nil))",
+                        about: videoId
+                    )
+                    return
+                }
                 // Fills only ever append. Anything already queued — list rows,
                 // the listener's own additions, earlier recommendations — keeps
                 // its place.
@@ -3961,7 +3983,10 @@ final class PlaybackController {
                     limit: Int32(max(room, PlaybackQueuePolicy.autoplayRefillThreshold))
                 )
                 guard let data = extraJson.data(using: .utf8),
-                      let songs = try? JSONDecoder().decode([SongDTO].self, from: data) else { return }
+                      let songs = try? JSONDecoder().decode([SongDTO].self, from: data) else {
+                    PlaybackDebugLog.shared.record("autoplay: queue builder returned unreadable JSON", about: videoId)
+                    return
+                }
                 var known = Set(kept.map(\.id))
                 let extras = songs.filter { known.insert($0.videoId).inserted }.map {
                     QueueEntry.youtube(
@@ -3974,6 +3999,7 @@ final class PlaybackController {
                 // Ordered by taste once, as a batch, before anyone has seen it.
                 let scores = self.tasteScores(extras)
                 let ordered = PlaybackQueuePolicy.ranked(Array(extras.indices), scores: scores).map { extras[$0] }
+                PlaybackDebugLog.shared.record("autoplay: \(songs.count) candidates, \(ordered.count) appended (room=\(room))", about: videoId)
                 guard !ordered.isEmpty else { return }
                 self.queue = PlaybackQueuePolicy.appendingFill(kept, extras: ordered)
                 self.persistSession()
