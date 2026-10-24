@@ -1133,7 +1133,8 @@ struct DetailView: View {
         if page == nil, !browseId.hasPrefix("UC"),
            let downloaded = DetailPageModel.downloadedCopy(browseId: browseId, from: DownloadStore.shared) {
             page = downloaded
-            saved = false
+            // The Save button keeps whatever the last page said until the
+            // network answers: guessing here flickers a wrong state in.
             continuation = nil
             suggested = []
             loading = false
