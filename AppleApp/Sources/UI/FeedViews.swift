@@ -242,32 +242,15 @@ struct ShelfScroller<Content: View>: View {
     }
 }
 
-struct ShelfCardView: View {
+/// The tap behaviour every shelf card shares: a track card starts its radio,
+/// a collection card opens its detail page — `preferTrack` decides which end
+/// of a card carrying both ids wins. The buffering spinner rides on the card
+/// that is loading in, wherever that card is drawn.
+struct ShelfCardTap<Content: View>: View {
     let card: ShelfCard
-    /// The sleeve's side, and with it the card's width. A carousel on a wide
-    /// window passes a larger one; everywhere else this is the phone size.
-    var artworkSide: CGFloat = Theme.Metrics.shelfCard
-    @Environment(PlaybackController.self) private var controller
-    /// Whether the pointer is over the card. A card is a target, not just a
-    /// picture, and on the Mac that has to show before the click.
-    @State private var hovering = false
-
-    /// Which end of a card carrying *both* a video id and a browse id wins.
-    ///
-    /// The two orders are not interchangeable, and upstream uses both. On a
-    /// mood or genre category the browse id wins: the card is a shelf of
-    /// albums and playlists, and a browse id is what the shelf meant. On Home
-    /// the track wins — upstream branches on `videoId` first there
-    /// (MainActivity.kt:3092), and a Home shelf card is something to *start*,
-    /// not something to read about.
     var preferTrack: Bool = false
-
-    /// Whether this card's collection is in `pinned_playlists`. Read live so a
-    /// pin toggled from a detail page or menu shows without a feed reload.
-    private var isPinned: Bool {
-        guard let browseId = card.browseId, !browseId.isEmpty else { return false }
-        return PlaylistPinning.pinnedIds().contains(browseId)
-    }
+    @ViewBuilder var content: Content
+    @Environment(PlaybackController.self) private var controller
 
     var body: some View {
         Group {
@@ -275,13 +258,13 @@ struct ShelfCardView: View {
                 trackButton(videoId)
             } else if let browseId = card.browseId, !browseId.isEmpty {
                 NavigationLink(destination: DetailView(browseId: browseId, initialTitle: card.title)) {
-                    cardContent
+                    content
                 }
                 .buttonStyle(.plain)
             } else if let videoId = card.videoId, !videoId.isEmpty {
                 trackButton(videoId)
             } else {
-                cardContent
+                content
             }
         }
     }
@@ -293,7 +276,7 @@ struct ShelfCardView: View {
                 thumbnailUrl: card.thumbnailUrl
             ))
         } label: {
-            cardContent
+            content
                 .overlay(alignment: .topLeading) {
                     if controller.current?.id == videoId && controller.isBuffering {
                         ProgressView()
@@ -303,6 +286,39 @@ struct ShelfCardView: View {
                 }
         }
         .buttonStyle(.plain)
+    }
+}
+
+struct ShelfCardView: View {
+    let card: ShelfCard
+    /// The sleeve's side, and with it the card's width. A carousel on a wide
+    /// window passes a larger one; everywhere else this is the phone size.
+    var artworkSide: CGFloat = Theme.Metrics.shelfCard
+    /// Whether the pointer is over the card. A card is a target, not just a
+    /// picture, and on the Mac that has to show before the click.
+    @State private var hovering = false
+
+    var body: some View {
+        ShelfCardTap(card: card, preferTrack: preferTrack) {
+            cardContent
+        }
+    }
+
+    /// Which end of a card carrying *both* a video id and a browse id wins.
+    ///
+    /// The two orders are not interchangeable, and upstream uses both. The
+    /// default is browse-id-first — the card is a shelf of albums and
+    /// playlists, and a browse id is what the shelf meant. Where a shelf is a
+    /// list of things to *start* rather than to read about — Home's shelves
+    /// (MainActivity.kt:3092) and a mood or genre category's playlists — the
+    /// caller passes `preferTrack` and the videoId wins.
+    var preferTrack: Bool = false
+
+    /// Whether this card's collection is in `pinned_playlists`. Read live so a
+    /// pin toggled from a detail page or menu shows without a feed reload.
+    private var isPinned: Bool {
+        guard let browseId = card.browseId, !browseId.isEmpty else { return false }
+        return PlaylistPinning.pinnedIds().contains(browseId)
     }
 
     private var cardContent: some View {
@@ -412,10 +428,75 @@ struct FeedSkeleton: View {
     }
 }
 
-/// First Home shelf as a larger pager, matching upstream's hero row.
+/// Upstream's hero card: the artwork runs the whole tile and the caption is
+/// drawn over a black scrim at its foot, rather than sitting under the
+/// artwork as a caption row. Nearly square (0.92) with 18pt corners, at
+/// min(70% of the shelf's width, 320) — the shape of upstream's
+/// `HERO_CARD_RATIO`/`HERO_CARD_WIDTH` and the caption-over-scrim of
+/// HomeScreen.kt's hero.
+struct HeroCard: View {
+    let card: ShelfCard
+    var preferTrack: Bool = false
+    /// The tile's width; the height follows at the 0.92 ratio.
+    let side: CGFloat
+    @State private var hovering = false
+
+    var body: some View {
+        ShelfCardTap(card: card, preferTrack: preferTrack) {
+            ZStack(alignment: .bottom) {
+                ArtworkView(url: card.thumbnailUrl, data: nil, side: side)
+                    .frame(width: side, height: side * 0.92)
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.10), .black.opacity(0.72)],
+                    startPoint: .center,
+                    endPoint: .bottom
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(card.title)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    if let subtitle = card.subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.78))
+                            .lineLimit(1)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(width: side, height: side * 0.92)
+            .clipShape(.rect(cornerRadius: 18, style: .continuous))
+            .shadow(color: .black.opacity(0.15), radius: 5, y: 2)
+            // The highlight reaches past the tile so the whole card reads as
+            // one target, matching ShelfCardView's hover.
+            .background {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(hovering ? Color.primary.opacity(0.06) : .clear)
+                    .padding(-6)
+            }
+            .contentShape(.rect)
+            .onHover { hovering = $0 }
+            .shelfCardContextMenu(card)
+        }
+    }
+}
+
+/// First Home shelf as a larger pager, matching upstream's hero row: shelf 0
+/// whenever the service does not title it "Recents", whatever its length.
 struct HeroShelf: View {
     let shelf: FeedShelf
     var preferTrack: Bool = false
+    /// The shelf's own width, measured: an inspector or a split view narrows
+    /// it without changing the window.
+    @State private var width: CGFloat = 0
+
+    /// Upstream's hero width: 70% of the row, capped at 320.
+    private var heroSide: CGFloat {
+        guard width > 0 else { return 240 }
+        return min(width * 0.70, 320)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -424,10 +505,11 @@ struct HeroShelf: View {
             ShelfScroller {
                 LazyHStack(spacing: 16) {
                     ForEach(shelf.items) { card in
-                        ShelfCardView(card: card, preferTrack: preferTrack)
+                        HeroCard(card: card, preferTrack: preferTrack, side: heroSide)
                     }
                 }
             }
         }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
 }
