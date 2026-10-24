@@ -135,8 +135,18 @@ struct SongActionButtons: View {
             }
         } else if let failedJob {
             Button("Retry Download") {
-                let result = store.download(entry)
-                if result == .started { toast.show("Retrying \(entry.title)") }
+                // The same switch the fresh download shows: a retry can be
+                // refused on metered data like anything else.
+                switch store.download(entry) {
+                case .started:
+                    toast.show("Retrying \(entry.title)")
+                case .blockedByWifiOnly:
+                    toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
+                case .alreadyExists:
+                    toast.show("\(entry.title) is already downloading or downloaded", kind: .info)
+                case .ignoredLocalTrack:
+                    break
+                }
             }
         } else if let asset {
             Button("Delete Download", role: .destructive) {
@@ -427,49 +437,9 @@ struct BrowseActionButtons: View {
         browseId.hasPrefix("VL") || browseId.hasPrefix("PL")
     }
 
-    /// Upstream's download-all row carries the collection's state in its
-    /// label (BrowseActionsSheet.kt:259), and a downloaded collection offers
-    /// its delete (:309). The label is read when the menu opens; downloading
-    /// again over an existing collection is a re-sync, which the store
-    /// dedupes.
-    @ViewBuilder
+    /// Shared with the release page's overflow — see [CollectionDownloadActions].
     private func downloadRow(_ browseId: String) -> some View {
-        let store = DownloadStore.shared
-        let owner = store.collections.first { $0.browseId == browseId }
-        let downloading = owner.map { downloadOwner in
-            store.jobs.contains { downloadOwner.requests.contains($0.id) && ($0.status == .queued || $0.status == .running) }
-        } ?? false
-        if let owner, !downloading, owner.requests.allSatisfy({ request in
-            store.jobs.first { $0.id == request }?.status != .failed
-        }) {
-            Button("Delete Download", role: .destructive) {
-                let title = card.title
-                toast.requestConfirmation(ConfirmationRequest(
-                    title: "Delete the download?",
-                    message: "“\(title)” will be removed from this device. It will download again when played.",
-                    confirm: "Delete Download"
-                ) {
-                    DownloadStore.shared.removeOwner(owner.id)
-                    toast.show("Deleted \(title)")
-                })
-            }
-        } else {
-            Button(downloading ? "Downloading…" : "Download") {
-                Task {
-                    let result = await DownloadStore.shared.downloadCollection(browseId: browseId)
-                    switch result {
-                    case .started:
-                        toast.show("Downloading \(card.title)")
-                    case .blockedByWifiOnly:
-                        toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
-                    case .alreadyExists:
-                        toast.show("\(card.title) is already downloading or downloaded", kind: .info)
-                    case .ignoredLocalTrack:
-                        break
-                    }
-                }
-            }
-        }
+        CollectionDownloadActions(browseId: browseId, title: card.title)
     }
 
     private func playCollection(_ browseId: String, shuffle: Bool) async {
@@ -477,6 +447,55 @@ struct BrowseActionButtons: View {
         let entries = page.songs.map { $0.asEntry(fallbackArt: page.thumbnailUrl) }
         if !entries.isEmpty {
             controller.play(entries, context: page.title, contextID: browseId, shuffleRequested: shuffle || controller.shuffleEnabled, shuffleStart: true)
+        }
+    }
+}
+
+/// Upstream's download-all row carries the collection's state in its label
+/// (BrowseActionsSheet.kt:259), and a downloaded collection offers its delete
+/// (:309). The label is read when the menu opens — a context menu does not
+/// re-render live — and downloading again over an existing collection is a
+/// re-sync, which the store dedupes. Shared by the browse menu and the
+/// release page's overflow.
+struct CollectionDownloadActions: View {
+    let browseId: String
+    let title: String
+    @Environment(ToastCenter.self) private var toast
+
+    var body: some View {
+        let store = DownloadStore.shared
+        let owner = store.collections.first { $0.browseId == browseId }
+        let downloading = owner.map { downloadOwner in
+            store.jobs.contains { downloadOwner.requests.contains($0.id) && ($0.status == .queued || $0.status == .running) }
+        } ?? false
+            if let owner, !downloading, owner.requests.allSatisfy({ request in
+                store.jobs.first { $0.id == request }?.status != .failed
+            }) {
+                Button(“Delete Download”, role: .destructive) {
+                    toast.requestConfirmation(ConfirmationRequest(
+                        title: “Delete the download?”,
+                        message: “The downloaded songs from “\(title)” will be removed from this device and will stream again when played.”,
+                        confirm: “Delete Download”
+                    ) {
+                        DownloadStore.shared.removeOwner(owner.id)
+                        toast.show(“Deleted \(title)”)
+                    })
+                }
+            } else {
+            Button(downloading ? "Downloading…" : "Download") {
+                Task {
+                    switch await DownloadStore.shared.downloadCollection(browseId: browseId) {
+                    case .started:
+                        toast.show("Downloading \(title)")
+                    case .blockedByWifiOnly:
+                        toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
+                    case .alreadyExists:
+                        toast.show("\(title) is already downloading or downloaded", kind: .info)
+                    case .ignoredLocalTrack:
+                        break
+                    }
+                }
+            }
         }
     }
 }

@@ -15,6 +15,7 @@ struct DetailView: View {
     let initialTitle: String
     @Environment(PlaybackController.self) private var controller
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dismiss) private var dismiss
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     #endif
@@ -595,10 +596,26 @@ struct DetailView: View {
         }
     }
 
-    /// A release's overflow: pin, download and, for a playlist of one's own,
-    /// rename, privacy and de-duplication.
+    /// A release's overflow: the queue rows upstream's page-level sheet keeps
+    /// (MainActivity.kt:3855, `fromCard = false` — play next and add to queue
+    /// without taking over playback), the collection's download state, and
+    /// for a playlist of one's own the management rows.
     private func releaseMoreMenu(_ page: DetailPageModel) -> some View {
         CircleMenuButton(label: "More actions") {
+            Button("Play Next") {
+                for entry in page.songs.map({ toEntry($0, fallbackArt: fallbackArt(page)) }) {
+                    controller.playNext(entry)
+                }
+                toast.queueNotice("Playing next: \(page.title)")
+            }
+            .disabled(page.songs.isEmpty)
+            Button("Add to Queue") {
+                for entry in page.songs.map({ toEntry($0, fallbackArt: fallbackArt(page)) }) {
+                    controller.addToQueue(entry)
+                }
+                toast.queueNotice("Added \(page.songs.count) tracks to the queue")
+            }
+            .disabled(page.songs.isEmpty)
             Button(pinned ? "Unpin" : "Pin") {
                 if PlaylistPinning.toggle(browseId: browseId) {
                     pinned.toggle()
@@ -606,21 +623,16 @@ struct DetailView: View {
                     appModel.pinLimitAlert = true
                 }
             }
-            Button("Download") {
-                Task {
-                    switch await DownloadStore.shared.downloadCollection(browseId: browseId) {
-                    case .started:
-                        toast.show("Downloading \(page.title)")
-                    case .blockedByWifiOnly:
-                        toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
-                    case .alreadyExists:
-                        toast.show("This collection is already downloading or downloaded", kind: .info)
-                    case .ignoredLocalTrack:
-                        break
-                    }
-                }
-            }
+            CollectionDownloadActions(browseId: browseId, title: page.title)
             if kind(of: page) == .playlist, page.playlistOwned == true {
+                // Reordering is EditMode's drag, which is iOS-only; the Mac
+                // list reorders by click-to-move and needs no door to it.
+                #if os(iOS)
+                Button("Reorder Songs") {
+                    editMode = .active
+                }
+                .disabled(page.songs.isEmpty)
+                #endif
                 Button("Rename Playlist…") {
                     renameTitle = page.title
                     renamePresented = true
@@ -631,8 +643,28 @@ struct DetailView: View {
                 Button("Remove Duplicates") {
                     Task { await removeDuplicates(page) }
                 }
+                Button("Delete Playlist", role: .destructive) {
+                    toast.requestConfirmation(ConfirmationRequest(
+                        title: "Delete this playlist?",
+                        message: "“\(page.title)” will be removed from your YouTube Music account. This cannot be undone.",
+                        confirm: "Delete Playlist"
+                    ) {
+                        Task { await deletePlaylist(page) }
+                    })
+                }
             }
         }
+    }
+
+    /// Deletes an owned playlist and leaves the dead page behind it.
+    private func deletePlaylist(_ page: DetailPageModel) async {
+        if let failure = await LibraryActions.deletePlaylist(playlistId: browseId) {
+            toast.show("Couldn't delete it — \(failure)", kind: .failure)
+            return
+        }
+        NotificationCenter.default.post(name: .libraryPlaylistsChanged, object: nil)
+        toast.show("Deleted \(page.title)")
+        dismiss()
     }
 
     /// Sleek inline filter bar displayed when searching is toggled on.
