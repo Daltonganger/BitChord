@@ -57,7 +57,7 @@ struct HomeView: View {
                                 .onAppear {
                                     if shelf.id == shelves.last?.id { Task { await feed.loadMore() } }
                                 }
-                        } else if index == 0, shelf.items.count > 2 {
+                        } else if index == 0 {
                             HeroShelf(shelf: shelf, preferTrack: true)
                                 .onAppear {
                                     if shelf.id == shelves.last?.id { Task { await feed.loadMore() } }
@@ -289,13 +289,19 @@ struct RecentShelf: View {
                 .frame(height: 4 * 56 + 4)
                 .padding(.horizontal, -24)
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: 14) {
-                        ForEach(shelf.items) { card in
-                            ShelfCardView(card: card)
+                // Upstream's Recents GRID mode is the hero treatment: the
+                // same 0.92-ratio scrim-caption tiles as Home's first shelf.
+                GeometryReader { geometry in
+                    let heroSide = min(geometry.size.width * 0.70, 320)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(alignment: .top, spacing: 14) {
+                            ForEach(shelf.items) { card in
+                                HeroCard(card: card, preferTrack: true, side: heroSide)
+                            }
                         }
+                        .padding(.vertical, 2)
                     }
-                    .padding(.vertical, 2)
+                    .frame(height: heroSide * 0.92 + 8, alignment: .top)
                 }
             }
         }
