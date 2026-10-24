@@ -103,6 +103,44 @@ final class PlaybackController {
     private(set) var position: Double = 0
     private(set) var duration: Double = 0
     private(set) var lastError: String?
+    /// A′3's session pacing: at most one transition in four may use an effect
+    /// technique, so a set sounds mixed rather than gimmicky. The planner still
+    /// *would* choose a technique for the pair; it blends instead and says
+    /// "pacing" in its reason.
+    ///
+    /// Lock-protected rather than main-actor state on purpose: the planning
+    /// runs off the main actor, inside the queue-submission gate, and both the
+    /// read and the record happen there.
+    private final class TransitionPacing: @unchecked Sendable {
+        private let lock = NSLock()
+        private var styles: [TransitionStyleRec] = []
+
+        /// No effect among the last three planned transitions, so the fourth at
+        /// most may use one.
+        var allowsEffect: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return !styles.suffix(3).contains(where: TransitionPacing.isEffect)
+        }
+
+        /// A plan that was actually queued. A plan attempt the download
+        /// invalidated must not spend the budget.
+        func note(_ style: TransitionStyleRec) {
+            lock.lock()
+            defer { lock.unlock() }
+            styles.append(style)
+            if styles.count > 4 { styles.removeFirst(styles.count - 4) }
+        }
+
+        private static func isEffect(_ style: TransitionStyleRec) -> Bool {
+            switch style {
+            case .echoOut, .loopRoll, .reverbWash, .dropCut: return true
+            case .equalPower, .djFilter, .djBlend, .gapless: return false
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated private let pacing = TransitionPacing()
 
     /// Where the volume slider sits, 0…1 — a position, not an amplitude. See
     /// `outputGain(forVolume:)` for what the output is multiplied by.
@@ -3083,11 +3121,13 @@ final class PlaybackController {
                         outgoingDurationSeconds: outgoingDuration,
                         incomingDurationSeconds: incomingDuration,
                         outgoingHeaders: currentSourceHeaders,
-                        incomingHeaders: resolved.headers
+                        incomingHeaders: resolved.headers,
+                        allowEffects: self.pacing.allowsEffect
                     )
                     let plan = constrainAutomixPlanForSources(plan: rawPlan, outgoingSource: currentSource, incomingSource: resolved.source, outgoingDuration: outgoingDuration, incomingDuration: incomingDuration)
                     guard try gate.performIfCurrent(generation: generation, revision: revision, {
-                        try engine.queueNextIfCurrent(request: LoadRequest(
+                        self.pacing.note(plan.style)
+                        return try engine.queueNextIfCurrent(request: LoadRequest(
                             source: resolved.source,
                             title: next.title,
                             artist: next.artist,
@@ -4357,7 +4397,8 @@ final class PlaybackController {
                 ? entry.durationSeconds : Double(stream.durationSec ?? 0),
             outgoingHeaders: outgoingHeaders,
             // The queued replacement is a local file by this point.
-            incomingHeaders: [:]
+            incomingHeaders: [:],
+            allowEffects: self.pacing.allowsEffect
         )
         let target = await MainActor.run { () -> (PlaybackLoadSubmissionGate, UInt64)? in
             guard self.playGeneration == generation, self.nextEntry?.id == mediaId,
@@ -4370,7 +4411,8 @@ final class PlaybackController {
         guard let (gate, revision) = target else { return }
         do {
             guard try gate.performIfCurrent(generation: generation, revision: revision, {
-                try engine.queueNextIfCurrent(request: LoadRequest(
+                self.pacing.note(plan.style)
+                return try engine.queueNextIfCurrent(request: LoadRequest(
                     source: path,
                     title: entry.title,
                     artist: entry.artist,

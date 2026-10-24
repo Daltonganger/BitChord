@@ -1509,6 +1509,7 @@ impl PlayerEngine {
         incoming_duration_seconds: f64,
         outgoing_headers: Option<std::collections::HashMap<String, String>>,
         incoming_headers: Option<std::collections::HashMap<String, String>>,
+        allow_effects: bool,
     ) -> TransitionPlanRec {
         let tier = *self.automix_tier.lock().unwrap();
         let outgoing_headers = outgoing_headers.unwrap_or_default();
@@ -1525,6 +1526,7 @@ impl PlayerEngine {
             &outgoing_headers,
             &incoming_headers,
             tier,
+            allow_effects,
         )
     }
 }
@@ -3045,6 +3047,7 @@ fn plan_automix_impl_with_tier(
     outgoing_headers: &std::collections::HashMap<String, String>,
     incoming_headers: &std::collections::HashMap<String, String>,
     tier: AutomixTier,
+    allow_effects: bool,
 ) -> TransitionPlanRec {
     let skip_vocals = !tier.runs_vocal_model();
     let empty_headers = std::collections::HashMap::new();
@@ -3062,6 +3065,7 @@ fn plan_automix_impl_with_tier(
         incoming_duration_seconds,
         skip_vocals,
         tier.name(),
+        allow_effects,
         |path, start, dur, mono| {
             let headers = if path == outgoing {
                 outgoing_headers
@@ -3364,6 +3368,7 @@ mod tests {
                 &headers,
                 &headers,
                 AutomixTier::Balanced,
+                true,
             );
             let style = crate::mixer::TransitionPlan::from(plan.clone());
             if plan.fade_seconds <= 0.0 {
