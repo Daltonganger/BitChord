@@ -193,6 +193,12 @@ object HomeBridge {
         val key = "$generation:$browseId:${params.orEmpty()}"
         val flight = moodLock.withLock {
             Innertube.checkSession(generation)
+            // A finished category stays here for the session: the tile's cover
+            // and the page behind it read the same response, and a tap on a
+            // tile whose art has appeared should not fetch it again. Another
+            // session's entries can never be read (the key carries the
+            // generation), so they go as soon as a new one asks.
+            moodGenreFlights.keys.removeAll { !it.startsWith("$generation:") }
             moodGenreFlights[key] ?: bridgeScope.async(start = CoroutineStart.LAZY) {
                 val shelves = InnertubeParser.parseHome(Innertube.browse(browseId, params))
                 Innertube.checkSession(generation)
@@ -200,10 +206,11 @@ object HomeBridge {
             }.also { moodGenreFlights[key] = it; it.start() }
         }
         try { return flight.await().also { Innertube.checkSession(generation) } }
-        finally {
-            moodLock.withLock {
-                if (moodGenreFlights[key] === flight && flight.isCompleted) moodGenreFlights.remove(key)
-            }
+        catch (e: Throwable) {
+            // Only a failure is forgotten, so the next tap tries again; a
+            // result is the cache.
+            moodLock.withLock { if (moodGenreFlights[key] === flight) moodGenreFlights.remove(key) }
+            throw e
         }
     }
 
