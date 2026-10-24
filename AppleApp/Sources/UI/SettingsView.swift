@@ -409,7 +409,14 @@ struct SettingsView: View {
                 } header: {
                     Text(built.section.title)
                 } footer: {
-                    footer(for: built.section)
+                    // Not while searching. A footer explains the rows that sat above
+                    // it, and the search has filtered those: the Audio Quality note
+                    // talks about sample-rate matching and bit-perfect output whether
+                    // or not either row survived the query. Upstream draws no
+                    // footers in search results for the same reason.
+                    if search.isEmpty {
+                        footer(for: built.section)
+                    }
                 }
             }
             if !search.isEmpty && sections.isEmpty {
