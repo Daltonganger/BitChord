@@ -86,6 +86,40 @@ private extension String {
     }
 }
 
+/// The words the Addons tab has searched, newest first. Kept apart from the
+/// entity-based recents because there is no song behind them — upstream keeps
+/// them in their own list for the same reason.
+enum AddonSearchHistory {
+    private static let key = "addon_search_history"
+    private static let maxEntries = 20
+
+    static func load() -> [String] {
+        guard let data = PlatformSettings.shared.getString(key: key, default: "[]").data(using: .utf8),
+              let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return list
+    }
+
+    static func record(_ query: String) {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return }
+        var list = load().filter { $0.compare(term, options: .caseInsensitive) != .orderedSame }
+        list.insert(term, at: 0)
+        save(Array(list.prefix(maxEntries)))
+    }
+
+    static func remove(_ query: String) {
+        save(load().filter { $0.compare(query, options: .caseInsensitive) != .orderedSame })
+    }
+
+    static func clear() { save([]) }
+
+    private static func save(_ list: [String]) {
+        guard let data = try? JSONEncoder().encode(list),
+              let json = String(data: data, encoding: .utf8) else { return }
+        PlatformSettings.shared.putString(key: key, value: json)
+    }
+}
+
 struct SearchView: View {
     @Environment(PlaybackController.self) private var controller
     @Environment(AppModel.self) private var appModel
@@ -132,9 +166,24 @@ struct SearchView: View {
     /// True while a continuation page is in flight, so the end-of-list sentinel
     /// doesn't fire a second request for the same token.
     @State private var loadingMore = false
+    /// Which catalogue the field answers: YouTube Music, or the addons the
+    /// listener enabled. Upstream's YouTube / Addons switcher.
+    @State private var searchSource: SearchSource = .youtube
+    @State private var addonHits: [SearchHitDTO] = []
+    @State private var addonError: String?
+    @State private var searchingAddons = false
+    @State private var addonHistory: [String] = AddonSearchHistory.load()
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
+
+    /// Which catalogue the field answers. Upstream's three-way switcher also has
+    /// Local Music; our Local Music lives in Library, so this one is two.
+    enum SearchSource: String, CaseIterable, Identifiable {
+        case youtube, addons
+        var id: String { rawValue }
+        var label: String { self == .youtube ? "YouTube" : "Addons" }
+    }
 
     enum Scope: String, CaseIterable, Identifiable {
         /// YouTube Music's mixed page — the only one with a promoted card, and so
@@ -234,8 +283,11 @@ struct SearchView: View {
         searchTask?.cancel()
         searchTask = nil
         searching = false
+        searchingAddons = false
         attempted = false
         hits = []
+        addonHits = []
+        addonError = nil
         searchError = nil
         suggestions = []
         typeaheadHits = []
@@ -278,6 +330,40 @@ struct SearchView: View {
     }
 
     private var resultsColumn: some View {
+        VStack(spacing: 0) {
+            // Upstream's source picker is up only while the field is empty: once
+            // something is typed the page is about the results, and the picker
+            // would only push them down.
+            if term.isEmpty {
+                sourceSwitcher
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            }
+            if searchSource == .addons {
+                addonResultsColumn
+            } else {
+                youtubeResultsColumn
+            }
+        }
+    }
+
+    /// The field's catalogue picker, YouTube Music or the addons the listener
+    /// enabled. Flipping answers whatever is already in the field again with the
+    /// source just picked, rather than clearing it.
+    private var sourceSwitcher: some View {
+        Picker("Search source", selection: $searchSource) {
+            ForEach(SearchSource.allCases) { source in
+                Text(source.label).tag(source)
+            }
+        }
+        .pickerStyle(.segmented)
+        .onChange(of: searchSource) { _, _ in
+            guard !term.isEmpty else { return }
+            Task { await performSearch() }
+        }
+    }
+
+    private var youtubeResultsColumn: some View {
         VStack(spacing: 0) {
             // Upstream's rule for the filter tabs, and the reason it is a rule
             // rather than a detail: they only mean something once a search has
@@ -373,6 +459,149 @@ struct SearchView: View {
             }
         }
     }
+
+    /// The Addons source's column: the words searched there before while the
+    /// field is empty, otherwise the sources' answers.
+    @ViewBuilder
+    private var addonResultsColumn: some View {
+        if searchingAddons {
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(0..<8, id: \.self) { _ in SkeletonBlock(height: 52) }
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 12)
+            }
+        } else if isEditing {
+            addonHistoryView
+        } else if let addonError {
+            EmptyStateView(icon: Image(.bchSearch), title: "Sources unavailable", subtitle: addonError, buttonTitle: nil, action: nil)
+        } else if !addonHits.isEmpty {
+            List {
+                ForEach(addonHits) { hit in
+                    addonRow(hit)
+                }
+            }
+            .listStyle(.plain)
+            .listSectionSeparator(.hidden)
+            .scrollContentBackground(.hidden)
+            .id(requestToken)
+        } else if attempted && !query.isEmpty {
+            EmptyStateView(icon: Image(.bchSearch), title: "No results", subtitle: "Nothing in your sources for “\(query)”.", buttonTitle: nil, action: nil)
+        } else {
+            addonHistoryView
+        }
+    }
+
+    private var addonHistoryView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if addonHistory.isEmpty {
+                    Text("Search your addons. Their addresses and order live in Settings ▸ Sources.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 8)
+                } else {
+                    HStack {
+                        Text("Recently Searched")
+                            .font(.title3.weight(.bold))
+                        Spacer()
+                        Button("Clear") {
+                            AddonSearchHistory.clear()
+                            addonHistory = []
+                        }
+                        .font(.callout)
+                    }
+                    ForEach(addonHistory, id: \.self) { term in
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock")
+                                .foregroundStyle(.secondary)
+                            Text(term)
+                                .lineLimit(1)
+                                .contentShape(.rect)
+                                .onTapGesture {
+                                    query = term
+                                    Task { await performSearch() }
+                                }
+                            Spacer(minLength: 8)
+                            Button {
+                                AddonSearchHistory.remove(term)
+                                addonHistory = AddonSearchHistory.load()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .scaledFont(size: 11, weight: .semibold)
+                                    .foregroundStyle(.tertiary)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove \(term) from addon searches")
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// One addon search row: sleeve, title, the tier the source offered, and the
+    /// artist. Tapping plays it; the engine resolves its `src:` key.
+    private func addonRow(_ hit: SearchHitDTO) -> some View {
+        HStack(spacing: 12) {
+            ArtworkView(url: hit.thumbnailUrl, data: nil, side: 44)
+                .clipShape(.rect(cornerRadius: 6, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(hit.title)
+                    .font(.body)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    if let badge = qualityBadge(hit.sourceQuality) {
+                        Text(badge)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.accentColor.opacity(0.16), in: Capsule())
+                            .foregroundStyle(.tint)
+                    }
+                    if let artist = hit.subtitle, !artist.isEmpty {
+                        Text(artist)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            Spacer(minLength: 8)
+            if let text = hit.durationText, !text.isEmpty {
+                Text(text)
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .contentShape(.rect)
+        .onTapGesture {
+            controller.play([hit.asEntry()], at: 0)
+        }
+        .searchRowChrome()
+    }
+
+    /// The search badge for the tier a source offered. LOW and unlabelled rows
+    /// get none, as upstream's `sourceQualityBadge` does.
+    private func qualityBadge(_ raw: String?) -> String? {
+        switch raw?.uppercased() {
+        case "DOLBY": return "Dolby Atmos"
+        case "HI-RES", "HIRES": return "Hi-Res"
+        case "LOSSLESS", "FLAC", "ALAC", "WAV": return "Lossless"
+        case "HIGH", "320": return "High"
+        default: return nil
+        }
+    }
+
 
     private struct SearchSectionModel: Identifiable {
         var id: String { title ?? "all" }
@@ -868,6 +1097,14 @@ struct SearchView: View {
         suggestTask?.cancel()
         typeaheadTask?.cancel()
         let term = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The Addons source has no completion service of its own, and YouTube's
+        // completions under an addon query would be answers from the wrong
+        // catalogue. Its own history stands in while the field is being edited.
+        guard searchSource == .youtube else {
+            suggestions = []
+            typeaheadHits = []
+            return
+        }
         // A committed search sets the field to the term it just ran. Fetching
         // completions for that same string puts the suggestion list back on
         // top of the results.
@@ -951,6 +1188,10 @@ struct SearchView: View {
     private func performSearch() async {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return }
+        if searchSource == .addons {
+            await performAddonSearch(term)
+            return
+        }
         // A new request abandons the previous one. Two searches in flight meant
         // the slower one could land last and overwrite the newer results, which
         // is the bug a listener sees as "I searched for the right thing and got
@@ -990,6 +1231,40 @@ struct SearchView: View {
                 searchContinuationToken = nil
             }
             searching = false
+            searchTask = nil
+        }
+        searchTask = task
+        _ = await task.value
+    }
+
+    /// One query answered by every enabled addon. The bridge merges the rows
+    /// round-robin and drops an addon slower than 12 s, so one dead catalogue
+    /// costs only its own rows.
+    private func performAddonSearch(_ term: String) async {
+        searchTask?.cancel()
+        cancelSuggestions()
+        searchingAddons = true
+        attempted = true
+        addonError = nil
+        suggestions = []
+        typeaheadHits = []
+        searchContinuationToken = nil
+        loadingMore = false
+        requestToken &+= 1
+        searchedTerm = term
+        AddonSearchHistory.record(term)
+        addonHistory = AddonSearchHistory.load()
+        let task = Task { @MainActor in
+            do {
+                let found = try await SourceSearch.shared.addons(term)
+                guard !Task.isCancelled else { return }
+                addonHits = found
+            } catch {
+                guard !Task.isCancelled else { return }
+                addonError = "Couldn't reach your sources. \(error.localizedDescription)"
+                addonHits = []
+            }
+            searchingAddons = false
             searchTask = nil
         }
         searchTask = task

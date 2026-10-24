@@ -15,6 +15,9 @@ struct SearchHitDTO: Codable, Identifiable, Hashable {
     let albumId: String?
     let isVideo: Bool?
     let setVideoId: String?
+    /// The tier the source offered, for the addon-search quality badge; nil for
+    /// YouTube hits, which do not advertise one.
+    var sourceQuality: String? = nil
 
     var id: String { videoId ?? browseId ?? title }
 
@@ -59,6 +62,15 @@ struct SearchHitDTO: Codable, Identifiable, Hashable {
     func asEntry() -> QueueEntry {
         let artistName = resolvedArtist
         if let videoId, videoId.hasPrefix("saavn:") {
+            return QueueEntry(
+                id: videoId, title: title, artist: artistName, source: videoId,
+                thumbnailUrl: thumbnailUrl, durationText: durationText, albumName: albumName,
+                artworkData: nil, isLocal: false
+            )
+        }
+        // An addon row keeps its packed `src:` key in both id and source, so the
+        // player resolves it through the source resolver rather than as a video.
+        if let videoId, videoId.hasPrefix("src:") {
             return QueueEntry(
                 id: videoId, title: title, artist: artistName, source: videoId,
                 thumbnailUrl: thumbnailUrl, durationText: durationText, albumName: albumName,

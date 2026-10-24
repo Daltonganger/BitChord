@@ -1,12 +1,17 @@
 package com.music.bitchord.data.sources
 
 import com.music.bitchord.data.http.Http
+import com.music.bitchord.data.model.SearchHit
 import com.music.bitchord.data.settings.AppSettings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -40,6 +45,66 @@ object SourceBridge {
 
     fun interface IndexCallback {
         fun onResult(json: String?, message: String?)
+    }
+
+    fun interface RowCallback {
+        fun onResult(json: String?, message: String?)
+    }
+
+    /** How long one addon may take before the search moves on without it. */
+    private const val ADDON_SEARCH_TIMEOUT_MS = 12_000L
+    /** Rows asked of each addon; the merged list interleaves them round-robin. */
+    private const val ADDON_SEARCH_LIMIT = 20
+
+    /**
+     * A query answered by every enabled addon at once, upstream `runAddonSearch`.
+     *
+     * Each addon's answer is waited on independently and a slow one is left
+     * behind after [ADDON_SEARCH_TIMEOUT_MS]; the rows are interleaved
+     * round-robin so no single catalogue buries the others. [Song.sourceQuality]
+     * rides along for the search badge.
+     */
+    fun searchAddons(query: String, callback: RowCallback) {
+        scope.launch {
+            val addons = SourceRegistry.active().filterIsInstance<AddonSource>()
+            if (addons.isEmpty()) {
+                callback.onResult(null, "No addons are enabled.")
+                return@launch
+            }
+            val perAddon = coroutineScope {
+                addons.map { addon ->
+                    async {
+                        withTimeoutOrNull(ADDON_SEARCH_TIMEOUT_MS) {
+                            runCatching { addon.search(query, limit = ADDON_SEARCH_LIMIT) }
+                                .getOrDefault(emptyList())
+                        } ?: emptyList()
+                    }
+                }.map { it.await() }
+            }
+            val merged = buildList {
+                val longest = perAddon.maxOfOrNull { it.size } ?: 0
+                for (index in 0 until longest) {
+                    perAddon.forEach { rows -> rows.getOrNull(index)?.let(::add) }
+                }
+            }
+            val hits = merged.map { song ->
+                SearchHit(
+                    kind = "track",
+                    videoId = song.videoId,
+                    title = song.title,
+                    subtitle = song.artist,
+                    thumbnailUrl = song.thumbnailUrl,
+                    durationText = song.durationText,
+                    albumName = song.albumName,
+                    artistId = song.artistId,
+                    albumId = song.albumId,
+                    isVideo = song.isVideo,
+                    setVideoId = song.setVideoId,
+                    sourceQuality = song.sourceQuality,
+                )
+            }
+            callback.onResult(json.encodeToString(ListSerializer(SearchHit.serializer()), hits), null)
+        }
     }
 
     fun health(url: String, callback: HealthCallback) {
