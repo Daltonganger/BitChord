@@ -35,9 +35,10 @@ pub(crate) fn technique_window_seconds(style: TransitionStyle, beat_seconds: f64
     fx::window_seconds(style, beat_seconds)
 }
 
-/// Where in its window a technique lands the incoming record, 0…1.
-pub(crate) fn technique_landing_fraction(style: TransitionStyle) -> Option<f64> {
-    fx::Technique::of(style).map(|t| t.shape().1)
+/// Where in its window a technique lands the incoming record, 0…1. Needs the
+/// beat because LoopRoll/Cut windows grow by the overlap.
+pub(crate) fn technique_landing_fraction(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
+    fx::landing_fraction(style, beat_seconds)
 }
 
 /// Callback surface — the UniFFI-generated Swift side implements this.
