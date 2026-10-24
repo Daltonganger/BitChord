@@ -323,6 +323,10 @@ pub struct TrackMetadata {
     pub duration_seconds: f64,
     /// Encoded artwork bytes (JPEG/PNG as embedded), empty when none.
     pub artwork: Vec<u8>,
+    /// The tag's track number within its album, 0 when the tag carries none.
+    /// Tag-derived albums sort and display by it instead of by filename
+    /// (upstream a6ea0ed1's MediaStore read).
+    pub track_number: u32,
 }
 
 /// PCM properties discovered before playback. The app uses the source rate to
@@ -3089,6 +3093,13 @@ fn plan_automix_impl_with_tier(
 #[uniffi::export]
 pub fn read_track_metadata(path: String) -> Option<TrackMetadata> {
     metadata::read_track_metadata(&path)
+}
+
+/// Writes a track number onto the file's own tag. Exported for the download
+/// store, which knows the release's track order better than any filename.
+#[uniffi::export]
+pub fn write_track_number(path: String, number: u32) -> bool {
+    metadata::write_track_number(&path, number)
 }
 
 /// Write title/artist/album/artwork onto a downloaded file.

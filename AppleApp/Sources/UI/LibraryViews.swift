@@ -1308,6 +1308,7 @@ struct DownloadsView: View {
                 album: t.album,
                 durationSeconds: 0,
                 artwork: t.artwork,
+                trackNumber: 0,
                 dateAdded: nil,
                 dateModified: nil
             )
@@ -1577,7 +1578,8 @@ struct DownloadsView: View {
                             subtitle: "\(group.artist) • \(group.tracks.count) song\(group.tracks.count == 1 ? "" : "s")",
                             artwork: group.tracks.first?.artwork,
                             tracks: group.tracks,
-                            contextID: "local-album:\(group.artist):\(group.name)"
+                            contextID: "local-album:\(group.artist):\(group.name)",
+                            showsTrackNumbers: true
                         )
                     } label: {
                         VStack(alignment: .leading, spacing: 8) {
@@ -3204,6 +3206,7 @@ private struct LocalGroupPage: View {
     let tracks: [LocalTrack]
     let contextID: String
     var circularArtwork = false
+    var showsTrackNumbers = false
     @Environment(PlaybackController.self) private var controller
 
     var body: some View {
@@ -3261,14 +3264,18 @@ private struct LocalGroupPage: View {
 
                 VStack(spacing: 2) {
                     ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
-                        SongRow(
-                            entry: QueueEntry.from(track),
-                            play: {
-                                controller.play(tracks.map(QueueEntry.from), at: index, context: title, contextID: contextID)
-                            },
-                            playNext: { controller.playNext(QueueEntry.from(track)) },
-                            addToQueue: { controller.addToQueue(QueueEntry.from(track)) }
-                        )
+                        if showsTrackNumbers && track.trackNumber > 0 {
+                            HStack(spacing: 10) {
+                                Text(String(track.trackNumber))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(minWidth: 24, alignment: .trailing)
+                                    .accessibilityLabel("Track \(track.trackNumber)")
+                                songRow(track, index: index)
+                            }
+                        } else {
+                            songRow(track, index: index)
+                        }
                     }
                 }
                 .padding(.horizontal, 16)
@@ -3279,6 +3286,17 @@ private struct LocalGroupPage: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+    }
+
+    private func songRow(_ track: LocalTrack, index: Int) -> some View {
+        SongRow(
+            entry: QueueEntry.from(track),
+            play: {
+                controller.play(tracks.map(QueueEntry.from), at: index, context: title, contextID: contextID)
+            },
+            playNext: { controller.playNext(QueueEntry.from(track)) },
+            addToQueue: { controller.addToQueue(QueueEntry.from(track)) }
+        )
     }
 }
 
