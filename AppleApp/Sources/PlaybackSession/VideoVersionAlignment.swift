@@ -67,6 +67,8 @@ actor VideoVersionAlignment {
                 // The recordings are only inputs: the map is what is kept.
                 try? FileManager.default.removeItem(at: songAudio)
                 try? FileManager.default.removeItem(at: videoAudio)
+                try? FileManager.default.removeItem(at: songAudio.appendingPathExtension("part"))
+                try? FileManager.default.removeItem(at: videoAudio.appendingPathExtension("part"))
             }
             let fetchStarted = Date()
             do {
@@ -108,18 +110,41 @@ actor VideoVersionAlignment {
         return map
     }
 
+    /// googlevideo slows one open-ended request down to playback speed, so a
+    /// whole song took minutes; bounded 1 MiB ranges arrive at line rate (the
+    /// engine's `fetch_loop` does the same).
+    private static let chunkBytes = 1 << 20
+
     private static func download(videoId: String, to destination: URL) async throws {
         if FileManager.default.fileExists(atPath: destination.path) { return }
         let stream = try await InnertubeStreamResolver.shared.resolve(videoId: videoId)
         guard let url = URL(string: stream.url) else { throw URLError(.badURL) }
-        var request = URLRequest(url: url)
-        for (name, value) in stream.headers { request.setValue(value, forHTTPHeaderField: name) }
-        let (temporary, response) = try await URLSession.shared.download(for: request)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            try? FileManager.default.removeItem(at: temporary)
-            throw URLError(.badServerResponse)
+        let partial = destination.appendingPathExtension("part")
+        FileManager.default.createFile(atPath: partial.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: partial)
+        defer { try? handle.close() }
+        var offset = 0
+        var total: Int?
+        while total.map({ offset < $0 }) ?? true {
+            try Task.checkCancellation()
+            var request = URLRequest(url: url)
+            for (name, value) in stream.headers { request.setValue(value, forHTTPHeaderField: name) }
+            request.setValue("bytes=\(offset)-\(offset + chunkBytes - 1)", forHTTPHeaderField: "Range")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            if http.statusCode == 416 { break }
+            guard (200..<300).contains(http.statusCode), !data.isEmpty else { throw URLError(.badServerResponse) }
+            try handle.write(contentsOf: data)
+            offset += data.count
+            if http.statusCode == 200 { break }
+            if total == nil, let range = http.value(forHTTPHeaderField: "Content-Range"),
+               let size = range.split(separator: "/").last.flatMap({ Int($0) }) {
+                total = size
+            }
+            if total == nil, data.count < chunkBytes { break }
         }
+        try handle.close()
         try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.moveItem(at: temporary, to: destination)
+        try FileManager.default.moveItem(at: partial, to: destination)
     }
 }
