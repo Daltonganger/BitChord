@@ -102,8 +102,10 @@ struct SpotifyImportSheet: View {
             } footer: {
                 if hasCookie {
                     Text("Paste the share link, or pick one of your playlists below.")
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
                     Text("Paste a public share link. Adding the sp_dc cookie in Settings › Spotify Canvas also lists your own playlists and imports private ones.")
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
