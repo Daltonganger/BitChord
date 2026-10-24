@@ -81,8 +81,12 @@ enum AppIntentActions {
     static func togglePlayback() async throws -> String {
         let controller = AppServices.shared.controller
         guard let current = controller.current else { throw BitChordIntentError.nothingPlaying }
+        // The state is read *before* the toggle: `togglePlayPause` starts (or
+        // keeps) an asynchronous load, so what it leaves behind is not always the
+        // outcome this call asked for, and reading it after named the wrong one.
+        let wasPlaying = controller.isPlaying || controller.isBuffering
         controller.togglePlayPause()
-        return controller.isPlaying ? "Playing \(current.title)" : "Paused \(current.title)"
+        return wasPlaying ? "Paused \(current.title)" : "Playing \(current.title)"
     }
 
     /// Search and play the best match, with the rest of the page queued behind it
