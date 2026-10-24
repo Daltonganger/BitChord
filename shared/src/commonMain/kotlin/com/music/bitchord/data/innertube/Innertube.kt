@@ -433,6 +433,18 @@ object Innertube {
             params?.let { put("params", it) }
         }
 
+    /**
+     * The next page of a search result set — the same shape as the first page,
+     * so [InnertubeParser.parseSearchPage] reads it unmodified. Mirrors
+     * [browseContinuation]; upstream `Innertube.kt:626` `searchContinuation`.
+     */
+    suspend fun searchContinuation(token: String): JsonObject = postMusic(
+        endpoint = "search",
+        query = mapOf("ctoken" to token, "continuation" to token, "type" to "next"),
+    ) {
+        put("continuation", token)
+    }
+
     /** Typeahead queries for a half-typed input — queries, not results. */
     suspend fun searchSuggestions(input: String): JsonObject =
         postMusic("music/get_search_suggestions") {
