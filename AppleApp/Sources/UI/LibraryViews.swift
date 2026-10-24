@@ -1500,8 +1500,14 @@ struct DownloadsView: View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 18)], spacing: 22) {
                 ForEach(albumGroups, id: \.name) { group in
-                    Button {
-                        controller.play(group.tracks.map(QueueEntry.from), context: group.name, contextID: "local-album:\(group.artist):\(group.name)")
+                    NavigationLink {
+                        LocalGroupPage(
+                            title: group.name,
+                            subtitle: "\(group.artist) • \(group.tracks.count) song\(group.tracks.count == 1 ? "" : "s")",
+                            artwork: group.tracks.first?.artwork,
+                            tracks: group.tracks,
+                            contextID: "local-album:\(group.artist):\(group.name)"
+                        )
                     } label: {
                         VStack(alignment: .leading, spacing: 8) {
                             ArtworkView(url: nil, data: group.tracks.first?.artwork, side: 160)
@@ -3077,38 +3083,131 @@ struct UnifiedArtistsView: View {
 }
 
 /// One artist with an expandable track list (tap plays the artist's songs).
+/// One local artist: circular artwork from their first track and a push to
+/// the artist's own page — upstream's ArtistRow (LocalFolder.kt:466), where a
+/// tap opens the group rather than folding a track list into the row.
 private struct ArtistGroupRow: View {
     let group: (name: String, tracks: [LocalTrack])
-    @Environment(PlaybackController.self) private var controller
-    @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Button {
-                expanded.toggle()
-            } label: {
-                HStack {
+        NavigationLink {
+            LocalGroupPage(
+                title: group.name,
+                subtitle: "\(group.tracks.count) song\(group.tracks.count == 1 ? "" : "s")",
+                artwork: group.tracks.first?.artwork,
+                tracks: group.tracks,
+                contextID: "local-artist:\(group.name)",
+                circularArtwork: true
+            )
+        } label: {
+            HStack(spacing: 12) {
+                ArtworkView(url: nil, data: group.tracks.first?.artwork, side: 56)
+                    .clipShape(.circle)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(group.name)
                         .font(.body.weight(.medium))
-                    Spacer()
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text("\(group.tracks.count) song\(group.tracks.count == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// A local album's or artist's own page — upstream's ca66070e model, where a
+/// folder group IS a release: cover header, play and shuffle, the songs.
+private struct LocalGroupPage: View {
+    let title: String
+    let subtitle: String
+    let artwork: Data?
+    let tracks: [LocalTrack]
+    let contextID: String
+    var circularArtwork = false
+    @Environment(PlaybackController.self) private var controller
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 18) {
+                ArtworkView(url: nil, data: artwork, side: 220)
+                    .clipShape(.rect(cornerRadius: circularArtwork ? 110 : 12, style: .continuous))
+                    .shadow(color: .black.opacity(0.2), radius: 14, y: 6)
+                    .padding(.top, 12)
+
+                VStack(spacing: 5) {
+                    Text(title)
+                        .font(.largeTitle.bold())
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.7)
+                        .multilineTextAlignment(.center)
+                    Text(subtitle)
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            if expanded {
-                ForEach(Array(group.tracks.enumerated()), id: \.element.id) { index, track in
-                    SongRow(
-                        entry: QueueEntry.from(track),
-                        play: { controller.play(group.tracks.map(QueueEntry.from), at: index, context: group.name, contextID: "local-artist:\(group.name)") }
-                    )
+
+                HStack(spacing: 12) {
+                    Button {
+                        controller.togglePlaybackContext(
+                            tracks.map(QueueEntry.from), title: title, contextID: contextID
+                        )
+                    } label: {
+                        Label(
+                            controller.isPlaybackContextPlaying(contextID) ? "Pause" : "Play",
+                            systemImage: controller.isPlaybackContextPlaying(contextID) ? "pause.fill" : "play.fill"
+                        )
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .clipShape(Capsule())
+
+                    Button {
+                        controller.play(
+                            tracks.map(QueueEntry.from), context: title, contextID: contextID,
+                            shuffleRequested: true, shuffleStart: true
+                        )
+                    } label: {
+                        Label("Shuffle", systemImage: "shuffle")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.bordered)
+                    .clipShape(Capsule())
                 }
+                .padding(.horizontal, 24)
+
+                VStack(spacing: 2) {
+                    ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                        SongRow(
+                            entry: QueueEntry.from(track),
+                            play: {
+                                controller.play(tracks.map(QueueEntry.from), at: index, context: title, contextID: contextID)
+                            },
+                            playNext: { controller.playNext(QueueEntry.from(track)) },
+                            addToQueue: { controller.addToQueue(QueueEntry.from(track)) }
+                        )
+                    }
+                }
+                .padding(.horizontal, 16)
             }
+            .padding(.bottom, 24)
         }
+        .navigationTitle(title)
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
     }
 }
 
