@@ -261,6 +261,8 @@ struct SpotifyImportSheet: View {
                 rows[index].videoId = match.videoId
                 rows[index].matchedTitle = match.title
                 rows[index].matchedArtist = match.artist
+                rows[index].matchedDurationText = match.durationText
+                rows[index].thumbnailUrl = match.thumbnailUrl
                 rows[index].detail = nil
             case "AMBIGUOUS":
                 rows[index].status = .ambiguous
@@ -304,22 +306,24 @@ struct SpotifyImportSheet: View {
         }
     }
 
-    /// The device-local save, on the same store the file import writes. The
-    /// Spotify row keeps its own title and artist as the source the card was
-    /// matched from; the matched copy becomes the row itself.
+    /// The device-local save, on the same store the file import writes. A
+    /// MATCHED row carries its YouTube identity; anything else — ambiguous,
+    /// missing — stays the Spotify track it was, named for the song pasted,
+    /// not for a guess it may not be.
     private func saveLocally() {
         guard let playlist else { return }
         let tracks = rows.map { row in
-            ImportedPlaylistTrack(
+            let matched = row.status == .matched
+            return ImportedPlaylistTrack(
                 id: row.id,
-                title: row.matchedTitle ?? row.title,
-                artist: row.matchedArtist ?? row.artists,
+                title: matched ? (row.matchedTitle ?? row.title) : row.title,
+                artist: matched ? (row.matchedArtist ?? row.artists) : row.artists,
                 sourceTitle: row.title,
                 sourceArtist: row.artists,
                 album: nil,
-                durationText: Self.durationText(row.durationMs),
+                durationText: (matched ? row.matchedDurationText : nil) ?? Self.durationText(row.durationMs),
                 videoId: row.videoId,
-                thumbnailUrl: nil
+                thumbnailUrl: row.thumbnailUrl
             )
         }
         do {
@@ -403,6 +407,8 @@ struct SpotifyImportRow: Identifiable {
     var videoId: String?
     var matchedTitle: String?
     var matchedArtist: String?
+    var matchedDurationText: String?
+    var thumbnailUrl: String?
     var detail: String?
 }
 
