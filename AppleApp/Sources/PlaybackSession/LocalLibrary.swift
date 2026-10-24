@@ -12,6 +12,7 @@ struct LocalTrack: Identifiable, Hashable {
     var album: String
     var durationSeconds: Double
     var artwork: Data?
+    var trackNumber: UInt32 = 0
     /// The file's creation and modification dates, from the file system.
     ///
     /// There is no better source. A tag does not record when *you* added a file to
@@ -139,6 +140,7 @@ final class LocalLibrary {
                     album: meta.album,
                     durationSeconds: meta.durationSeconds,
                     artwork: meta.artwork.isEmpty ? nil : meta.artwork,
+                    trackNumber: meta.trackNumber,
                     dateAdded: dates.added,
                     dateModified: dates.modified
                 ))
@@ -253,7 +255,13 @@ final class LocalLibrary {
         Dictionary(grouping: tracks) { "\($0.artist)|\($0.album.isEmpty ? "—" : $0.album)" }
             .values
             .map { group in
-                (name: group.first?.album ?? "", artist: group.first?.artist ?? "", tracks: group)
+                let ordered = group.sorted { lhs, rhs in
+                    localTrackComesBefore(
+                        trackNumber: lhs.trackNumber, path: lhs.path,
+                        trackNumber: rhs.trackNumber, path: rhs.path
+                    )
+                }
+                return (name: ordered.first?.album ?? "", artist: ordered.first?.artist ?? "", tracks: ordered)
             }
             .sorted { ($0.artist, $0.name) < ($1.artist, $1.name) }
     }
