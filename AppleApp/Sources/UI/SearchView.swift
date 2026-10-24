@@ -126,6 +126,12 @@ struct SearchView: View {
     /// one-character edit left the old results up under a shorter query, and
     /// editing after a search never offered completions again.
     @State private var searchedTerm = ""
+    /// The token for the next page of the committed search, null once the
+    /// result set is exhausted or no search has run.
+    @State private var searchContinuationToken: String?
+    /// True while a continuation page is in flight, so the end-of-list sentinel
+    /// doesn't fire a second request for the same token.
+    @State private var loadingMore = false
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
@@ -233,6 +239,8 @@ struct SearchView: View {
         searchError = nil
         suggestions = []
         typeaheadHits = []
+        searchContinuationToken = nil
+        loadingMore = false
         // Nothing on screen is for any term now, which is what stops the
         // old results reappearing under a field that has been emptied.
         searchedTerm = ""
@@ -331,6 +339,22 @@ struct SearchView: View {
                             ForEach(sec.hits) { hit in
                                 searchHitRow(hit)
                             }
+                        }
+                    }
+                    // End-of-list sentinel: a continuation page is fetched only
+                    // when the reader reaches the last row, so the first page
+                    // stays instant and later pages ride in as needed.
+                    if searchContinuationToken != nil {
+                        Section {
+                            HStack {
+                                Spacer()
+                                if loadingMore { ProgressView().controlSize(.small) }
+                                Spacer()
+                            }
+                            .listRowInsets(EdgeInsets(top: 12, leading: 0, bottom: 12, trailing: 0))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .onAppear { loadMore() }
                         }
                     }
                 }
@@ -927,6 +951,9 @@ struct SearchView: View {
         attempted = true
         searchError = nil
         suggestions = []
+        typeaheadHits = []
+        searchContinuationToken = nil
+        loadingMore = false
         // A new list identity per request, so the results open at the top rather
         // than at the previous set's offset.
         requestToken &+= 1
@@ -934,7 +961,8 @@ struct SearchView: View {
         let wanted = scope
         let task = Task { @MainActor in
             do {
-                var found = try await InnertubeSearch.shared.search(term, scope: wanted.rawValue)
+                let page = try await InnertubeSearch.shared.searchPage(term, scope: wanted.rawValue)
+                var found = page.hits
                 if PlatformSettings.shared.getBoolean(key: "jiosaavn_enabled", default: true), wanted == .songs {
                     let extra = await JioSaavn.search(term)
                     found.insert(contentsOf: extra, at: 0)
@@ -944,16 +972,43 @@ struct SearchView: View {
                 // checked before the request.
                 guard !Task.isCancelled else { return }
                 hits = found
+                searchContinuationToken = page.continuation
             } catch {
                 guard !Task.isCancelled else { return }
                 searchError = "Couldn't reach the music service. Check your connection and try again."
                 hits = []
+                searchContinuationToken = nil
             }
             searching = false
             searchTask = nil
         }
         searchTask = task
         _ = await task.value
+    }
+
+    /// Appends the next page of the committed search when the list reaches its
+    /// end. A continuation is a separate, deliberately cheap request — the
+    /// first page stays instant and the later pages ride in only when asked.
+    private func loadMore() {
+        guard let token = searchContinuationToken, !loadingMore, !searching else { return }
+        loadingMore = true
+        let term = searchedTerm
+        let wanted = scope
+        Task { @MainActor in
+            defer { loadingMore = false }
+            do {
+                let page = try await InnertubeSearch.shared.searchContinuation(token, scope: wanted.rawValue)
+                // The reader may have moved on to a new term or filter while the
+                // page was in flight; a stale page must not append to it.
+                guard searchedTerm == term, scope == wanted, !Task.isCancelled else { return }
+                let existing = Set(hits.map(\.id))
+                hits.append(contentsOf: page.hits.filter { !existing.contains($0.id) })
+                searchContinuationToken = page.continuation
+            } catch {
+                // A failed page is silent: the rows already on screen stay, and
+                // the sentinel can try again on the next pass.
+            }
+        }
     }
 }
 

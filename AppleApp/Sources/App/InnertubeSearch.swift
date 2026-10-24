@@ -79,25 +79,61 @@ struct SearchHitDTO: Codable, Identifiable, Hashable {
     }
 }
 
+/// One page of a search: the rows plus the token for the next page, if there
+/// is one. The token is null once the result set is exhausted.
+struct SearchPageDTO {
+    let hits: [SearchHitDTO]
+    let continuation: String?
+}
+
 final class InnertubeSearch: Sendable {
     static let shared = InnertubeSearch()
 
+    /// The first page's rows only — the shape most callers need. Callers that
+    /// page (the search screen) use [searchPage] instead.
     func search(_ term: String, scope: String) async throws -> [SearchHitDTO] {
+        try await searchPage(term, scope: scope).hits
+    }
+
+    func searchPage(_ term: String, scope: String) async throws -> SearchPageDTO {
         try await withCheckedThrowingContinuation { continuation in
             SearchBridge.shared.search(
                 query: term,
                 scope: scope,
-                callback: BridgeCallbackAdapter { json, message in
+                callback: BridgeCallbackAdapter { json, token, message in
                     if let json {
                         do {
                             let hits = try JSONDecoder()
                                 .decode([SearchHitDTO].self, from: Data(json.utf8))
-                            continuation.resume(returning: hits)
+                            continuation.resume(returning: SearchPageDTO(hits: hits, continuation: token))
                         } catch {
                             continuation.resume(throwing: error)
                         }
                     } else {
                         continuation.resume(throwing: SearchError(message: message ?? "search failed"))
+                    }
+                }
+            )
+        }
+    }
+
+    /// The next page of a search, keyed by the token the previous page returned.
+    func searchContinuation(_ token: String, scope: String) async throws -> SearchPageDTO {
+        try await withCheckedThrowingContinuation { continuation in
+            SearchBridge.shared.searchContinuation(
+                token: token,
+                scope: scope,
+                callback: BridgeCallbackAdapter { json, nextToken, message in
+                    if let json {
+                        do {
+                            let hits = try JSONDecoder()
+                                .decode([SearchHitDTO].self, from: Data(json.utf8))
+                            continuation.resume(returning: SearchPageDTO(hits: hits, continuation: nextToken))
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    } else {
+                        continuation.resume(throwing: SearchError(message: message ?? "search continuation failed"))
                     }
                 }
             )
@@ -124,7 +160,7 @@ final class InnertubeSearch: Sendable {
         try await withCheckedThrowingContinuation { continuation in
             SearchBridge.shared.searchTypeahead(
                 query: input,
-                callback: BridgeCallbackAdapter { json, message in
+                callback: BridgeCallbackAdapter { json, _, message in
                     if let json {
                         do {
                             let hits = try JSONDecoder()
@@ -145,9 +181,9 @@ final class InnertubeSearch: Sendable {
 }
 
 private final class BridgeCallbackAdapter: SearchBridgeSearchCallback {
-    private let onResult: (String?, String?) -> Void
-    init(onResult: @escaping (String?, String?) -> Void) { self.onResult = onResult }
-    func onResult(json: String?, message: String?) { onResult(json, message) }
+    private let onResult: (String?, String?, String?) -> Void
+    init(onResult: @escaping (String?, String?, String?) -> Void) { self.onResult = onResult }
+    func onResult(json: String?, continuation: String?, message: String?) { onResult(json, continuation, message) }
 }
 
 private final class SuggestAdapter: SuggestionsBridgeSuggestionsCallback {
