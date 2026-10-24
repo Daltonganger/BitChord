@@ -261,6 +261,10 @@ pub fn constrain(
     } else {
         end
     };
+    // E-2's hold is anchored to the analysed ending. If a guard moves that
+    // ending, there is no protected chord to hold for at the new one.
+    let anchor_moved = plan.transition_end_seconds > 0.0
+        && (anchor - plan.transition_end_seconds).abs() > 0.05;
     let mut fade = if plan.fade_seconds > 0.0 {
         plan.fade_seconds
     } else {
@@ -299,6 +303,18 @@ pub fn constrain(
     }
     if gapless {
         plan.style = crate::TransitionStyleRec::Gapless;
+    }
+    // A hold is anchored to the blend start. When a guard moves the start later
+    // (a shorter fade), the time remaining before the protected chord shrinks
+    // by the same amount — the chord itself has not moved. A moved anchor
+    // abandons the hold instead: the chord it protected is no longer the end.
+    if plan.outgoing_hold_seconds > 0.0 {
+        let moved = (plan.fade_seconds - fade).max(0.0);
+        plan.outgoing_hold_seconds =
+            (plan.outgoing_hold_seconds - moved).clamp(0.0, (fade - 0.05).max(0.0));
+        if anchor_moved {
+            plan.outgoing_hold_seconds = 0.0;
+        }
     }
     plan.cue_seconds = cue;
     plan.transition_end_seconds = anchor;
@@ -572,6 +588,46 @@ mod tests {
         assert_eq!(safe.cue_seconds, 6.0);
         assert_eq!(safe.transition_end_seconds, 110.0);
         assert_eq!(safe.fade_seconds, 2.0);
+    }
+    #[test]
+    fn a_guard_moves_or_clears_the_cold_ending_hold() {
+        // E-2's shape: a 4.86 s blend with a 3.36 s hold, ending at 216.5 s.
+        let plan: crate::TransitionPlanRec = crate::mixer::TransitionPlan {
+            fade_seconds: 4.86,
+            outgoing_hold_seconds: 3.36,
+            transition_end_seconds: 216.5,
+            ..Default::default()
+        }
+        .into();
+        // A SponsorBlock segment inside the blend moves its start later by
+        // 0.36 s. The chord at 215.0 s has not moved, so the hold shrinks by
+        // that much and the crossing still starts on the chord.
+        let out = PlaybackRegions {
+            excluded: vec![PlaybackInterval {
+                start_seconds: 210.0,
+                end_seconds: 212.0,
+            }],
+            ..Default::default()
+        };
+        let safe = constrain(plan.clone(), out, PlaybackRegions::default(), 220.0, 200.0);
+        assert_eq!(safe.transition_end_seconds, 216.5);
+        assert!((safe.fade_seconds - 4.5).abs() < 1e-6, "{safe:?}");
+        assert!((safe.outgoing_hold_seconds - 3.0).abs() < 1e-6, "{safe:?}");
+        assert!(
+            (safe.transition_end_seconds - safe.fade_seconds + safe.outgoing_hold_seconds - 215.0)
+                .abs()
+                < 1e-6,
+            "the crossing no longer starts on the chord: {safe:?}"
+        );
+        // A guard that moves the end itself abandons the hold: there is no
+        // protected chord at the new ending.
+        let out = PlaybackRegions {
+            audible_end_seconds: Some(200.0),
+            ..Default::default()
+        };
+        let safe = constrain(plan, out, PlaybackRegions::default(), 220.0, 200.0);
+        assert_eq!(safe.transition_end_seconds, 200.0);
+        assert_eq!(safe.outgoing_hold_seconds, 0.0);
     }
     #[test]
     fn insufficient_window_is_gapless_and_invalid_intervals_are_removed() {

@@ -627,6 +627,7 @@ pub fn plan_pair(
                 filter_sweep: 0.0,
                 vocal_overlap: 0.0,
                 fade_seconds: GAPLESS_FADE_SECONDS,
+                outgoing_hold_seconds: 0.0,
                 effect_seconds: 0.0,
                 effect_start_seconds: 0.0,
                 transition_end_seconds: 0.0,
@@ -767,6 +768,7 @@ fn plain_fallback(fade: f64, outgoing: &Analysis) -> TransitionPlan {
         filter_sweep: 0.0,
         vocal_overlap: 0.0,
         fade_seconds: fade,
+        outgoing_hold_seconds: 0.0,
         effect_seconds: 0.0,
         effect_start_seconds: 0.0,
         transition_end_seconds: end,
@@ -1781,6 +1783,7 @@ fn plan_from(
         filter_sweep: if same_beat { 0.0 } else { FILTER_SWEEP },
         vocal_overlap,
         fade_seconds,
+        outgoing_hold_seconds: 0.0,
         effect_seconds: 0.0,
         effect_start_seconds: 0.0,
         transition_end_seconds: transition_start + fade_seconds,
@@ -1991,6 +1994,7 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
         filter_sweep: 0.0,
         vocal_overlap: 0.0,
         fade_seconds: fall,
+        outgoing_hold_seconds: 0.0,
         effect_seconds: 0.0,
         effect_start_seconds: 0.0,
         transition_end_seconds: mix_end,
@@ -2178,6 +2182,7 @@ fn technique_plan(
         filter_sweep: 0.0,
         vocal_overlap: 0.0,
         fade_seconds: blend_fade,
+        outgoing_hold_seconds: 0.0,
         effect_seconds,
         effect_start_seconds: (end - effect_seconds).max(0.0),
         transition_end_seconds: end,
@@ -2412,10 +2417,16 @@ fn first_vocal_onset(analysis: &Analysis, from: f64) -> Option<f64> {
 
 /// E: respect the music at both ends of the handover.
 ///
-/// On the outgoing side a final chord keeps its attack at unity: the blend may
-/// not begin before it, and its natural decay carries the incoming rise. On the
-/// incoming side a vocal entry or hook is never skipped: a cue past the first
-/// sustained vocal is pulled back to it. A gapless album join is untouched.
+/// On the outgoing side a final chord keeps its attack at unity: the mix does
+/// not begin by fading it. The incoming enters a phrase before the chord and
+/// rises underneath it; the outgoing stays at unity through the attack and
+/// crosses over across the decay. The blend is the phrase plus the decay, so
+/// the overlap is never shorter than the phrase floor even when the chord is
+/// only a beat before the record's end.
+///
+/// On the incoming side a vocal entry or hook is never skipped: a cue past the
+/// first sustained vocal is pulled back to it. A gapless album join is
+/// untouched, and DropCut keeps its deliberate short swap.
 fn respect_music_edges(outgoing: &Analysis, incoming: &Analysis, plan: &mut TransitionPlan) {
     if plan.style == TransitionStyle::Gapless {
         return;
@@ -2439,13 +2450,52 @@ fn respect_music_edges(outgoing: &Analysis, incoming: &Analysis, plan: &mut Tran
     if plan.transition_end_seconds < end {
         plan.transition_end_seconds = end;
     }
-    let start = plan.transition_end_seconds - plan.fade_seconds;
-    if start + 0.15 < chord {
-        plan.fade_seconds = (plan.transition_end_seconds - chord).max(0.1);
-        if plan.effect_seconds > plan.fade_seconds {
-            plan.effect_seconds = plan.fade_seconds;
+    let decay = (end - chord).max(0.0);
+    if plan.style == TransitionStyle::DropCut {
+        // A drop swap is a deliberate short cut. The chord still may not be
+        // faded through, so its effect window stays inside the decay; the
+        // phrase floor does not apply to a style whose identity is the cut.
+        if plan.transition_end_seconds - plan.fade_seconds + 0.15 < chord {
+            plan.fade_seconds = decay.max(0.1);
+            plan.effect_seconds = plan.effect_seconds.min(plan.fade_seconds);
             plan.effect_start_seconds = (plan.transition_end_seconds - plan.effect_seconds).max(0.0);
         }
+        return;
+    }
+
+    // The phrase is the planner's own length for the pair: eight beats of the
+    // outgoing record, or the plan's analysed fall when there is no grid. The
+    // incoming's entry moves one phrase before the chord, which is what makes
+    // the overlap phrase + decay rather than the bare decay E used to leave.
+    let beat = beat_seconds_of(outgoing);
+    let phrase = if beat > 0.0 {
+        (8.0 * beat).clamp(2.0, AUTO_TRANSITION_MAX_SECONDS)
+    } else {
+        plan.fade_seconds.clamp(2.0, AUTO_TRANSITION_MAX_SECONDS)
+    };
+    let fade = (phrase + decay).clamp(2.0, AUTO_TRANSITION_MAX_SECONDS);
+    plan.fade_seconds = fade;
+    plan.outgoing_hold_seconds = (fade - decay).clamp(0.0, (fade - 0.05).max(0.0));
+    // The nerd stats have to describe the blend that actually plays. The
+    // planner's own reason predates the hold and quotes the pre-E-2 length, so
+    // a cold ending replaces it (or leads with the new shape for a style whose
+    // reason carries the technique's rationale).
+    let note = format!(
+        "cold ending: the final chord at {chord:.1}s is struck at unity, and the incoming \
+         (entered {phrase:.1}s earlier) takes over across its {decay:.1}s decay \
+         ({fade:.1}s blend, {:.1}s hold)",
+        plan.outgoing_hold_seconds
+    );
+    plan.reason = if plan.reason.starts_with("crossfade:") {
+        note
+    } else {
+        format!("{note}; {}", plan.reason)
+    };
+    // The technique dresses the ending, never the held phrase: its window
+    // stays inside the decay, so the chord is still at unity when it starts.
+    if plan.effect_seconds > 0.0 {
+        plan.effect_seconds = plan.effect_seconds.min(decay.max(0.1)).min(fade);
+        plan.effect_start_seconds = (plan.transition_end_seconds - plan.effect_seconds).max(0.0);
     }
 }
 
@@ -2498,7 +2548,10 @@ fn record_transition_edges(outgoing: &Analysis, incoming: &Analysis, plan: &Tran
         cold_ending: chord.is_some(),
         blend_start_seconds: start,
         final_chord_seconds: chord,
-        clipped_final_chord: ending_handover && chord.is_some_and(|attack| start + 0.15 < attack),
+        clipped_final_chord: ending_handover
+            && chord.is_some_and(|attack| {
+                start + plan.outgoing_hold_seconds + 0.15 < attack
+            }),
     });
 }
 
@@ -3127,6 +3180,7 @@ fn plan_wsola_transition(outgoing: &Analysis, incoming: &Analysis) -> Option<Tra
         filter_sweep: 0.0,
         vocal_overlap,
         fade_seconds,
+        outgoing_hold_seconds: 0.0,
         effect_seconds: 0.0,
         effect_start_seconds: 0.0,
         transition_end_seconds: transition_end,
@@ -4219,7 +4273,7 @@ mod tests {
     }
 
     #[test]
-    fn a_final_chord_keeps_its_attack_before_the_blend() {
+    fn a_final_chord_is_struck_at_unity_after_a_held_phrase() {
         let mut out = analysis(0.0, 60.0, vec![0.0, 2.0, 4.0]);
         out.content_end = 60.0;
         // A quiet break, then the final chord at 57 s.
@@ -4228,13 +4282,72 @@ mod tests {
         with_energy(&mut inc, 40.0, |_| 0.8);
         let mut plan = edge_plan(60.0, 8.0, 0.0);
         respect_music_edges(&out, &inc, &mut plan);
+        let chord = final_chord_attack(&out).expect("the fixture ends on a chord");
         let start = plan.transition_end_seconds - plan.fade_seconds;
-        assert!(start + 0.15 >= 57.0, "blend starts at {start:.2}s, before the chord");
+        // The blend is a phrase plus the decay, and the outgoing is still at
+        // unity when the chord is struck, not already falling.
+        assert!(plan.fade_seconds >= 4.0, "fade {:.2}s is under the phrase", plan.fade_seconds);
+        assert!((plan.outgoing_hold_seconds - 4.0).abs() < 1e-6);
+        assert!((start + plan.outgoing_hold_seconds - chord).abs() < 1e-6);
         assert!((plan.transition_end_seconds - 60.0).abs() < 1e-6);
         record_transition_edges(&out, &inc, &plan);
         let edges = last_transition_edges();
         assert!(edges.cold_ending, "{edges:?}");
         assert!(!edges.clipped_final_chord, "{edges:?}");
+    }
+
+    /// Pair 5 of the real corpus, pinned as a shape: 143 BPM (a 3.36 s phrase)
+    /// whose final chord is 1.5 s before the content end. E used to leave a
+    /// 1.5 s blend here; E-2 keeps the phrase in the overlap and holds the
+    /// outgoing until the chord instead.
+    #[test]
+    fn pair_five_keeps_its_phrase_and_holds_the_final_chord() {
+        let mut out = analysis(0.0, 215.0, vec![0.0, 2.0, 4.0]);
+        out.bpm = 143.0;
+        out.beat_interval = 0.42;
+        out.content_end = 215.0;
+        with_energy(&mut out, 215.0, |time| if time <= 213.5 { 0.8 } else { 0.1 });
+        let mut inc = analysis(0.0, 200.0, vec![0.0, 2.0, 4.0]);
+        with_energy(&mut inc, 200.0, |_| 0.8);
+        let mut plan = edge_plan(215.0, 3.36, 0.0);
+        respect_music_edges(&out, &inc, &mut plan);
+        let start = plan.transition_end_seconds - plan.fade_seconds;
+        assert!(
+            plan.fade_seconds >= 3.36 - 1e-6,
+            "pair 5's overlap fell to {:.2}s",
+            plan.fade_seconds
+        );
+        assert!((plan.fade_seconds - 4.86).abs() < 1e-6, "{:.2}s", plan.fade_seconds);
+        assert!((plan.outgoing_hold_seconds - 3.36).abs() < 1e-6);
+        assert!((start + plan.outgoing_hold_seconds - 213.5).abs() < 1e-6);
+        record_transition_edges(&out, &inc, &plan);
+        let edges = last_transition_edges();
+        assert!(edges.cold_ending, "{edges:?}");
+        assert!(!edges.clipped_final_chord, "{edges:?}");
+    }
+
+    #[test]
+    fn a_cold_ending_keeps_its_effect_inside_the_decay() {
+        let mut out = analysis(0.0, 215.0, vec![0.0, 2.0, 4.0]);
+        out.bpm = 143.0;
+        out.beat_interval = 0.42;
+        out.content_end = 215.0;
+        with_energy(&mut out, 215.0, |time| if time <= 213.5 { 0.8 } else { 0.1 });
+        let mut inc = analysis(0.0, 200.0, vec![0.0, 2.0, 4.0]);
+        with_energy(&mut inc, 200.0, |_| 0.8);
+        let mut plan = edge_plan(215.0, 6.0, 0.0);
+        plan.style = TransitionStyle::EchoOut;
+        plan.effect_seconds = 3.0;
+        plan.effect_start_seconds = 209.0;
+        respect_music_edges(&out, &inc, &mut plan);
+        let chord = final_chord_attack(&out).expect("the fixture ends on a chord");
+        // The effect dresses the ending, not the phrase that leads into it.
+        assert!((plan.effect_seconds - 1.5).abs() < 1e-6, "{:.2}s", plan.effect_seconds);
+        assert!(plan.effect_start_seconds >= chord - 1e-6);
+        assert!(
+            (plan.effect_start_seconds + plan.effect_seconds - 215.0).abs() < 1e-3,
+            "the effect no longer ends with the record"
+        );
     }
 
     #[test]
@@ -4281,8 +4394,10 @@ mod tests {
         let mut plan = edge_plan(49.0, 6.0, 0.0);
         respect_music_edges(&out, &inc, &mut plan);
         assert!((plan.transition_end_seconds - 50.0).abs() < 1e-6);
+        let chord = final_chord_attack(&out).expect("the fixture ends on a chord");
         let start = plan.transition_end_seconds - plan.fade_seconds;
-        assert!(start + 0.15 >= 44.0, "start {start:.2}s clips the chord");
+        assert!(plan.fade_seconds >= 4.0);
+        assert!((start + plan.outgoing_hold_seconds - chord).abs() < 1e-6);
     }
 
 }

@@ -132,6 +132,13 @@ pub struct TransitionPlan {
     pub vocal_overlap: f64,
     /// Explicit fade length for this pair; 0 = engine's crossfade window.
     pub fade_seconds: f64,
+    /// Seconds from the blend start during which the outgoing stays at unity
+    /// before it begins to fall; 0 = the normal equal-power crossing.
+    ///
+    /// A cold ending sets this to a phrase so the final chord is struck at
+    /// unity and only its decay is faded through; the incoming entered a
+    /// phrase earlier and is rising underneath it.
+    pub outgoing_hold_seconds: f64,
     /// The effect's own window inside the blend, in seconds (0 = no effect).
     /// The technique only processes the outgoing deck over this last part;
     /// the incoming rises across the whole `fade_seconds` crossfade.
@@ -192,6 +199,7 @@ impl Default for TransitionPlan {
             filter_sweep: 0.0,
             vocal_overlap: 0.0,
             fade_seconds: 0.0,
+            outgoing_hold_seconds: 0.0,
             effect_seconds: 0.0,
             effect_start_seconds: 0.0,
             transition_end_seconds: 0.0,
@@ -444,10 +452,12 @@ fn dip_gain(progress: f64, plan: &TransitionPlan) -> f32 {
 ///   follows a cos fall over the same span the incoming is climbing. The two
 ///   move together. Holding the outgoing at unity until a late swap, then
 ///   dropping it, is a cut once the blend itself is short.
-fn automix_gains(progress: f64, plan: &TransitionPlan) -> (f32, f32) {
+fn automix_gains(progress: f64, plan: &TransitionPlan, hold: f64) -> (f32, f32) {
     let p = progress.clamp(0.0, 1.0);
     let swap = plan.bass_swap_fraction.clamp(0.15, 0.92);
-    let bed_end = plan.bed_fraction.clamp(0.05, swap - 0.02);
+    // A cold ending holds the outgoing until its final chord even through the
+    // DJ bed's own fall point: the chord has to be struck at unity.
+    let bed_end = plan.bed_fraction.clamp(0.05, swap - 0.02).max(hold).clamp(0.05, 0.95);
     let bed = db_to_gain(plan.bed_gain_db).clamp(0.02, 0.5);
     let attack = if plan.fade_seconds > 0.0 {
         (BED_ATTACK_SECONDS / plan.fade_seconds).clamp(0.004, 0.12)
@@ -467,6 +477,51 @@ fn automix_gains(progress: f64, plan: &TransitionPlan) -> (f32, f32) {
         (t * core::f64::consts::PI / 2.0).cos()
     };
     ((rise * dip_gain(p, plan) as f64) as f32, fall as f32)
+}
+
+/// The incoming's level under the held outgoing during a cold ending's phrase,
+/// as a linear gain (−12 dB). The next record has to be audible under the final
+/// chord, but an equal-power rise across the whole blend would have it at 0.7
+/// by the time the chord is struck — a +2 dB lift exactly where the listener is
+/// paying attention to the ending. Rising to an underlay first keeps that below
+/// a decibel and still lets the incoming take over across the decay.
+const COLD_END_UNDERLAY: f64 = 0.25;
+
+/// The `(rise, fall)` pair when a cold ending holds the outgoing at unity until
+/// its final chord, at `hold` (a fraction of the fade).
+///
+/// Before the chord the outgoing is untouched and the incoming lifts gently to
+/// the underlay; from the chord the two cross over an equal-power fall that
+/// ends exactly with the record, so the chord's attack is at unity and its decay
+/// carries the incoming up. The summed power stays within about 0.5 dB of unity
+/// across the hold and the crossing.
+fn cold_end_gains(progress: f64, hold: f64) -> (f32, f32) {
+    let p = progress.clamp(0.0, 1.0);
+    let h = hold.clamp(0.0, 0.95);
+    if h <= 0.0 {
+        return fade_gains(p, false);
+    }
+    if p <= h {
+        // The chord is still ahead: the outgoing is at unity and the next
+        // record is only establishing itself underneath it.
+        let rise = COLD_END_UNDERLAY * smoothstep(p / h);
+        return (rise as f32, 1.0);
+    }
+    let angle = ((p - h) / (1.0 - h)) * core::f64::consts::FRAC_PI_2;
+    let rise = COLD_END_UNDERLAY + (1.0 - COLD_END_UNDERLAY) * angle.sin();
+    (rise as f32, angle.cos() as f32)
+}
+
+/// A plan's hold as a fraction of the fade actually being played. The engine's
+/// span can be shorter than the plan's `fade_seconds` (a short incoming is
+/// capped at a third of itself), and the hold is anchored to the blend start,
+/// not to the plan.
+fn hold_fraction(plan: &TransitionPlan, fade_seconds: f64) -> f64 {
+    if fade_seconds <= 0.0 {
+        0.0
+    } else {
+        (plan.outgoing_hold_seconds / fade_seconds).clamp(0.0, 0.95)
+    }
 }
 
 /// The `(rise, fall)` gain pair for fade progress `p`.
@@ -2589,8 +2644,15 @@ impl MixerState {
                 .as_ref()
                 .map(|voice| voice.emitted_dev_frames)
                 .unwrap_or(0);
-            let (rise, fall) =
-                fade_gains((played as f64 / fade as f64).clamp(0.0, 1.0), false);
+            let (rise, fall) = {
+                let p = (played as f64 / fade as f64).clamp(0.0, 1.0);
+                let hold = hold_fraction(&t.plan, fade as f64 / self.device_rate as f64);
+                if hold > 0.0 {
+                    cold_end_gains(p, hold)
+                } else {
+                    fade_gains(p, false)
+                }
+            };
             if let Some(current) = &mut self.current {
                 current.gain = fall;
                 current.filter.open();
@@ -2635,6 +2697,11 @@ impl MixerState {
         };
         let plan = self.transition.as_ref().map(|t| (t.plan.clone(), t.swap));
         let swap = plan.as_ref().is_some_and(|(_, swap)| *swap);
+        let span_seconds = span as f64 / self.device_rate as f64;
+        let hold = plan
+            .as_ref()
+            .map(|(plan, _)| hold_fraction(plan, span_seconds))
+            .unwrap_or(0.0);
         let dj = plan.as_ref().is_some_and(|(plan, _)| {
             !swap
                 && plan.bed_fraction > 0.0
@@ -2645,13 +2712,18 @@ impl MixerState {
         });
         // A swap needs the linear pair. A plain crossfade needs equal-power.
         // A DJ blend holds the outgoing record up and brings the next one in
-        // underneath. The tempo stretch is *held* here — walking it during the
-        // fade is how two matched grids drift into a flam. It glides home
-        // after the blend, on the promoted voice.
-        let (rise, fall) = if dj {
-            automix_gains(p, &plan.as_ref().unwrap().0)
+        // underneath. A cold ending holds the outgoing until its final chord
+        // and crosses over the decay. The tempo stretch is *held* here —
+        // walking it during the fade is how two matched grids drift into a
+        // flam. It glides home after the blend, on the promoted voice.
+        let (rise, fall) = if swap {
+            fade_gains(p, true)
+        } else if dj {
+            automix_gains(p, &plan.as_ref().unwrap().0, hold)
+        } else if hold > 0.0 {
+            cold_end_gains(p, hold)
         } else {
-            fade_gains(p, swap)
+            fade_gains(p, false)
         };
         if let (Some(current), Some(incoming), Some((plan, _))) =
             (&mut self.current, &mut self.incoming, plan)
@@ -4265,6 +4337,7 @@ mod tests {
         style: TransitionStyle,
         outgoing_path: &std::path::Path,
         incoming_path: &std::path::Path,
+        hold_seconds: f64,
     ) -> RenderedTransition {
         const RATE: u32 = 48_000;
         const BLOCK: usize = 512;
@@ -4276,6 +4349,7 @@ mod tests {
             style,
             beat_seconds: BEAT,
             fade_seconds: FADE_SECONDS,
+            outgoing_hold_seconds: hold_seconds,
             effect_seconds: technique_window,
             effect_start_seconds: FADE_SECONDS - technique_window,
             transition_end_seconds: FADE_SECONDS,
@@ -4308,12 +4382,17 @@ mod tests {
         let mut in_raw = Vec::with_capacity(fade_frames * 2);
         let mut emitted_in = 0u64;
         let mut done = 0usize;
+        let hold = hold_fraction(&plan, FADE_SECONDS);
         while done < fade_frames {
             let p = done as f64 / fade_frames as f64;
             let (rise, fall) = if style.is_effect() || style == TransitionStyle::EqualPower {
-                fade_gains(p, false)
+                if hold > 0.0 {
+                    cold_end_gains(p, hold)
+                } else {
+                    fade_gains(p, false)
+                }
             } else {
-                automix_gains(p, &plan)
+                automix_gains(p, &plan, hold)
             };
             let a = outgoing.pull(BLOCK, RATE);
             let mut out = vec![0.0f32; BLOCK * 2];
@@ -4470,7 +4549,7 @@ mod tests {
             TransitionStyle::DjBlend,
             TransitionStyle::DjFilter,
         ] {
-            let rendered = render_transition_style(style, &outgoing, &incoming);
+            let rendered = render_transition_style(style, &outgoing, &incoming, 0.0);
             let frames = rendered.fade_frames;
             let first_in = rms_window(&rendered.incoming, 0, 480);
             assert!(
@@ -4556,6 +4635,64 @@ mod tests {
         }
     }
 
+
+    /// E-2 in numbers: a cold ending holds the outgoing through its final
+    /// chord and enters the next record underneath it, so the summed level does
+    /// not lift at the chord and then has a decay to cross over. The gate is the
+    /// same B gate — no dip below the quieter record, no rise above the louder
+    /// one — on the new hold shape.
+    #[test]
+    fn a_cold_ending_renders_flat_through_its_chord() {
+        const RATE: usize = 48_000;
+        let dir =
+            std::env::temp_dir().join(format!("bitchord-mixer-cold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let outgoing = dir.join("out.wav");
+        let incoming = dir.join("in.wav");
+        noise_wav(&outgoing, 0.0, 12.0, 0.5, 0x2468_ACE0);
+        noise_wav(&incoming, 1.5, 30.0, 0.5, 0x1357_9BDF);
+        crate::playback_regions::put(
+            incoming.display().to_string(),
+            crate::PlaybackRegions {
+                audible_start_seconds: 1.5,
+                audible_end_seconds: None,
+                excluded: Vec::new(),
+            },
+        );
+        // Pair 5's phrase inside the 8 s harness: the chord is struck at 3.36 s
+        // and the remaining 4.64 s is the crossing.
+        let hold = 3.36;
+        let rendered =
+            render_transition_style(TransitionStyle::EqualPower, &outgoing, &incoming, hold);
+        let frames = rendered.fade_frames;
+        let chord = (hold * RATE as f64) as usize;
+        let at_chord = rms_window(&rendered.mixed, chord, 480);
+        let out_chord = rms_window(&rendered.outgoing, chord, 480).max(1e-9);
+        let chord_db = 20.0 * (at_chord / out_chord).log10();
+        assert!(
+            (-1.0..1.6).contains(&chord_db),
+            "the chord frame is {chord_db:+.2} dB against the outgoing record — the hold is not flat"
+        );
+
+        let window = 3 * RATE;
+        let span = frames.saturating_sub(window);
+        let mut dip = 0.0f64;
+        let mut rise = 0.0f64;
+        let mut at = 0;
+        while at <= span {
+            let m = 20.0 * rms_window(&rendered.mixed, at, window).max(1e-9).log10();
+            let o = 20.0 * rms_window(&rendered.outgoing, at, window).max(1e-9).log10();
+            let i = 20.0 * rms_window(&rendered.incoming, at, window).max(1e-9).log10();
+            dip = dip.min(m - o.min(i));
+            rise = rise.max(m - o.max(i));
+            at += 4_800;
+        }
+        println!(
+            "ColdEnd: chord {chord}f {chord_db:+.2} dB, 3s dip {dip:.2} dB, rise {rise:.2} dB"
+        );
+        assert!(dip > -3.0, "the cold ending dipped {dip:.2} dB");
+        assert!(rise < 2.0, "the cold ending rose {rise:.2} dB");
+    }
 
     /// How far the level moved from the first 100 ms window, and the peak.
     fn level_spread(samples: &[f32]) -> (f64, f32) {
@@ -6249,6 +6386,50 @@ mod tests {
         );
     }
 
+    /// E-2: the outgoing holds unity through the final chord's attack, the
+    /// incoming waits underneath, and the two cross over the decay without the
+    /// summed level lifting or dipping by even a decibel.
+    #[test]
+    fn a_cold_ending_holds_the_chord_at_unity() {
+        // Pair 5's shape: a 3.36 s phrase inside a 4.86 s blend, so the chord's
+        // decay is the last 1.5 s.
+        let hold = 3.36 / 4.86;
+        let (rise, fall) = cold_end_gains(hold, hold);
+        assert!(
+            (fall - 1.0).abs() < 1e-6,
+            "the final chord is faded through: {fall}"
+        );
+        assert!(
+            (rise - COLD_END_UNDERLAY as f32).abs() < 1e-6,
+            "the incoming is not underneath at the chord: {rise}"
+        );
+        // It has started to leave immediately after the chord.
+        let (_, after) = cold_end_gains(hold + 0.02, hold);
+        assert!(
+            after < 0.999,
+            "the outgoing did not begin to fall after the chord: {after}"
+        );
+        // No +3 dB bump while the outgoing is held: the underlay is what keeps
+        // the sum near unity, and this is the assertion that stops it drifting.
+        let mut worst_db = 0.0f64;
+        for step in 0..=1000 {
+            let (rise, fall) = cold_end_gains(step as f64 / 1000.0, hold);
+            let power = (rise as f64).powi(2) + (fall as f64).powi(2);
+            worst_db = worst_db.max(10.0 * power.log10().abs());
+        }
+        assert!(
+            worst_db < 1.0,
+            "the cold-ending hold moved the summed level by {worst_db} dB"
+        );
+        let (end_rise, end_fall) = cold_end_gains(1.0, hold);
+        assert!((end_rise - 1.0).abs() < 1e-6 && end_fall.abs() < 1e-6);
+        // A plan without a hold keeps the plain equal-power pair.
+        let (plain_rise, plain_fall) = cold_end_gains(0.5, 0.0);
+        let (fade_rise, fade_fall) = fade_gains(0.5, false);
+        assert!((plain_rise - fade_rise).abs() < 1e-6);
+        assert!((plain_fall - fade_fall).abs() < 1e-6);
+    }
+
     /// Bed, then a rise, then the outgoing lets go. The incoming is already
     /// audible while the outgoing is still at full level, and a one-beat dip
     /// sits just before the swap.
@@ -6268,7 +6449,7 @@ mod tests {
             ..TransitionPlan::default()
         };
         let bed = 10.0_f64.powf(-14.0 / 20.0) as f32;
-        let (open_rise, open_fall) = automix_gains(0.0, &plan);
+        let (open_rise, open_fall) = automix_gains(0.0, &plan, 0.0);
         assert!(
             open_rise.abs() < 1e-4,
             "the bed eases in from silence, got {open_rise}"
@@ -6278,7 +6459,7 @@ mod tests {
             "the outgoing stays up, got {open_fall}"
         );
 
-        let (bed_rise, bed_fall) = automix_gains(0.2, &plan);
+        let (bed_rise, bed_fall) = automix_gains(0.2, &plan, 0.0);
         assert!(
             bed_rise > bed * 0.5 && bed_rise < 0.45,
             "early in the blend the incoming is underneath, got {bed_rise}"
@@ -6288,7 +6469,7 @@ mod tests {
             "the outgoing is still the record"
         );
 
-        let (late_rise, late_fall) = automix_gains(0.95, &plan);
+        let (late_rise, late_fall) = automix_gains(0.95, &plan, 0.0);
         assert!(
             late_rise > 0.95,
             "after the swap the incoming is the record, got {late_rise}"
@@ -6301,14 +6482,14 @@ mod tests {
         // The dip is on the incoming, just before the swap, and the outgoing
         // gain at that moment is still full. Sample a half-width either side
         // of the notch so the comparison is the dip, not the climb into it.
-        let before = automix_gains(0.54, &plan).0;
-        let notch = automix_gains(0.58, &plan).0;
-        let after = automix_gains(0.70, &plan).0;
+        let before = automix_gains(0.54, &plan, 0.0).0;
+        let notch = automix_gains(0.58, &plan, 0.0).0;
+        let after = automix_gains(0.70, &plan, 0.0).0;
         assert!(
             notch < before * 0.85 && after > notch,
             "expected a dip then a recovery, got {before} -> {notch} -> {after}"
         );
-        let outgoing_at_dip = automix_gains(0.58, &plan).1;
+        let outgoing_at_dip = automix_gains(0.58, &plan, 0.0).1;
         assert!(
             outgoing_at_dip > 0.75,
             "the dip is on the incoming; the outgoing is still leaving slowly, got {outgoing_at_dip}"
