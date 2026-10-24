@@ -39,6 +39,9 @@ final class VideoSideController {
     private(set) var state: State = .idle
     /// The side currently attached, for the surface's aspect ratio and title.
     private(set) var side: ResolvedVideoSide?
+    /// Song time to picture time, when the picture is another upload of the
+    /// song with its own cut (an intro, an interlude). Nil: the same timeline.
+    @ObservationIgnored private var timeMap: VideoVersionAlignment.Map?
 
     @ObservationIgnored let player = AVPlayer()
     @ObservationIgnored private var clock: VideoClock
@@ -85,11 +88,12 @@ final class VideoSideController {
     /// Attach the side for the current track, or nil to go back to the artwork.
     /// Attaching the same URL again is a no-op, so a view can call this on every
     /// body pass.
-    func attach(_ side: ResolvedVideoSide?) {
+    func attach(_ side: ResolvedVideoSide?, timeMap: VideoVersionAlignment.Map? = nil) {
         guard let side, let url = side.url.flatMap(URL.init(string:)) else {
             detach()
             return
         }
+        self.timeMap = timeMap
         if self.side?.url == side.url, player.currentItem != nil {
             // Keep the current item, including a failed one: a repeated body
             // pass must not rebuild (and retry) a video that already refused.
@@ -135,6 +139,7 @@ final class VideoSideController {
     func detach() {
         tearDownItem()
         side = nil
+        timeMap = nil
         state = .idle
     }
 
@@ -151,7 +156,13 @@ final class VideoSideController {
         guard state == .ready, let item = player.currentItem, item.status == .readyToPlay, !isSeeking else {
             return
         }
-        let engine = clock.position()
+        // The engine's position is song time; the picture runs on its own
+        // upload's timeline when the two cuts differ. Within a segment the map
+        // has slope one, so the rate policy below is unchanged, and crossing
+        // into the next segment is a drift past the threshold: one seek over
+        // the interlude, aimed ahead as any other.
+        let songTime = clock.position()
+        let engine = timeMap.map { $0.videoTime(at: songTime) } ?? songTime
         let video = player.currentTime().seconds
         guard engine.isFinite, video.isFinite else { return }
         let now = CACurrentMediaTime()

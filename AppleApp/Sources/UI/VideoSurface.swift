@@ -60,10 +60,6 @@ final class VideoPlayback {
         reconcile()
     }
 
-    /// A music video's length may differ from the song's by this much and still
-    /// be laid over the song's own audio. More than this is an intro, a skit or
-    /// a longer ending, and the picture would run visibly out of step.
-    static let pictureOnlyDrift: Double = 2
 
     func setSurfaceVisible(_ visible: Bool, videoId: String?) {
         if visible {
@@ -122,45 +118,60 @@ final class VideoPlayback {
                 guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
                 self.resolvedId = id
                 self.resolveTask = nil
-                // The audit's art-track guard: a square picture is the sleeve,
-                // not a music video, even when it happens to be AVC/MP4.
-                if side.url != nil, side.looksLikeMusicVideo {
+                // The upload is itself a music video (and not a still image
+                // posted as one): same file, same timeline.
+                if side.url != nil, side.looksLikeMusicVideo, !side.isStillImage {
                     PlaybackDebugLog.shared.record("video: attaching the picture", about: id)
                     self.side = side
                     self.controller.attach(side)
                     return
                 }
-                // An art track: its picture is the sleeve, and the music video is
-                // another upload. Find it the way upstream does.
-                guard let track = self.hooks?.track(),
-                      let version = await Self.findVideoVersion(videoId: id, track: track),
-                      !Task.isCancelled, self.mountedId == id, self.gate.canRequest else {
+                // An art track (or a still picture): the music video is another
+                // upload, with its own cut. Find it, check it is moving
+                // picture, and map the song onto it.
+                guard let track = self.hooks?.track() else { return }
+                let candidates = await Self.findVideoVersions(videoId: id, track: track)
+                guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
+                var fallback: VideoVersion?
+                for candidate in candidates.prefix(3) {
+                    let videoSide = try await InnertubeStreamResolver.shared.resolveVideo(videoId: candidate.videoId)
+                    guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
+                    guard videoSide.url != nil, videoSide.looksLikeMusicVideo, !videoSide.isStillImage else {
+                        PlaybackDebugLog.shared.record(
+                            "video: \(candidate.videoId) (\(candidate.type ?? "untyped")) is not moving picture; next", about: id
+                        )
+                        continue
+                    }
+                    if fallback == nil { fallback = candidate }
+                    PlaybackDebugLog.shared.record(
+                        "video: aligning the song with \(candidate.videoId) (\(candidate.type ?? "untyped"), \(candidate.durationText ?? "?"))",
+                        about: id
+                    )
+                    let map = await VideoVersionAlignment.shared.map(songId: id, videoId: candidate.videoId)
+                    guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
+                    if let map, map.confident {
+                        PlaybackDebugLog.shared.record(
+                            "video: picture of \(candidate.videoId) over the song, aligned: \(map.summary)", about: id
+                        )
+                        self.side = videoSide
+                        self.controller.attach(videoSide, timeMap: map)
+                        return
+                    }
+                }
+                guard let fallback else {
                     PlaybackDebugLog.shared.record("video: no music video for this song", about: id)
                     self.side = nil
                     self.controller.detach()
                     return
                 }
-                let drift = abs(version.seconds - track.seconds)
-                if track.seconds > 0, version.seconds > 0, drift <= Self.pictureOnlyDrift {
-                    let videoSide = try await InnertubeStreamResolver.shared.resolveVideo(videoId: version.videoId)
-                    guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
-                    guard videoSide.url != nil, videoSide.looksLikeMusicVideo else {
-                        PlaybackDebugLog.shared.record("video: music video \(version.videoId) has no usable picture", about: id)
-                        return
-                    }
-                    PlaybackDebugLog.shared.record(
-                        "video: picture of \(version.videoId) over the song (drift \(String(format: "%.1f", drift))s)",
-                        about: id
-                    )
-                    self.side = videoSide
-                    self.controller.attach(videoSide)
-                } else {
-                    PlaybackDebugLog.shared.record(
-                        "video: playing the music video \(version.videoId) instead (its cut is \(String(format: "%.0f", version.seconds))s, the song \(String(format: "%.0f", track.seconds))s)",
-                        about: id
-                    )
-                    self.hooks?.playVideoVersion(version.videoId, version.durationText)
-                }
+                // A music video exists but is not this song's audio under a
+                // different cut (a remix, a live take, a re-edit): YouTube
+                // Music's Song/Video switch plays the video's own audio, and
+                // so does this — picture and sound from one file.
+                PlaybackDebugLog.shared.record(
+                    "video: \(fallback.videoId) does not align with the song; playing the music video itself", about: id
+                )
+                self.hooks?.playVideoVersion(fallback.videoId, fallback.durationText)
             } catch {
                 PlaybackDebugLog.shared.record("video: resolve failed: \(error)", about: id)
                 guard !Task.isCancelled, self.mountedId == id else { return }
@@ -191,26 +202,26 @@ final class VideoPlayback {
         controller.detach()
     }
 
-    private struct VideoVersion {
+    private struct VideoVersion: Decodable {
         let videoId: String
+        let title: String
         let durationText: String?
-        var seconds: Double {
-            QueueEntry.youtube(videoId: videoId, title: "", artist: "", durationText: durationText).durationSeconds
-        }
+        let type: String?
     }
 
-    private static func findVideoVersion(
+    private static func findVideoVersions(
         videoId: String, track: (title: String, artist: String, seconds: Double, durationText: String?)
-    ) async -> VideoVersion? {
+    ) async -> [VideoVersion] {
         await withCheckedContinuation { continuation in
             VideoVersionBridge.shared.find(
                 videoId: videoId, title: track.title, artist: track.artist,
                 durationText: track.durationText ?? (track.seconds > 0 ? QueueEntry.formatDuration(track.seconds) : nil),
-                callback: VideoVersionAdapter { found, durationText, message in
+                callback: VideoVersionAdapter { json, message in
                     if let message {
                         PlaybackDebugLog.shared.record("video: music-video search failed: \(message)", about: videoId)
                     }
-                    continuation.resume(returning: found.map { VideoVersion(videoId: $0, durationText: durationText) })
+                    let found = json.flatMap { try? JSONDecoder().decode([VideoVersion].self, from: Data($0.utf8)) } ?? []
+                    continuation.resume(returning: found)
                 }
             )
         }
@@ -218,8 +229,10 @@ final class VideoPlayback {
 }
 
 private final class VideoVersionAdapter: VideoVersionBridgeVideoVersionCallback {
-    private let handler: (String?, String?, String?) -> Void
-    init(_ handler: @escaping (String?, String?, String?) -> Void) { self.handler = handler }
+    private let handler: (String?, String?) -> Void
+    init(_ handler: @escaping (String?, String?) -> Void) { self.handler = handler }
+    func onResult(json: String?, message: String?) { handler(json, message) }
+}
     func onResult(videoId: String?, durationText: String?, message: String?) { handler(videoId, durationText, message) }
 }
 
