@@ -3296,6 +3296,13 @@ mod tests {
         use super::{plan_automix_impl_with_tier, AutomixTier};
         use std::path::PathBuf;
 
+        // The planner's own `log_plan` lines carry the evidence behind each
+        // row of the table (bpm, confidence, downbeats, key, content end). They
+        // are the only way to tell "this pair has no tempo" from "this file did
+        // not decode", which is exactly the distinction the Opus duration bug
+        // hid for a whole scorecard run.
+        let _ = env_logger::try_init();
+
         let root = std::env::var("AUTOMIX_CORPUS")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {

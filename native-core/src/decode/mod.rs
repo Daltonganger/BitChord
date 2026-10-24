@@ -51,7 +51,7 @@ use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+use symphonia::core::formats::{FormatOptions, FormatReader, MediaInfo, SeekMode, SeekTo};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
@@ -326,6 +326,24 @@ fn codec_label(
     "AAC".into()
 }
 
+/// The length the container declares for the media as a whole.
+///
+/// Matroska is the container that made this necessary: its reader puts the
+/// segment's `Duration` on `MediaInfo` and leaves the *track's* duration unset,
+/// which is exactly the shape of every track in the app's stream cache — Opus
+/// in WebM under an `.m4a` name. Without this fallback those tracks opened with
+/// `duration = None`, and the analysis path takes that as "not a readable audio
+/// file": it skips the whole-track pass, so the plan has no tempo, no key and no
+/// energy curve and every transition between two cached tracks can only be a
+/// plain crossfade. The track's own value still wins when a container sets one.
+fn container_duration_secs(media: &MediaInfo) -> Option<f64> {
+    let (Some(time_base), Some(duration)) = (media.time_base, media.duration) else {
+        return None;
+    };
+    let seconds = time_base.calc_duration_saturating(duration).as_secs_f64();
+    (seconds.is_finite() && seconds > 0.0).then_some(seconds)
+}
+
 impl SymphoniaDecoder {
     pub fn open(
         source: &SourceKind,
@@ -438,7 +456,8 @@ impl SymphoniaDecoder {
                 .num_frames
                 .filter(|&f| f > 0)
                 .map(|f| f as f64 / sample_rate as f64),
-        };
+        }
+        .or_else(|| container_duration_secs(format.media_info()));
 
         let decoder = open_audio_decoder(&audio)?;
         let sample_rate = decoder.codec_params().sample_rate.unwrap_or(sample_rate);
@@ -1376,6 +1395,139 @@ mod tests {
     }
 
     use super::*;
+
+    /// A minimal Matroska/WebM header: an EBML header, a Segment whose Info
+    /// carries the length, one Opus track, and an empty cluster.
+    ///
+    /// This is the shape the app's stream cache holds — Opus in WebM under an
+    /// `.m4a` name — and the shape that used to report no duration at all: the
+    /// MKV reader declares the segment's length on `MediaInfo`
+    /// (`symphonia-format-mkv/src/demuxer.rs`, `with_duration`) and leaves the
+    /// *track's* duration unset, which is the field this decoder looked at.
+    /// Nothing is decoded here, so the bytes are generated rather than a
+    /// recording committed to the repository.
+    fn webm_opus_bytes(duration_seconds: Option<f32>) -> Vec<u8> {
+        // EBML variable-length size: a leading marker bit, then the value.
+        fn size(len: usize) -> Vec<u8> {
+            match len {
+                0..=0x7E => vec![0x80 | len as u8],
+                0x7F..=0x3FFE => vec![0x40 | (len >> 8) as u8, len as u8],
+                _ => vec![0x20 | (len >> 16) as u8, (len >> 8) as u8, len as u8],
+            }
+        }
+        fn element(id: &[u8], payload: &[u8]) -> Vec<u8> {
+            let mut out = id.to_vec();
+            out.extend(size(payload.len()));
+            out.extend_from_slice(payload);
+            out
+        }
+        fn uint(value: u64) -> Vec<u8> {
+            let bytes = value.to_be_bytes();
+            let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(7);
+            bytes[first..].to_vec()
+        }
+
+        let mut header = Vec::new();
+        header.extend(element(&[0x42, 0x86], &uint(1))); // EBMLVersion
+        header.extend(element(&[0x42, 0xF7], &uint(1))); // EBMLReadVersion
+        header.extend(element(&[0x42, 0xF2], &uint(4))); // EBMLMaxIDLength
+        header.extend(element(&[0x42, 0xF3], &uint(8))); // EBMLMaxSizeLength
+        header.extend(element(&[0x42, 0x82], b"webm")); // DocType
+        header.extend(element(&[0x42, 0x87], &uint(4))); // DocTypeVersion
+        header.extend(element(&[0x42, 0x85], &uint(2))); // DocTypeReadVersion
+        let header = element(&[0x1A, 0x45, 0xDF, 0xA3], &header);
+
+        let mut info = Vec::new();
+        info.extend(element(&[0x2A, 0xD7, 0xB1], &uint(1_000_000))); // TimestampScale
+        info.extend(element(&[0x4D, 0x80], b"bitchord-test")); // MuxingApp
+        info.extend(element(&[0x57, 0x41], b"bitchord-test")); // WritingApp
+        if let Some(seconds) = duration_seconds {
+            // Segment ticks: milliseconds at the default timestamp scale.
+            info.extend(element(&[0x44, 0x89], &(seconds * 1000.0).to_be_bytes())); // Duration
+        }
+        let info = element(&[0x15, 0x49, 0xA9, 0x66], &info);
+
+        let mut audio = Vec::new();
+        audio.extend(element(&[0xB5], &48_000f64.to_be_bytes())); // SamplingFrequency
+        audio.extend(element(&[0x9F], &uint(2))); // Channels
+
+        // OpusHead: version 1, two channels, 312 frames of pre-skip at 48 kHz,
+        // no output gain, mapping family 0.
+        let mut opus_head = b"OpusHead".to_vec();
+        opus_head.extend([1, 2]);
+        opus_head.extend(312u16.to_le_bytes());
+        opus_head.extend(48_000u32.to_le_bytes());
+        opus_head.extend([0, 0, 0]);
+
+        let mut track = Vec::new();
+        track.extend(element(&[0xD7], &uint(1))); // TrackNumber
+        track.extend(element(&[0x73, 0xC5], &uint(1))); // TrackUid
+        track.extend(element(&[0x83], &uint(2))); // TrackType: audio
+        track.extend(element(&[0x86], b"A_OPUS")); // CodecID
+        track.extend(element(&[0x63, 0xA2], &opus_head)); // CodecPrivate
+        track.extend(element(&[0xE1], &audio)); // Audio
+        let tracks = element(&[0x16, 0x54, 0xAE, 0x6B], &element(&[0xAE], &track));
+
+        // An empty cluster, so the reader has somewhere to descend after the
+        // header elements it scans.
+        let cluster = element(&[0xE7], &element(&[0xE7], &uint(0)));
+
+        let mut segment = Vec::new();
+        segment.extend(info);
+        segment.extend(tracks);
+        segment.extend(cluster);
+        let segment = element(&[0x18, 0x53, 0x80, 0x67], &segment);
+
+        let mut file = header;
+        file.extend(segment);
+        file
+    }
+
+    /// Writes generated bytes under a name whose extension says something else.
+    ///
+    /// The `.m4a` name is the app's cache convention, not this fixture being
+    /// clever: the probe reads the bytes, so the container is found regardless,
+    /// and a future change that trusted the extension would break the app's
+    /// whole stream cache.
+    fn write_generated_webm(name: &str, duration_seconds: Option<f32>) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("bitcord-decode-{name}.m4a"));
+        std::fs::write(&path, webm_opus_bytes(duration_seconds)).unwrap();
+        path
+    }
+
+    fn open_webm(path: &std::path::Path) -> SymphoniaDecoder {
+        SymphoniaDecoder::open_available(
+            &SourceKind::parse(&path.to_string_lossy()),
+            &Default::default(),
+        )
+        .expect("a generated WebM/Opus header must open")
+    }
+
+    #[test]
+    fn opus_in_webm_reports_the_segments_length() {
+        let path = write_generated_webm("segment-duration", Some(187.8));
+        let decoder = open_webm(&path);
+        assert_eq!(decoder.sample_rate(), 48_000);
+        assert_eq!(
+            decoder.duration_seconds(),
+            Some(187.8),
+            "the segment's Duration is the only length a Matroska file declares"
+        );
+        drop(decoder);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn opus_in_webm_without_a_declared_length_reports_none() {
+        // The negative side of the same rule: this decoder may not invent a
+        // length for a container that declares none, because a wrong one moves
+        // the mix-out anchor and the audible symptom is a track faded early.
+        let path = write_generated_webm("no-duration", None);
+        let decoder = open_webm(&path);
+        assert_eq!(decoder.duration_seconds(), None);
+        drop(decoder);
+        std::fs::remove_file(&path).ok();
+    }
 
     #[test]
     fn compressed_seek_reports_the_next_audible_frame_before_preroll_is_read() {

@@ -664,7 +664,8 @@ pub fn plan_pair(
 fn log_plan(outgoing: &Analysis, incoming: &Analysis, plan: &TransitionPlan, tier: &str) {
     let grid = |a: &Analysis| {
         format!(
-            "bpm={:.1} conf={:.2} beat={:.3} downbeats={} audible={:.1} content_end={:.1} dur={:.1} vocal_p={:.2}",
+            "bpm={:.1} conf={:.2} beat={:.3} downbeats={} audible={:.1} content_end={:.1} dur={:.1} vocal_p={:.2} \
+             key={}@{:.2}",
             a.bpm,
             a.beat_confidence,
             a.beat_interval,
@@ -673,6 +674,8 @@ fn log_plan(outgoing: &Analysis, incoming: &Analysis, plan: &TransitionPlan, tie
             a.content_end,
             a.duration,
             a.vocal_probability,
+            if a.key.is_empty() { "?" } else { a.key.as_str() },
+            a.key_confidence,
         )
     };
     log::info!(
