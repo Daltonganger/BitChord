@@ -304,12 +304,38 @@ pub fn constrain(
     if gapless {
         plan.style = crate::TransitionStyleRec::Gapless;
     }
+    // F's bridge is anchored to a measured unit of the record's own outro. A
+    // guard that moves the ending, delays the blend start past the unit, or
+    // excludes audio inside it invalidates the loop; revert the extension
+    // rather than leave a blend waiting for music that will not be served.
+    let mut reverted_bridge = 0.0;
+    if plan.bridge_seconds > 0.0 && plan.bridge_repeats > 0 {
+        let extension = plan.bridge_seconds * plan.bridge_repeats as f64;
+        let bridge_start = plan.bridge_start_seconds;
+        let bridge_end = bridge_start + plan.bridge_seconds;
+        let overlaps_exclusion = out
+            .excluded
+            .iter()
+            .any(|s| s.start_seconds < bridge_end && s.end_seconds > bridge_start);
+        let start_moved_past = anchor - fade > bridge_start + 0.05;
+        if anchor_moved || overlaps_exclusion || start_moved_past {
+            // The bottom of this function writes `anchor`/`fade`, so the
+            // revert has to move the locals as well as the plan's own fields.
+            anchor = (anchor - extension).max(0.0);
+            fade = (fade - extension).max(0.001);
+            plan.outgoing_hold_seconds = (plan.outgoing_hold_seconds - extension).max(0.0);
+            plan.bridge_start_seconds = 0.0;
+            plan.bridge_seconds = 0.0;
+            plan.bridge_repeats = 0;
+            reverted_bridge = extension;
+        }
+    }
     // A hold is anchored to the blend start. When a guard moves the start later
     // (a shorter fade), the time remaining before the protected chord shrinks
     // by the same amount — the chord itself has not moved. A moved anchor
     // abandons the hold instead: the chord it protected is no longer the end.
     if plan.outgoing_hold_seconds > 0.0 {
-        let moved = (plan.fade_seconds - fade).max(0.0);
+        let moved = ((plan.fade_seconds - reverted_bridge) - fade).max(0.0);
         plan.outgoing_hold_seconds =
             (plan.outgoing_hold_seconds - moved).clamp(0.0, (fade - 0.05).max(0.0));
         if anchor_moved {
@@ -628,6 +654,38 @@ mod tests {
         let safe = constrain(plan, out, PlaybackRegions::default(), 220.0, 200.0);
         assert_eq!(safe.transition_end_seconds, 200.0);
         assert_eq!(safe.outgoing_hold_seconds, 0.0);
+    }
+    #[test]
+    fn a_guard_that_excludes_the_bridge_unit_reverts_the_extension() {
+        let plan: crate::TransitionPlanRec = crate::mixer::TransitionPlan {
+            fade_seconds: 12.0,
+            transition_end_seconds: 104.0,
+            bridge_start_seconds: 96.0,
+            bridge_seconds: 4.0,
+            bridge_repeats: 1,
+            ..Default::default()
+        }
+        .into();
+        let clean = constrain(plan.clone(), PlaybackRegions::default(), PlaybackRegions::default(), 120.0, 90.0);
+        assert!((clean.transition_end_seconds - 104.0).abs() < 1e-6);
+        assert!((clean.fade_seconds - 12.0).abs() < 1e-6);
+        assert_eq!(clean.bridge_repeats, 1);
+        // A SponsorBlock segment inside the unit invalidates it: the end and
+        // fade return to the pre-bridge shape and no bridge is left behind.
+        let out = PlaybackRegions {
+            excluded: vec![PlaybackInterval {
+                start_seconds: 97.0,
+                end_seconds: 98.0,
+            }],
+            ..Default::default()
+        };
+        let safe = constrain(plan, out, PlaybackRegions::default(), 120.0, 90.0);
+        assert!((safe.transition_end_seconds - 100.0).abs() < 1e-6, "{safe:?}");
+        // The exclusion also shortens the remaining blend: [98, 100] is what
+        // is left after the skipped segment and the reverted unit.
+        assert!((safe.fade_seconds - 2.0).abs() < 1e-6, "{safe:?}");
+        assert_eq!(safe.bridge_repeats, 0);
+        assert_eq!(safe.bridge_seconds, 0.0);
     }
     #[test]
     fn insufficient_window_is_gapless_and_invalid_intervals_are_removed() {

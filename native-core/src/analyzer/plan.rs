@@ -628,6 +628,9 @@ pub fn plan_pair(
                 vocal_overlap: 0.0,
                 fade_seconds: GAPLESS_FADE_SECONDS,
                 outgoing_hold_seconds: 0.0,
+                bridge_start_seconds: 0.0,
+                bridge_seconds: 0.0,
+                bridge_repeats: 0,
                 effect_seconds: 0.0,
                 effect_start_seconds: 0.0,
                 transition_end_seconds: 0.0,
@@ -653,6 +656,7 @@ pub fn plan_pair(
     let mut plan = phrase_switch(&out, &inc)
         .unwrap_or_else(|| plan_from(&out, &inc, fade, allow_effects));
     respect_music_edges(&out, &inc, &mut plan);
+    apply_bridge(&out, &mut plan);
     record_transition_edges(&out, &inc, &plan);
     log_plan(&out, &inc, &plan, tier_label);
     plan
@@ -769,6 +773,9 @@ fn plain_fallback(fade: f64, outgoing: &Analysis) -> TransitionPlan {
         vocal_overlap: 0.0,
         fade_seconds: fade,
         outgoing_hold_seconds: 0.0,
+        bridge_start_seconds: 0.0,
+        bridge_seconds: 0.0,
+        bridge_repeats: 0,
         effect_seconds: 0.0,
         effect_start_seconds: 0.0,
         transition_end_seconds: end,
@@ -1784,6 +1791,9 @@ fn plan_from(
         vocal_overlap,
         fade_seconds,
         outgoing_hold_seconds: 0.0,
+        bridge_start_seconds: 0.0,
+        bridge_seconds: 0.0,
+        bridge_repeats: 0,
         effect_seconds: 0.0,
         effect_start_seconds: 0.0,
         transition_end_seconds: transition_start + fade_seconds,
@@ -1995,6 +2005,9 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
         vocal_overlap: 0.0,
         fade_seconds: fall,
         outgoing_hold_seconds: 0.0,
+        bridge_start_seconds: 0.0,
+        bridge_seconds: 0.0,
+        bridge_repeats: 0,
         effect_seconds: 0.0,
         effect_start_seconds: 0.0,
         transition_end_seconds: mix_end,
@@ -2183,6 +2196,9 @@ fn technique_plan(
         vocal_overlap: 0.0,
         fade_seconds: blend_fade,
         outgoing_hold_seconds: 0.0,
+        bridge_start_seconds: 0.0,
+        bridge_seconds: 0.0,
+        bridge_repeats: 0,
         effect_seconds,
         effect_start_seconds: (end - effect_seconds).max(0.0),
         transition_end_seconds: end,
@@ -2496,6 +2512,177 @@ fn respect_music_edges(outgoing: &Analysis, incoming: &Analysis, plan: &mut Tran
     if plan.effect_seconds > 0.0 {
         plan.effect_seconds = plan.effect_seconds.min(decay.max(0.1)).min(fade);
         plan.effect_start_seconds = (plan.transition_end_seconds - plan.effect_seconds).max(0.0);
+    }
+}
+
+/// F's bridge decision for one clean crossfade.
+#[derive(Clone, Copy, Debug)]
+struct BridgeUnit {
+    start: f64,
+    seconds: f64,
+    bars: usize,
+}
+
+/// The peak of the vocal mask in `[start, end]`, beside the mean
+/// [`vocal_activity_between`] returns. The UMX mask has a low instrumental
+/// floor (about 0.28 on the corpus), so "no voice" is a low peak as well as a
+/// low mean.
+fn vocal_peak_between(analysis: &Analysis, start: f64, end: f64) -> Option<f64> {
+    let mask = &analysis.vocal_activity_mask;
+    let curve = &analysis.energy_curve;
+    if mask.is_empty() || mask.len() != curve.len() || end <= start {
+        return None;
+    }
+    let mut peak = 0.0f64;
+    let mut seen = false;
+    for (index, value) in mask.iter().enumerate() {
+        let time = curve[index].time;
+        if !time.is_finite() || time < start || time > end || !value.is_finite() {
+            continue;
+        }
+        peak = peak.max(*value);
+        seen = true;
+    }
+    seen.then_some(peak)
+}
+
+/// The vocal ceiling for a bridge unit: mean and peak. The model's instrumental
+/// floor is about 0.28, so this admits an instrumental outro and rejects a
+/// sung one.
+const BRIDGE_VOCAL_MEAN_MAX: f64 = 0.35;
+const BRIDGE_VOCAL_PEAK_MAX: f64 = 0.55;
+
+/// F: the unit to loop, or why there is none.
+///
+/// Only a clean crossfade is eligible. The unit is a whole number of bars
+/// (two, or four on a record at 140 BPM or faster when the cap allows), starts
+/// on a phrase boundary, ends on a downbeat at or before the record's last
+/// chord (or its content end), is measured from the downbeats themselves, and
+/// is vocal-free. Nothing here is tuned to the corpus: the thresholds are the
+/// model's own floor and the 15 ms grid tolerance.
+fn bridge_unit(outgoing: &Analysis, plan: &TransitionPlan) -> Result<BridgeUnit, &'static str> {
+    if !(plan.reason.starts_with("crossfade:") || plan.reason.starts_with("cold ending:")) {
+        return Err("not a clean crossfade");
+    }
+    if outgoing.beat_confidence < 0.55 || beat_seconds_of(outgoing) <= 0.0 {
+        return Err("no confident downbeat grid");
+    }
+    let start = plan.transition_end_seconds - plan.fade_seconds;
+    let chord = final_chord_attack(outgoing);
+    // E-2's protected chord is the unit's ceiling. Without a hold a chord may
+    // still sit after the handover (an interior mix-out discards it); it only
+    // rules a unit out when it falls *inside* that unit, checked below.
+    let point = if plan.outgoing_hold_seconds > 0.0 {
+        chord
+            .map(|c| c.min(plan.transition_end_seconds))
+            .unwrap_or(plan.transition_end_seconds)
+    } else {
+        plan.transition_end_seconds
+    };
+    if point <= start + 0.5 || outgoing.downbeats.len() < 5 {
+        return Err("the blend is shorter than one unit");
+    }
+    let beat = beat_seconds_of(outgoing);
+    let fast = fold_tempo(outgoing.bpm) > 140.0;
+    let orders: &[usize] = if fast { &[4, 2] } else { &[2] };
+    let mut failure: &'static str = "no phrase-aligned unit after the blend start";
+    for &bars in orders {
+        let ideal = 4.0 * bars as f64 * beat;
+        if plan.fade_seconds + ideal > AUTO_TRANSITION_MAX_SECONDS {
+            failure = "the unit would push the fade past 12s";
+            continue;
+        }
+        // The last eligible unit, closest to the record's ending.
+        for j in (0..outgoing.downbeats.len()).rev() {
+            let end = outgoing.downbeats[j];
+            if !end.is_finite() || end > point + 1e-6 || j < bars {
+                continue;
+            }
+            let i = j - bars;
+            // A phrase boundary: bar 0, 2, 4… from the first downbeat.
+            if i % 2 != 0 {
+                continue;
+            }
+            let begin = outgoing.downbeats[i];
+            // The unit has to lie inside the blend. A 10 ms numerical
+            // allowance, inside the 15 ms grid tolerance, covers the
+            // difference between the planner's phrase and the measured span.
+            if !begin.is_finite() || begin < start - 0.010 {
+                continue;
+            }
+            let mut grid_ok = true;
+            for k in 0..=bars {
+                let expected = begin + k as f64 * 4.0 * beat;
+                if (outgoing.downbeats[i + k] - expected).abs() > 0.015 {
+                    grid_ok = false;
+                    break;
+                }
+            }
+            if !grid_ok {
+                failure = "the unit's downbeats drift more than 15 ms";
+                continue;
+            }
+            if chord.is_some_and(|c| c > begin + 0.05 && c < end - 0.05) {
+                failure = "a final chord sits in the unit";
+                continue;
+            }
+            let measured = end - begin;
+            if measured <= 0.5 {
+                continue;
+            }
+            if plan.fade_seconds + measured > AUTO_TRANSITION_MAX_SECONDS {
+                failure = "the unit would push the fade past 12s";
+                continue;
+            }
+            let Some(mean) = vocal_activity_between(outgoing, begin, end) else {
+                continue;
+            };
+            let peak = vocal_peak_between(outgoing, begin, end).unwrap_or(1.0);
+            if mean > BRIDGE_VOCAL_MEAN_MAX || peak > BRIDGE_VOCAL_PEAK_MAX {
+                failure = "the unit has a voice";
+                continue;
+            }
+            return Ok(BridgeUnit {
+                start: begin,
+                seconds: measured,
+                bars,
+            });
+        }
+    }
+    Err(failure)
+}
+
+/// Extends a clean crossfade with one replay of a measured, vocal-free unit of
+/// the outgoing's outro. The record's end (and a cold ending's hold) move by
+/// the unit; the blend start does not move, so the incoming enters where it did
+/// and the outgoing has one more unit of music to cross under it.
+fn apply_bridge(outgoing: &Analysis, plan: &mut TransitionPlan) {
+    if plan.style != TransitionStyle::EqualPower
+        || plan.effect_seconds > 0.0
+        || plan.bass_swap
+    {
+        return;
+    }
+    match bridge_unit(outgoing, plan) {
+        Ok(unit) => {
+            plan.transition_end_seconds += unit.seconds;
+            plan.fade_seconds += unit.seconds;
+            // A cold ending's hold covers the unit; an ordinary crossfade has
+            // no hold and its fall starts where it did.
+            if plan.outgoing_hold_seconds > 0.0 {
+                plan.outgoing_hold_seconds += unit.seconds;
+            }
+            plan.bridge_start_seconds = unit.start;
+            plan.bridge_seconds = unit.seconds;
+            plan.bridge_repeats = 1;
+            plan.reason = format!(
+                "{}; bridge: {} bars ({:.1}s) from {:.1}s, replayed once",
+                plan.reason, unit.bars, unit.seconds, unit.start
+            );
+        }
+        Err(why) => {
+            plan.reason = format!("{}; bridge: none ({why})", plan.reason);
+        }
     }
 }
 
@@ -3181,6 +3368,9 @@ fn plan_wsola_transition(outgoing: &Analysis, incoming: &Analysis) -> Option<Tra
         vocal_overlap,
         fade_seconds,
         outgoing_hold_seconds: 0.0,
+        bridge_start_seconds: 0.0,
+        bridge_seconds: 0.0,
+        bridge_repeats: 0,
         effect_seconds: 0.0,
         effect_start_seconds: 0.0,
         transition_end_seconds: transition_end,
@@ -4382,6 +4572,129 @@ mod tests {
             "cue {} did not move to the entry",
             plan.cue_seconds
         );
+    }
+
+    /// F: a vocal-free, phrase-aligned unit after the blend start is replayed
+    /// once, and the record's end moves by exactly that unit.
+    #[test]
+    fn a_vocal_free_phrase_gets_one_bridge_unit() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.beat_confidence = 0.8;
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |time| {
+            if time < 80.0 {
+                0.8
+            } else {
+                0.8 * (1.0 - (time - 80.0) / 20.0).max(0.02)
+            }
+        });
+        for value in out.vocal_activity_mask.iter_mut() {
+            *value = 0.1;
+        }
+        let mut plan = edge_plan(100.0, 8.0, 0.0);
+        plan.reason = "crossfade: test".into();
+        apply_bridge(&out, &mut plan);
+        assert!((plan.bridge_start_seconds - 96.0).abs() < 1e-6, "{:?}", plan);
+        assert!((plan.bridge_seconds - 4.0).abs() < 1e-6, "{:?}", plan);
+        assert_eq!(plan.bridge_repeats, 1);
+        assert!((plan.transition_end_seconds - 104.0).abs() < 1e-6);
+        assert!((plan.fade_seconds - 12.0).abs() < 1e-6);
+        assert_eq!(plan.outgoing_hold_seconds, 0.0, "an ordinary blend has no hold");
+        assert!(plan.reason.contains("bridge: 2 bars"), "{}", plan.reason);
+    }
+
+    /// A bridge on a cold ending sits before the chord and grows the hold by
+    /// the unit, so the delayed chord is still struck at unity.
+    #[test]
+    fn a_cold_ending_bridges_before_its_chord() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.beat_confidence = 0.8;
+        out.content_end = 98.0;
+        with_energy(&mut out, 98.0, |time| if time <= 96.0 { 0.8 } else { 0.1 });
+        for value in out.vocal_activity_mask.iter_mut() {
+            *value = 0.1;
+        }
+        let mut inc = analysis(0.0, 80.0, vec![0.0, 2.0, 4.0]);
+        with_energy(&mut inc, 80.0, |_| 0.8);
+        let mut plan = edge_plan(98.0, 8.0, 0.0);
+        plan.reason = "crossfade: test".into();
+        respect_music_edges(&out, &inc, &mut plan);
+        apply_bridge(&out, &mut plan);
+        let start = plan.transition_end_seconds - plan.fade_seconds;
+        let chord = final_chord_attack(&out).expect("the fixture ends on a chord");
+        assert!(plan.bridge_seconds > 0.0, "{}", plan.reason);
+        assert!(plan.bridge_start_seconds + plan.bridge_seconds <= chord + 1e-6);
+        // The chord is delayed by the unit and the hold grew with it.
+        assert!(
+            (start + plan.outgoing_hold_seconds - (chord + plan.bridge_seconds)).abs() < 1e-6,
+            "the delayed chord is not the start of the fall: {start} + {} vs {}",
+            plan.outgoing_hold_seconds,
+            chord + plan.bridge_seconds
+        );
+    }
+
+    #[test]
+    fn a_sung_unit_gets_no_bridge() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.beat_confidence = 0.8;
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |time| {
+            if time < 80.0 {
+                0.8
+            } else {
+                0.8 * (1.0 - (time - 80.0) / 20.0).max(0.02)
+            }
+        });
+        for value in out.vocal_activity_mask.iter_mut() {
+            *value = 0.8;
+        }
+        let mut plan = edge_plan(100.0, 8.0, 0.0);
+        plan.reason = "crossfade: test".into();
+        apply_bridge(&out, &mut plan);
+        assert_eq!(plan.bridge_repeats, 0);
+        assert!(plan.reason.contains("bridge: none (the unit has a voice)"), "{}", plan.reason);
+    }
+
+    #[test]
+    fn a_low_confidence_grid_gets_no_bridge() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.beat_confidence = 0.3;
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |_| 0.8);
+        let mut plan = edge_plan(100.0, 8.0, 0.0);
+        plan.reason = "crossfade: test".into();
+        apply_bridge(&out, &mut plan);
+        assert_eq!(plan.bridge_repeats, 0);
+        assert!(
+            plan.reason.contains("bridge: none (no confident downbeat grid)"),
+            "{}",
+            plan.reason
+        );
+    }
+
+    #[test]
+    fn a_drifting_unit_is_skipped_for_an_aligned_one() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.beat_confidence = 0.8;
+        out.content_end = 100.0;
+        // The last unit's middle downbeat is 40 ms late; an earlier unit is
+        // still on the grid.
+        out.downbeats[49] = 98.04;
+        with_energy(&mut out, 100.0, |time| {
+            if time < 80.0 {
+                0.8
+            } else {
+                0.8 * (1.0 - (time - 80.0) / 20.0).max(0.02)
+            }
+        });
+        for value in out.vocal_activity_mask.iter_mut() {
+            *value = 0.1;
+        }
+        let mut plan = edge_plan(100.0, 8.0, 0.0);
+        plan.reason = "crossfade: test".into();
+        apply_bridge(&out, &mut plan);
+        assert!(plan.bridge_seconds > 0.0, "{}", plan.reason);
+        assert!(plan.bridge_start_seconds <= 92.0 + 1e-6, "{:?}", plan);
     }
 
     #[test]

@@ -139,6 +139,12 @@ pub struct TransitionPlan {
     /// unity and only its decay is faded through; the incoming entered a
     /// phrase earlier and is rising underneath it.
     pub outgoing_hold_seconds: f64,
+    /// F's loop bridge: where on the outgoing's timeline the measured unit
+    /// starts, how long it is (the measured downbeat span), and how many times
+    /// it is replayed. 0 = no bridge.
+    pub bridge_start_seconds: f64,
+    pub bridge_seconds: f64,
+    pub bridge_repeats: u32,
     /// The effect's own window inside the blend, in seconds (0 = no effect).
     /// The technique only processes the outgoing deck over this last part;
     /// the incoming rises across the whole `fade_seconds` crossfade.
@@ -200,6 +206,9 @@ impl Default for TransitionPlan {
             vocal_overlap: 0.0,
             fade_seconds: 0.0,
             outgoing_hold_seconds: 0.0,
+            bridge_start_seconds: 0.0,
+            bridge_seconds: 0.0,
+            bridge_repeats: 0,
             effect_seconds: 0.0,
             effect_start_seconds: 0.0,
             transition_end_seconds: 0.0,
@@ -767,6 +776,10 @@ struct Voice {
     match_releasing: bool,
     /// Bypass all source/device resampling and voice DSP when rates match.
     bit_perfect: bool,
+    /// F's loop bridge: one measured, vocal-free unit of the outro captured as
+    /// it plays and replayed at the same point in the fade. `None` unless the
+    /// planner asked for one and the blend has started.
+    bridge: Option<VoiceBridge>,
 }
 
 impl Voice {
@@ -903,6 +916,7 @@ impl Voice {
             smoothed_match: 1.0,
             match_releasing: false,
             bit_perfect: false,
+            bridge: None,
         })
     }
 
@@ -1255,7 +1269,53 @@ impl Voice {
     /// Pulls up to `frames` device-domain interleaved stereo frames. Never
     /// returns more than asked: decoded batches overshooting the request are
     /// stashed in `pending_dev` and served on later calls.
+    /// Serves the next chunk, running F's loop bridge when one is armed.
+    ///
+    /// While the bridge replays, the decoder is deliberately not pulled: the
+    /// music after the captured unit stays in the decoder, so the unit can play
+    /// again and the record then continues sample-continuously. The served
+    /// frame count (`emitted_dev_frames`) still advances for the replay, so the
+    /// blend's clock keeps moving.
     fn pull(&mut self, frames: usize, device_rate: u32) -> Vec<f32> {
+        if let Some(bridge) = self.bridge.as_mut() {
+            if bridge.stage == BridgeStage::Replaying {
+                let mut out = bridge.replay(frames, device_rate);
+                self.emitted_dev_frames += (out.len() / 2) as u64;
+                if bridge.stage == BridgeStage::Done && out.len() < frames * 2 {
+                    let more = self.pull_decoded((frames * 2 - out.len()) / 2, device_rate);
+                    out.extend(more);
+                }
+                return out;
+            }
+        }
+        let mut out = self.pull_decoded(frames, device_rate);
+        if let Some(mut bridge) = self.bridge.take() {
+            let held = bridge.after_pull(
+                &mut out,
+                &mut self.pending_dev,
+                &mut self.pending_dev_cursor,
+            );
+            if held > 0 {
+                self.emitted_dev_frames = self.emitted_dev_frames.saturating_sub(held as u64);
+            }
+            self.bridge = Some(bridge);
+        }
+        out
+    }
+
+    /// Arms the bridge at the blend: `delay_frames` are served before the unit
+    /// starts, the unit is `unit_frames` long, and it is replayed
+    /// `repeats` times. Bit-perfect playback has no blend, so it never arms.
+    fn set_bridge(&mut self, delay_frames: u64, unit_frames: u64, repeats: u32) {
+        if unit_frames == 0 || self.bit_perfect {
+            return;
+        }
+        self.bridge = Some(VoiceBridge::new(delay_frames, unit_frames, repeats));
+    }
+
+    /// Pulls up to `frames` device-domain frames from the decoder. The public
+    /// `pull` is the wrapper that runs F's loop bridge around this.
+    fn pull_decoded(&mut self, frames: usize, device_rate: u32) -> Vec<f32> {
         if self.bit_perfect
             && device_rate == self.info.sample_rate
             && self.regions.excluded.is_empty()
@@ -1506,6 +1566,137 @@ impl Voice {
                 Vec::new()
             }
         }
+    }
+}
+
+/// F's loop bridge: one measured, vocal-free unit of the outgoing's outro,
+/// captured as it is served and replayed at the same point in the fade.
+///
+/// The unit's length is the planner's measured downbeat span (not bpm × 4), and
+/// the seam is a **10 ms equal-gain** crossfade from the unit's end to its
+/// start: both sides are the same record, so an equal-power seam would add
+/// about +3 dB at the join.
+struct VoiceBridge {
+    /// Served frames to wait, from the blend start, before the unit begins.
+    delay_frames: u64,
+    /// The unit's length in device frames; the captured buffer is this long.
+    unit_frames: u64,
+    /// Extra passes after the first one.
+    repeats: u32,
+    /// Frames served since arming, for the delay.
+    served: u64,
+    /// The captured unit, interleaved stereo, `unit_frames` frames.
+    captured: Vec<f32>,
+    /// Frames already served of the current replay.
+    replay_at: usize,
+    done_replays: u32,
+    stage: BridgeStage,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BridgeStage {
+    Waiting,
+    Capturing,
+    Replaying,
+    Done,
+}
+
+impl VoiceBridge {
+    fn new(delay_frames: u64, unit_frames: u64, repeats: u32) -> Self {
+        Self {
+            delay_frames,
+            unit_frames,
+            repeats: repeats.max(1),
+            served: 0,
+            captured: Vec::with_capacity(unit_frames as usize * 2),
+            replay_at: 0,
+            done_replays: 0,
+            stage: BridgeStage::Waiting,
+        }
+    }
+
+    /// The replay's output for up to `frames` frames. The first 10 ms of each
+    /// pass crossfades the audio just heard (the unit's end) into the unit's
+    /// start; the replay's last sample is the same one the first pass ended on,
+    /// so returning to the live stream needs no second fade.
+    fn replay(&mut self, frames: usize, rate: u32) -> Vec<f32> {
+        let seam =
+            ((rate as u64 / 100).max(1) as usize).min((self.unit_frames / 4).max(1) as usize);
+        let mut out = Vec::with_capacity(frames * 2);
+        while out.len() < frames * 2 && self.stage == BridgeStage::Replaying {
+            let at = self.replay_at;
+            if at >= self.unit_frames as usize {
+                self.replay_at = 0;
+                self.done_replays += 1;
+                if self.done_replays >= self.repeats {
+                    self.stage = BridgeStage::Done;
+                }
+                continue;
+            }
+            if at < seam {
+                let gain = (at + 1) as f32 / seam as f32;
+                let tail = (self.unit_frames as usize - seam + at) * 2;
+                out.push(self.captured[tail] * (1.0 - gain) + self.captured[at * 2] * gain);
+                out.push(
+                    self.captured[tail + 1] * (1.0 - gain) + self.captured[at * 2 + 1] * gain,
+                );
+            } else {
+                out.push(self.captured[at * 2]);
+                out.push(self.captured[at * 2 + 1]);
+            }
+            self.replay_at += 1;
+        }
+        out
+    }
+
+    /// Reads the frames just served. While waiting it counts down; while
+    /// capturing it fills the unit; when the unit completes mid-chunk it holds
+    /// the frames after it in `pending` (so the replay can play first) and
+    /// switches to replaying. Returns the number of frames held back.
+    fn after_pull(
+        &mut self,
+        out: &mut Vec<f32>,
+        pending: &mut Vec<f32>,
+        pending_cursor: &mut usize,
+    ) -> usize {
+        if self.stage != BridgeStage::Waiting && self.stage != BridgeStage::Capturing {
+            return 0;
+        }
+        let mut frames = out.len() / 2;
+        let mut skip = 0usize;
+        if self.stage == BridgeStage::Waiting {
+            if self.served + frames as u64 <= self.delay_frames {
+                self.served += frames as u64;
+                return 0;
+            }
+            let into = (self.delay_frames - self.served) as usize;
+            skip = into.min(frames);
+            self.served += skip as u64;
+            frames -= skip;
+            self.stage = BridgeStage::Capturing;
+        }
+        let captured_frames = self.captured.len() / 2;
+        let remaining = (self.unit_frames as usize).saturating_sub(captured_frames);
+        let take = frames.min(remaining);
+        if take > 0 {
+            let start = skip * 2;
+            self.captured
+                .extend_from_slice(&out[start..start + take * 2]);
+        }
+        if self.captured.len() / 2 == self.unit_frames as usize {
+            let cut = (skip + take) * 2;
+            let held = out.split_off(cut);
+            let held_frames = held.len() / 2;
+            let rest = pending[*pending_cursor..].to_vec();
+            *pending = held;
+            pending.extend(rest);
+            *pending_cursor = 0;
+            self.replay_at = 0;
+            self.done_replays = 0;
+            self.stage = BridgeStage::Replaying;
+            return held_frames;
+        }
+        0
     }
 }
 
@@ -2611,6 +2802,29 @@ impl MixerState {
                     t.plan.beat_seconds,
                     t.plan.reason
                 );
+            }
+        }
+        // F: arm the loop bridge on the outgoing at the blend start. The unit
+        // starts `bridge_start_seconds` on the record's timeline; the served
+        // position is the blend's clock, so the delay is in served frames.
+        if let Some(t) = &self.transition {
+            if t.plan.bridge_seconds > 0.0 && t.plan.bridge_repeats > 0 {
+                if let Some(current) = &mut self.current {
+                    let delay = ((t.plan.bridge_start_seconds
+                        - current.emitted_position_seconds())
+                    .max(0.0)
+                        * device_rate as f64)
+                        .round() as u64;
+                    let unit = (t.plan.bridge_seconds * device_rate as f64).round() as u64;
+                    current.set_bridge(delay, unit, t.plan.bridge_repeats);
+                    log::info!(
+                        "bridge: {:.2}s unit at {:.2}s, {} repeat(s), {} frames of delay",
+                        t.plan.bridge_seconds,
+                        t.plan.bridge_start_seconds,
+                        t.plan.bridge_repeats,
+                        delay
+                    );
+                }
             }
         }
         let db = self.incoming.as_ref().and_then(|v| v.loudness_db);
@@ -4426,6 +4640,80 @@ mod tests {
             fade_frames,
             land_frame,
         }
+    }
+
+    /// F: the bridge captures one measured unit and replays it without
+    /// advancing the decoder, so the record continues from exactly where it
+    /// stopped. Both voices are the same file, so the assertion is sample
+    /// equality, not a resemblance.
+    #[test]
+    fn a_bridge_repeats_the_unit_and_continues_where_it_stopped() {
+        let dir = std::env::temp_dir().join(format!("bitchord-bridge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bridge.wav");
+        level_wav(&path, 12.0, 220.0, 0.4);
+        let mut plain = open_voice(&path);
+        let mut bridged = open_voice(&path);
+        let rate = 48_000u32;
+        let delay = 2 * rate as usize;
+        let unit = rate as usize; // one second
+        bridged.set_bridge(delay as u64, unit as u64, 1);
+        let plain_frames = delay + 3 * unit;
+        let mut a: Vec<f32> = Vec::new();
+        let mut b: Vec<f32> = Vec::new();
+        while a.len() / 2 < plain_frames {
+            a.extend(plain.pull(512, rate));
+        }
+        let total_b = plain_frames + unit;
+        while b.len() / 2 < total_b {
+            let want = (total_b - b.len() / 2).min(512);
+            b.extend(bridged.pull(want, rate));
+        }
+        let frame = |samples: &[f32], at: usize| -> (f32, f32) {
+            (samples[at * 2], samples[at * 2 + 1])
+        };
+        let same = |x: &[f32], x_at: usize, y: &[f32], y_at: usize, frames: usize| -> f64 {
+            let mut worst = 0.0f64;
+            for i in 0..frames {
+                let (a_l, a_r) = frame(x, x_at + i);
+                let (b_l, b_r) = frame(y, y_at + i);
+                worst = worst.max((a_l - b_l).abs() as f64);
+                worst = worst.max((a_r - b_r).abs() as f64);
+            }
+            worst
+        };
+        // Before the unit, the two voices are the same performance.
+        assert!(same(&a, 0, &b, 0, delay) < 1e-6, "the delay changed the audio");
+        // The first pass is unchanged and the unit is captured from it.
+        assert!(same(&a, delay, &b, delay, unit) < 1e-6, "the first pass changed");
+        // The replay is the same unit, after the 10 ms equal-gain seam.
+        let seam = (rate as usize / 100).min(unit / 4);
+        assert!(
+            same(&a, delay + seam, &b, delay + unit + seam, unit - seam) < 1e-6,
+            "the replay is not the captured unit"
+        );
+        // And the record continues at the point it was paused, one unit later.
+        assert!(
+            same(&a, delay + unit, &b, delay + 2 * unit, unit) < 1e-6,
+            "the record did not continue where it stopped"
+        );
+        // The seam itself is a crossfade, so it is near the unit's own level,
+        // not a hole.
+        let level = |samples: &[f32], at: usize, frames: usize| -> f64 {
+            let mut sum = 0.0f64;
+            for i in 0..frames {
+                let (l, r) = frame(samples, at + i);
+                sum += l as f64 * l as f64 + r as f64 * r as f64;
+            }
+            (sum / (frames * 2) as f64).sqrt()
+        };
+        let seam_level = level(&b, delay + unit, seam);
+        let unit_level = level(&a, delay, seam);
+        assert!(
+            seam_level > unit_level * 0.7 && seam_level < unit_level * 1.3,
+            "the seam is a hole or a bump ({seam_level} vs {unit_level})"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
