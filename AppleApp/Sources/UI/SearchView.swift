@@ -891,7 +891,17 @@ struct SearchView: View {
         typeaheadTask = Task {
             try? await Task.sleep(nanoseconds: 350_000_000)
             guard !Task.isCancelled else { return }
-            let hits = (try? await InnertubeSearch.shared.typeahead(term)) ?? []
+            // A failure here is not shown in the UI (a dropdown that explains
+            // itself in a list of suggestions is noise), but it must not be
+            // swallowed either: the rows simply not appearing is the symptom
+            // this logged line exists to explain.
+            let hits: [SearchHitDTO]
+            do {
+                hits = try await InnertubeSearch.shared.typeahead(term)
+            } catch {
+                DebugLog.shared.w(message: "search typeahead failed for \"\(term)\": \(error.localizedDescription)")
+                hits = []
+            }
             await MainActor.run {
                 guard !Task.isCancelled, self.term == term, term != self.searchedTerm else { return }
                 typeaheadHits = hits
