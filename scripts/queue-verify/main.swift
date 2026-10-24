@@ -20,6 +20,18 @@ let queue = [track("played", order: 0), track("selected", order: 1),
 let scores = [0.0, 0, 100, 0.1, 0.9, 100]
 let ordered = PlaybackQueuePolicy.orderList(queue, after: 1, automix: true, shuffle: true, scores: scores)
 check(ordered.map(\.id) == ["played", "selected", "manual", "high", "low", "suggestion"], "Automix wins and only sequences unplayed list slots")
+let rollingQueue = [
+    track("now", order: 0), track("committed-a", order: 1), track("committed-b", order: 2),
+    track("manual"), track("window-a", order: 3), track("window-b", order: 4),
+    track("window-c", order: 5), track("recommendation", autoplay: true)
+]
+check(PlaybackQueuePolicy.rollingListWindow(rollingQueue, after: 0) == [4, 5, 6], "Rolling analysis starts after the two committed queue rows and skips manual and autoplay rows")
+let longRollingQueue = (0..<16).map { track("rolling-\(String($0))", order: $0) }
+check(PlaybackQueuePolicy.rollingListWindow(longRollingQueue, after: 0) == Array(3..<13), "Rolling analysis is capped at ten list rows")
+let analyzedOnly = PlaybackQueuePolicy.replacing(
+    rollingQueue, at: [4, 6], with: [rollingQueue[6], rollingQueue[4]]
+)
+check(analyzedOnly[4...6].map(\.id) == ["window-c", "window-b", "window-a"], "Only analyzed rows move, and only among their original slots")
 check(PlaybackQueuePolicy.orderList(queue, after: 1, automix: true, shuffle: false, scores: scores) == ordered, "Shuffle preference cannot override Automix")
 check(PlaybackQueuePolicy.orderList(ordered, after: 1, automix: false, shuffle: false, scores: scores) == queue, "Ordered mode restores upcoming source order without rewinding history")
 check(PlaybackQueuePolicy.orderList(queue, after: 1, automix: true, shuffle: false, scores: Array(repeating: 0, count: queue.count)) == queue, "Equal affinity preserves source order")

@@ -10,6 +10,8 @@ enum PlaybackQueuePolicy {
     static let autoplayTarget = 8
     /// Upcoming rows nothing automatic may move: the listener can see them.
     static let committedRows = 2
+    /// Rows after the committed queue that can be reconsidered by AutoMix.
+    static let sequencingWindowRows = 10
 
     static func shouldRefillAutoplay(upcomingCount: Int) -> Bool {
         upcomingCount < autoplayRefillThreshold
@@ -24,6 +26,14 @@ enum PlaybackQueuePolicy {
 
     static func listIndices(_ queue: [QueueEntry], after index: Int) -> [Int] {
         queue.indices.filter { $0 > index && queue[$0].contextOrder != nil && !queue[$0].fromAutoplay }
+    }
+
+    /// The visible lead-in is fixed; only a bounded list window after it rolls.
+    static func rollingListWindow(_ queue: [QueueEntry], after index: Int) -> [Int] {
+        listIndices(queue, after: index)
+            .filter { $0 > index + committedRows }
+            .prefix(sequencingWindowRows)
+            .map { $0 }
     }
 
     static func autoplayIndices(_ queue: [QueueEntry], after index: Int) -> [Int] {
