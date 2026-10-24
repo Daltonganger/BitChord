@@ -1,21 +1,20 @@
 import Foundation
 import BitChordShared
 
-// The O9 music-video spike, against YouTube.
+// The O9 video side, against YouTube.
 //
-// The audit's §O9 item 8 asks one question a fixture cannot answer: does the
-// client the app actually gets served deliver *video-only* formats with ready
-// URLs for real videos? The extractor carries video fields already, but the
-// playback path has always asked with `wantVideo = false`, so nothing has ever
-// looked. The risk is the n parameter: the extractor's own readiness rule
-// rejects a URL that carries one (InnerTubeExtractor.hasReadyVideoUrl), and a
-// SABR-only answer fails the progressive check entirely — both of which read
-// as "no video" from outside unless the probe reports them.
+// The spike proved that the extraction stack's own video selection is VP9/WebM
+// for a music video, which AVPlayer cannot decode, and that the same direct
+// profile the audio resolves through also answers with AVC/MP4 renditions. The
+// build's rule (O9 decisions, 2026-10-24) is therefore: AVC in MP4 only, at most
+// 1080p tall, highest bitrate among those, and nothing at all when there is no
+// such rendition — the artwork stays rather than a WebM picture.
 //
-// So: probe a real music video and an art track, print what the extractor got
-// (URL presence, width×height, itag, heights, the n flag, client), and fail if
-// the real video does not come back ready and 16:9-ish, or if the art track
-// would pass for one. The signed URLs themselves are never printed.
+// So: resolve a real music video and an art track, print the rendition (URL
+// presence, width×height, itag, heights, the n flag, client), read a real
+// 64 KiB window off the music video's URL, and fail if the real video is not a
+// served AVC/MP4 16:9-ish picture or if the art track would pass for one. The
+// signed URLs themselves are never printed.
 //
 // Run: scripts/check-video-spike.sh
 
@@ -41,21 +40,36 @@ func check(_ label: String, _ ok: Bool, _ detail: String = "") {
     }
 }
 
-func describe(_ probe: ResolvedVideoProbe) -> String {
-    let picture = probe.width.flatMap { w in probe.height.map { h in "\(w)×\(h)" } } ?? "no picture size"
-    let aspect = probe.aspectRatio.map { String(format: "%.2f", $0) } ?? "?"
-    let itag = probe.itag.map(String.init) ?? "?"
-    let codecs = probe.codecs ?? "?"
-    let container = probe.mimeType ?? "?"
-    let bitrate = probe.bitrate.map { "\($0 / 1000)kbps" } ?? "?"
-    let heights = probe.availableVideoHeights.map(String.init).joined(separator: ",")
-    let n = probe.hasNParameter ? "n=YES" : "n=no"
-    let type = probe.musicVideoType ?? "type=?"
-    return "\(probe.hasVideoURL ? "url present" : "no url") · \(picture) aspect \(aspect) · itag \(itag) · "
-        + "\(container) \(codecs) \(bitrate) · heights [\(heights)] · \(n) · \(probe.clientName)/\(probe.profileId) · \(type) · \(probe.selection)"
+func describe(_ side: ResolvedVideoSide) -> String {
+    let picture = side.width.flatMap { w in side.height.map { h in "\(w)×\(h)" } } ?? "no picture size"
+    let aspect = side.aspectRatio.map { String(format: "%.2f", $0) } ?? "?"
+    let itag = side.itag.map(String.init) ?? "?"
+    let codecs = side.codecs ?? "?"
+    let container = side.mimeType ?? "?"
+    let bitrate = side.bitrate.map { "\($0 / 1000)kbps" } ?? "?"
+    let heights = side.availableVideoHeights.map(String.init).joined(separator: ",")
+    let n = side.hasNParameter ? "n=YES" : "n=no"
+    let type = side.musicVideoType ?? "type=?"
+    return "\(side.hasVideoURL ? "url present" : "no AVC/MP4 side") · \(picture) aspect \(aspect) · itag \(itag) · "
+        + "\(container) \(codecs) \(bitrate) · heights [\(heights)] · \(n) · \(side.clientName)/\(side.profileId) · \(type)"
 }
 
-print("video spike: the video side of a real music video and an art track")
+/// Read a real ranged window off the signed URL: a rendition nothing serves is
+/// not a video side, however good its fields look.
+func servedWindow(_ url: URL) async -> (status: Int?, type: String?, bytes: Int) {
+    var request = URLRequest(url: url)
+    request.setValue("bytes=0-65535", forHTTPHeaderField: "Range")
+    request.timeoutInterval = 30
+    do {
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let http = response as? HTTPURLResponse
+        return (http?.statusCode, http?.value(forHTTPHeaderField: "Content-Type"), data.count)
+    } catch {
+        return (nil, String(describing: error), 0)
+    }
+}
+
+print("video side: a real music video and an art track, AVC/MP4 only")
 
 for (index, id) in ids.enumerated() {
     let expectsMusicVideo = index == 0
@@ -63,34 +77,42 @@ for (index, id) in ids.enumerated() {
     print("  \(label)")
     do {
         let began = Date()
-        let probe = try await InnertubeStreamResolver.shared.probeVideo(videoId: id)
+        let side = try await InnertubeStreamResolver.shared.resolveVideo(videoId: id)
         let took = String(format: "%.1fs", Date().timeIntervalSince(began))
-        print("    \(describe(probe)) — \(took)")
+        print("    \(describe(side)) — \(took)")
 
         if expectsMusicVideo {
-            check("the music video yields a ready video URL",
-                  probe.hasVideoURL && !probe.hasNParameter,
-                  probe.hasVideoURL ? (probe.hasNParameter ? "URL carries n" : "URL ready") : "no URL")
+            check("the music video yields a ready AVC/MP4 video side",
+                  side.hasVideoURL && !side.hasNParameter && side.isAVCInMP4,
+                  side.hasVideoURL ? (side.isAVCInMP4 ? "AVC/MP4" : "not AVC/MP4") : "no AVC/MP4 side")
             check("its picture is a music video, not an art track",
-                  probe.looksLikeMusicVideo,
-                  probe.aspectRatio.map { "aspect \(String(format: "%.2f", $0))" } ?? "no width/height")
+                  side.looksLikeMusicVideo,
+                  side.aspectRatio.map { "aspect \(String(format: "%.2f", $0))" } ?? "no width/height")
+            if let string = side.url, let url = URL(string: string) {
+                let window = await servedWindow(url)
+                check("the rendition is served",
+                      (window.status == 206 || window.status == 200) && window.bytes > 0
+                        && (window.type ?? "").lowercased().contains("video/mp4"),
+                      "\(window.status.map(String.init) ?? "no status") · \(window.type ?? "no type") · \(window.bytes)B")
+            } else {
+                check("the rendition is served", false, "no URL to read")
+            }
         } else {
-            // Either answer is a refusal of video: no URL at all, or a
+            // Either answer is a refusal of video: no video side at all, or a
             // picture that is square enough to be the sleeve.
-            let qualifies = probe.hasVideoURL && probe.looksLikeMusicVideo
+            let qualifies = side.hasVideoURL && side.looksLikeMusicVideo
             check("the art track does not qualify as a music video", !qualifies,
-                  qualifies ? "aspect \(String(format: "%.2f", probe.aspectRatio ?? 0))" :
-                    (probe.hasVideoURL ? "aspect \(String(format: "%.2f", probe.aspectRatio ?? 0))" : "no video answer"))
+                  qualifies ? "aspect \(String(format: "%.2f", side.aspectRatio ?? 0))" :
+                    (side.hasVideoURL ? "aspect \(String(format: "%.2f", side.aspectRatio ?? 0))" : "no video side"))
         }
     } catch {
-        // A real video failing here is the spike's headline finding: the
-        // progressive client the app uses does not serve video. An art track
-        // failing is a valid answer too — there is nothing to show.
+        // A real video failing here is the finding worth having: the platform
+        // gets no picture. An art track failing is a valid answer too.
         if expectsMusicVideo {
-            check("the music video yields a ready video URL", false, error.localizedDescription)
+            check("the music video yields a ready AVC/MP4 video side", false, error.localizedDescription)
         } else {
             check("the art track does not qualify as a music video", true,
-                  "no video answer: \(error.localizedDescription)")
+                  "no video side: \(error.localizedDescription)")
         }
     }
 }

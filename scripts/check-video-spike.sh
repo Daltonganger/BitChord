@@ -1,11 +1,12 @@
 #!/bin/bash
-# The O9 music-video spike, against YouTube.
+# The O9 video side, against YouTube.
 #
 # A fixture can only prove that video fields parse; it cannot prove that the
-# extraction stack the app uses is ever handed a video-only format, or that the
-# URL it gets is served rather than throttled by YouTube's n parameter. The
-# playback path asks with wantVideo = false and must keep doing so until these
-# numbers exist, so the probe is the only thing that looks.
+# direct profile the audio resolves through answers with an AVC/MP4 rendition,
+# that its URL is ready rather than throttled by YouTube's n parameter, or that
+# the CDN serves it. The audio path never asks for video: the video side is its
+# own request, and this check is what pins its contract before the player
+# surfaces use it.
 #
 # Run: scripts/check-video-spike.sh
 set -uo pipefail

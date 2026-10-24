@@ -95,63 +95,63 @@ object PlayerBridge {
     }
 
     /**
-     * Ask what the video side of a track would be, without touching the
-     * playback path's request shape (O9's spike, audit §O9 item 8).
+     * The track's AVC/MP4 video side (O9), or a payload with a null `url` when
+     * the track has none — an art track or a video-only-in-WebM upload. That is
+     * a normal answer, not an error: the host keeps the artwork.
      *
-     * Deliberately not cancellable: it is a developer probe that runs for a
-     * handful of ids, and a caller that walks away can ignore the answer.
+     * Deliberately not cancellable: the host asks once per track and can ignore
+     * a late answer.
      */
-    fun probeVideo(videoId: String, callback: ProbeCallback) {
+    fun resolveVideo(videoId: String, callback: VideoCallback) {
         val generation = Innertube.sessionGeneration
         bridgeScope.launch {
             try {
                 Innertube.checkSession(generation)
-                val probe = UpstreamPlaybackExtractor.probeVideo(videoId)
-                    ?: throw IllegalStateException("No video stream for $videoId")
+                val side = UpstreamPlaybackExtractor.videoSide(videoId)
                 Innertube.checkSession(generation)
-                callback.onResult(json.encodeToString(VideoProbePayload.serializer(), probe.toPayload()), null)
+                callback.onResult(json.encodeToString(VideoSidePayload.serializer(), side.toPayload()), null)
             } catch (e: Throwable) {
-                DebugLog.e("video probe failed for $videoId", e)
+                DebugLog.e("video side failed for $videoId", e)
                 callback.onResult(null, e.message ?: e.toString())
             }
         }
     }
 
-    fun interface ProbeCallback {
+    fun interface VideoCallback {
         fun onResult(json: String?, message: String?)
     }
 
     @Serializable
-    data class VideoProbePayload(
-        val videoUrl: String? = null,
-        val videoWidth: Int? = null,
-        val videoHeight: Int? = null,
-        val videoItag: Int? = null,
-        val videoMimeType: String? = null,
-        val videoCodecs: String? = null,
-        val videoBitrate: Int? = null,
+    data class VideoSidePayload(
+        val url: String? = null,
+        val width: Int? = null,
+        val height: Int? = null,
+        val itag: Int? = null,
+        val mimeType: String? = null,
+        val codecs: String? = null,
+        val bitrate: Int? = null,
+        val headers: Map<String, String> = emptyMap(),
         val availableVideoHeights: List<Int> = emptyList(),
-        val videoUrlHasNParameter: Boolean = false,
+        val urlHasNParameter: Boolean = false,
         val clientName: String,
         val profileId: String,
         val musicVideoType: String? = null,
-        val selection: String,
     )
 
-    private fun VideoProbe.toPayload() = VideoProbePayload(
-        videoUrl = videoUrl,
-        videoWidth = width,
-        videoHeight = height,
-        videoItag = itag,
-        videoMimeType = mimeType,
-        videoCodecs = codecs,
-        videoBitrate = bitrate,
-        availableVideoHeights = availableVideoHeights,
-        videoUrlHasNParameter = hasNParameter,
-        clientName = clientName,
-        profileId = profileId,
-        musicVideoType = musicVideoType,
-        selection = selection,
+    private fun VideoSide?.toPayload() = VideoSidePayload(
+        url = this?.url,
+        width = this?.width,
+        height = this?.height,
+        itag = this?.itag,
+        mimeType = this?.mimeType,
+        codecs = this?.codecs,
+        bitrate = this?.bitrate,
+        headers = this?.headers ?: emptyMap(),
+        availableVideoHeights = this?.availableVideoHeights ?: emptyList(),
+        urlHasNParameter = this?.urlHasNParameter ?: false,
+        clientName = this?.clientName ?: "VISIONOS",
+        profileId = this?.profileId ?: "VISIONOS_0_1",
+        musicVideoType = this?.musicVideoType,
     )
 
     @Serializable
