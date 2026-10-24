@@ -759,7 +759,7 @@ struct NowPlayingView: View {
             }
             .accessibilityLabel(controller.current?.title ?? "Nothing playing")
         } else {
-            VideoSurface(cornerRadius: 12, announcesLoading: true) {
+            VideoSurface(cornerRadius: 12, announcesLoading: true, presentation: .card) {
                 SleeveArt(
                     entry: controller.current,
                     canvasURL: controller.canvasURL,
@@ -2142,9 +2142,10 @@ private struct HeroArtwork: View {
                     CanvasPlayer(url: canvasURL, fallbackURL: fallbackURL, isPlaying: isPlaying)
                         .frame(width: geo.size.width, height: geo.size.height)
                 }
-                // The full-bleed hero keeps its artwork and mask; the picture
-                // is an overlay inside that mask, not a black card on top.
-                VideoSurface(cornerRadius: 0, fillSlot: false, announcesLoading: true) { Color.clear }
+                // The picture takes the artwork's place edge to edge, cropped
+                // to the hero and dissolving under the same mask: a 16:9 band
+                // across the middle left the cover showing above and below.
+                VideoSurface(cornerRadius: 0, fillSlot: false, announcesLoading: true, presentation: .fill) { Color.clear }
             }
             .compositingGroup()
             .mask {

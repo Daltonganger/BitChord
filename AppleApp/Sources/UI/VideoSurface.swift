@@ -315,7 +315,20 @@ struct VideoSurface<Fallback: View>: View {
     /// Say "Loading music video" while one is being prepared. Only the large
     /// surfaces do: a thumbnail has no room for it.
     var announcesLoading = false
+    var presentation: Presentation = .letterbox
     @ViewBuilder var fallback: () -> Fallback
+
+    enum Presentation {
+        /// A 16:9 picture inside the slot (`fillSlot` says what is behind it):
+        /// the thumbnails, where the slot's shape cannot change.
+        case letterbox
+        /// The picture covers the whole slot, cropped: the full-bleed hero,
+        /// where it takes the artwork's place edge to edge.
+        case fill
+        /// The card takes the picture's own shape, full width and shorter,
+        /// with nothing around it: the large square artwork card.
+        case card
+    }
 
     @Environment(PlaybackController.self) private var controller
     @Environment(\.scenePhase) private var scenePhase
@@ -344,16 +357,41 @@ struct VideoSurface<Fallback: View>: View {
         .transition(.opacity)
     }
 
+    @ViewBuilder
+    private var picture: some View {
+        let player = VideoPlayback.shared.player
+        // The rendition's own shape (a 1590x1080 upload is not 16:9).
+        let aspect = VideoPlayback.shared.side?.aspectRatio ?? 16.0 / 9.0
+        switch presentation {
+        case .fill:
+            VideoLayerView(player: player, gravity: .resizeAspectFill)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        case .card:
+            VideoLayerView(player: player, gravity: .resizeAspectFill)
+                .aspectRatio(aspect, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .shadow(color: .black.opacity(0.35), radius: 20, y: 10)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        case .letterbox:
+            if fillSlot { Color.black }
+            VideoLayerView(player: player)
+                .aspectRatio(aspect, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
+    }
+
     var body: some View {
         ZStack {
             fallback()
+                // A reshaped card leaves the square around the picture empty:
+                // the artwork must not show in it.
+                .opacity(presentation == .card && VideoPlayback.shared.showsVideo ? 0 : 1)
             if VideoPlayback.shared.showsVideo {
-                if fillSlot { Color.black }
-                VideoLayerView(player: VideoPlayback.shared.player)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
+                picture
             } else if announcesLoading, showMusicVideos, VideoPlayback.shared.isLoading {
                 caption("Loading music video", loading: true)
                     .accessibilityIdentifier("player.musicVideoLoading")
@@ -421,13 +459,16 @@ struct VideoSurface<Fallback: View>: View {
 #if os(iOS)
 private struct VideoLayerView: UIViewRepresentable {
     let player: AVPlayer
+    var gravity: AVLayerVideoGravity = .resizeAspect
     func makeUIView(context: Context) -> VideoLayerHost {
         let view = VideoLayerHost()
         view.player = player
+        view.gravity = gravity
         return view
     }
     func updateUIView(_ view: VideoLayerHost, context: Context) {
         view.player = player
+        view.gravity = gravity
     }
 }
 
@@ -437,22 +478,26 @@ private final class VideoLayerHost: UIView {
 
     var player: AVPlayer? {
         get { playerLayer.player }
-        set {
-            playerLayer.player = newValue
-            playerLayer.videoGravity = .resizeAspect
-        }
+        set { playerLayer.player = newValue }
+    }
+    var gravity: AVLayerVideoGravity {
+        get { playerLayer.videoGravity }
+        set { playerLayer.videoGravity = newValue }
     }
 }
 #else
 private struct VideoLayerView: NSViewRepresentable {
     let player: AVPlayer
+    var gravity: AVLayerVideoGravity = .resizeAspect
     func makeNSView(context: Context) -> VideoLayerHost {
         let view = VideoLayerHost()
         view.player = player
+        view.gravity = gravity
         return view
     }
     func updateNSView(_ view: VideoLayerHost, context: Context) {
         view.player = player
+        view.gravity = gravity
     }
 }
 
@@ -478,6 +523,10 @@ private final class VideoLayerHost: NSView {
     var player: AVPlayer? {
         get { playerLayer.player }
         set { playerLayer.player = newValue }
+    }
+    var gravity: AVLayerVideoGravity {
+        get { playerLayer.videoGravity }
+        set { playerLayer.videoGravity = newValue }
     }
 }
 #endif
