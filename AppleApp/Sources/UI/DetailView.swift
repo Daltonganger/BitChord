@@ -173,7 +173,7 @@ struct DetailView: View {
                             if searching {
                                 searchField(tint: tint)
                             }
-                            trackList(page)
+                            trackList(page, width: width)
                                 .padding(.horizontal, 16)
 
                             if !isArtist {
@@ -1014,14 +1014,17 @@ struct DetailView: View {
         }
     }
 
-    private func trackList(_ page: DetailPageModel) -> some View {
+    @ViewBuilder
+    private func trackList(_ page: DetailPageModel, width: CGFloat) -> some View {
         let fallback = page.thumbnailUrl
         let songs = page.songs.filter {
             filter.isEmpty || $0.title.localizedCaseInsensitiveContains(filter) || $0.artist.localizedCaseInsensitiveContains(filter)
         }
         let owned = page.playlistOwned == true && filter.isEmpty
-        return Group {
-            if owned {
+
+        if kind(of: page) == .artist {
+            artistTopSongs(page, songs: songs, width: width, fallback: fallback)
+        } else if owned {
                 List {
                     ForEach(Array(songs.enumerated()), id: \.offset) { index, song in
                         SongRow(
@@ -1102,7 +1105,54 @@ struct DetailView: View {
                     }
                 }
             }
+    }
+
+    /// An artist's top songs as upstream lays them out: columns of four, at most
+    /// twenty songs, in a carousel that snaps column by column. The next column
+    /// peeks in at the edge so the reader can tell there is more. A tap plays
+    /// the twenty in order from that song.
+    private func artistTopSongs(
+        _ page: DetailPageModel,
+        songs: [DetailPageModel.SongPayload],
+        width: CGFloat,
+        fallback: String?
+    ) -> some View {
+        let top = Array(songs.prefix(20))
+        let columns = stride(from: 0, to: top.count, by: 4).map { Array(top[$0..<min($0 + 4, top.count)]) }
+        // One column fills the width minus a peek on a phone; wider layouts
+        // fit as many 360 pt columns as there is room for.
+        let columnWidth = min(max(width - 32 - 36, 260), 360)
+        let queue = top.map { toEntry($0, fallbackArt: fallback) }
+        return ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(alignment: .top, spacing: 12) {
+                ForEach(Array(columns.enumerated()), id: \.offset) { columnIndex, column in
+                    VStack(spacing: 0) {
+                        ForEach(Array(column.enumerated()), id: \.element.videoId) { rowIndex, song in
+                            SongRow(
+                                entry: toEntry(song, fallbackArt: fallback),
+                                play: {
+                                    controller.play(
+                                        queue, at: columnIndex * 4 + rowIndex,
+                                        context: page.title, contextID: browseId,
+                                        shuffleRequested: controller.shuffleEnabled
+                                    )
+                                },
+                                playNext: { controller.playNext(toEntry(song, fallbackArt: fallback)) },
+                                addToQueue: { controller.addToQueue(toEntry(song, fallbackArt: fallback)) }
+                            )
+                        }
+                    }
+                    .frame(width: columnWidth, alignment: .top)
+                }
+            }
+            .scrollTargetLayout()
         }
+        .scrollTargetBehavior(.viewAligned)
+        // The track list is padded 16 on each side; the carousel runs to the
+        // screen edge and insets its content instead, so columns scroll under
+        // the margin rather than being clipped at it.
+        .padding(.horizontal, -16)
+        .contentMargins(.horizontal, 16, for: .scrollContent)
     }
 
     private func toEntry(_ s: DetailPageModel.SongPayload, fallbackArt: String? = nil) -> QueueEntry {
