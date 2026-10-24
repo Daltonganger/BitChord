@@ -36,6 +36,7 @@ struct ListenTogetherView: View {
     @Environment(ToastCenter.self) private var toast
     @Environment(PartyStore.self) private var party
     @Environment(AppModel.self) private var appModel
+    @Environment(AuthController.self) private var auth
 
     /// Which sheet is up, if any.
     ///
@@ -72,6 +73,13 @@ struct ListenTogetherView: View {
                     activitySection(entries)
                 }
             } else {
+                if !auth.signedIn {
+                    // Upstream shows a sign-in group instead of party controls
+                    // when signed out (ListenTogetherScreen.kt:487): hosting is
+                    // an account act — the party rides the host's YouTube
+                    // identity, and a member's presence has to be attributable.
+                    signInSection
+                }
                 landingSection
             }
             if sheet == nil, let message = party.failure ?? party.state.error?.message {
@@ -153,11 +161,36 @@ struct ListenTogetherView: View {
 
     // MARK: - Not in a party
 
+    /// Upstream's sign-in group (`listen_together_sign_in_footer`): the row
+    /// opens the same sign-in the rest of the app uses, and the landing below
+    /// stays visible but inert.
+    private var signInSection: some View {
+        Section {
+            Button {
+                auth.loginPresented = true
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Sign in")
+                            .foregroundStyle(.primary)
+                        Text("Not signed in")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "rectangle.portrait.and.arrow.right")
+                }
+            }
+        } footer: {
+            Text("Listening together needs an account, so everyone in the party can see who else is in it.")
+        }
+    }
+
     private var landingSection: some View {
         Section {
             PartyLanding(
                 avatarUrl: party.avatarUrl,
-                enabled: party.hasServer && !party.busy,
+                enabled: auth.signedIn && party.hasServer && !party.busy,
                 serverMissing: !party.hasServer,
                 busy: party.busy,
                 onCreate: { sheet = .create },
