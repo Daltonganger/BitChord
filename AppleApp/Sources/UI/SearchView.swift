@@ -754,11 +754,24 @@ struct SearchView: View {
                     }
                 }
             }
+            // Upstream's `searchTypeaheadDropdown`: live media rows while the
+            // field is still being edited, so a half-typed query already answers
+            // the question. They sit above the recents — the recents list is long
+            // and used to push the answers below the fold, where nobody saw them.
+            // Capped short because a dropdown is not a results page.
+            let media = Array(typeaheadHits.prefix(8))
+            if !media.isEmpty {
+                Section {
+                    ForEach(media) { hit in
+                        typeaheadRow(hit)
+                    }
+                }
+            }
             // Upstream keeps recent searches in the same column as the
             // suggestions, so a query too short to produce any — or one the
             // service has nothing for — leaves something to tap rather than an
             // empty "Suggestions" header and no way onward.
-            let recent = RecentSearchStore.load()
+            let recent = recentSuggestions
             if !suggestions.isEmpty || !recent.isEmpty {
                 Section("Recent") {
                     ForEach(recent) { entity in
@@ -766,21 +779,21 @@ struct SearchView: View {
                     }
                 }
             }
-            // Upstream's `searchTypeaheadDropdown`: live media rows under the
-            // text completions while the field is still being edited, so a
-            // half-typed query already answers the question. Cleared the moment
-            // a search commits, like the suggestions above it.
-            if !typeaheadHits.isEmpty {
-                Section {
-                    ForEach(typeaheadHits) { hit in
-                        typeaheadRow(hit)
-                    }
-                }
-            }
         }
         .listStyle(.plain)
         .listSectionSeparator(.hidden)
         .scrollContentBackground(.hidden)
+    }
+
+    /// The recents under the dropdown. While a term is typed they narrow to the
+    /// three that match it (or the three most recent when none do), because the
+    /// full twenty-row list was competing with the answers for the same space.
+    private var recentSuggestions: [RecentSearchEntity] {
+        let all = RecentSearchStore.load()
+        let term = self.term
+        guard !term.isEmpty else { return all }
+        let matching = all.filter { $0.title.localizedCaseInsensitiveContains(term) }
+        return Array((matching.isEmpty ? all : matching).prefix(3))
     }
 
     /// One typeahead row: tapping the text searches it, tapping the arrow
