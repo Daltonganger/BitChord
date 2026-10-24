@@ -29,11 +29,11 @@ struct SongActionButtons: View {
         Button("Start Radio") { controller.playRadio(entry) }
         if auth.signedIn, let vid = entry.videoId {
             Divider()
-            Button(likeTitle(vid)) {
-                Task { await toggleLike(vid) }
+            Button(SongRatingActions.likeTitle(vid)) {
+                Task { await SongRatingActions.toggleLike(videoId: vid, controller: controller, toast: toast) }
             }
-            Button(dislikeTitle(vid)) {
-                Task { await toggleDislike(vid) }
+            Button(SongRatingActions.dislikeTitle(vid)) {
+                Task { await SongRatingActions.toggleDislike(videoId: vid, controller: controller, toast: toast) }
             }
             Button("Add to Playlist…") {
                 appModel.playlistPicker = PlaylistPickerRequest(videoId: vid, title: entry.title)
@@ -177,46 +177,47 @@ struct SongActionButtons: View {
             }
         } else {
             Button("Download") {
-                switch store.download(entry) {
-                case .started:
-                    toast.show("Downloading \(entry.title)")
-                case .blockedByWifiOnly:
-                    toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
-                case .alreadyExists:
-                    toast.show("\(entry.title) is already downloading or downloaded", kind: .info)
-                case .ignoredLocalTrack:
-                    break
-                }
+                SongRatingActions.startDownload(entry, toast: toast)
             }
         }
     }
+}
 
-    private func likeTitle(_ videoId: String) -> String {
+/// One implementation of "rate the playing track" and "download it".
+///
+/// A context menu and the Mac's menu bar both act on the current track, and the
+/// dislike rule — the second tap is an undo and must **not** skip — is exactly the
+/// kind of rule that drifts when it is written twice. Same for the download
+/// switches, whose four answers (started, refused on metered data, already there,
+/// local track) each have their own answer to the listener.
+@MainActor
+enum SongRatingActions {
+    /// The label, which is upstream's: the second tap is an undo and says so.
+    static func likeTitle(_ videoId: String) -> String {
         LibraryActions.cachedLike(videoId) == "LIKE" ? "Remove Like" : "Like"
     }
 
-    private func toggleLike(_ videoId: String) async {
-        // Same shape as `toggleDislike` below: the optimistic write and its
-        // rollback live in `LibraryActions.toggleLike`, and a refusal is said
-        // out loud instead of being written to `_`.
+    static func dislikeTitle(_ videoId: String) -> String {
+        LibraryActions.cachedLike(videoId) == "DISLIKE" ? "Undo Dislike" : "Dislike"
+    }
+
+    static func toggleLike(videoId: String, controller: PlaybackController, toast: ToastCenter) async {
+        // The optimistic write and its rollback live in
+        // `LibraryActions.toggleLike`, and a refusal is said out loud instead of
+        // being written to `_`.
         if let failure = await controller.toggleLikeAndWait(videoId: videoId) {
             toast.show(failure, kind: .failure)
         }
     }
 
-    /// The label, which is upstream's: the second tap is an undo and says so.
-    private func dislikeTitle(_ videoId: String) -> String {
-        LibraryActions.cachedLike(videoId) == "DISLIKE" ? "Undo Dislike" : "Dislike"
-    }
-
     /// Thumb down, and move on if this is the track that is playing.
     ///
     /// The decision is `shouldSkipAfterDislike` in the shared module rather than
-    /// anything written here, because it is a rule with an edge case — the second tap
-    /// is an undo and must *not* skip — and the edge case is the whole reason the rule
-    /// exists. The previous status is read before the write, so the answer describes
-    /// what the track was and not what it became.
-    private func toggleDislike(_ videoId: String) async {
+    /// anything written here, because it is a rule with an edge case — the second
+    /// tap is an undo and must *not* skip — and the edge case is the whole reason
+    /// the rule exists. The previous status is read before the write, so the answer
+    /// describes what the track was and not what it became.
+    static func toggleDislike(videoId: String, controller: PlaybackController, toast: ToastCenter) async {
         let wasDisliked = LibraryActions.cachedLike(videoId) == "DISLIKE"
         let previous = wasDisliked
             ? LikeStatus.dislike
@@ -233,6 +234,20 @@ struct SongActionButtons: View {
             currentVideoId: currentId
         ) {
             controller.next()
+        }
+    }
+
+    /// Ask for a download and say what came of it.
+    static func startDownload(_ entry: QueueEntry, toast: ToastCenter) {
+        switch DownloadStore.shared.download(entry) {
+        case .started:
+            toast.show("Downloading \(entry.title)")
+        case .blockedByWifiOnly:
+            toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
+        case .alreadyExists:
+            toast.show("\(entry.title) is already downloading or downloaded", kind: .info)
+        case .ignoredLocalTrack:
+            break
         }
     }
 }

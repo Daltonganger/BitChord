@@ -193,7 +193,7 @@ struct BitChordApp: App {
         .windowStyle(.automatic)
         .commands {
             SidebarCommands()
-            PlaybackCommands(controller: controller, appModel: appModel)
+            PlaybackCommands(controller: controller, appModel: appModel, auth: auth, toast: toast)
             MiniPlayerCommands()
         }
 #endif
