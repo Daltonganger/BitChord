@@ -193,11 +193,12 @@ func laysOut<V: View>(_ view: V, label: String, width: CGFloat = 900, height: CG
 }
 
 @MainActor
-func screen(_ store: PartyStore) -> some View {
+func screen(_ store: PartyStore, _ auth: AuthController) -> some View {
     NavigationStack { ListenTogetherView() }
         .environment(store)
         .environment(ToastCenter())
         .environment(AppModel())
+        .environment(auth)
 }
 
 @MainActor
@@ -380,7 +381,18 @@ func run() {
 
     // ---- Layout: every state, every sheet. -------------------------------
 
-    laysOut(screen(PartyStore()), label: "idle screen")
+    // Sign-in state is forced after init: this process reads the real Keychain,
+    // and what the screens under test read is the flags.
+    let signedOut = AuthController()
+    signedOut.signedIn = false
+    let signedIn = AuthController()
+    signedIn.signedIn = true
+    signedIn.accountName = "Checker"
+
+    // The landing signed out shows the sign-in section and an inert landing —
+    // the state a fresh install arrives at.
+    laysOut(screen(PartyStore(), signedOut), label: "signed-out landing")
+    laysOut(screen(PartyStore(), signedIn), label: "idle screen")
 
     let host = PartyStore()
     host.setForCheck(
@@ -397,7 +409,7 @@ func run() {
         ),
         code: "ABC123"
     )
-    laysOut(screen(host), label: "in-party screen as host")
+    laysOut(screen(host, signedIn), label: "in-party screen as host")
     check("the host is in a party", host.inParty && host.isHost)
     check("the host may drive the music", host.state.canControl)
     check("the host's own row is marked", host.state.isMe(member: sam) && !host.state.isMe(member: alex))
@@ -439,7 +451,7 @@ func run() {
         ),
         code: "XYZ789"
     )
-    laysOut(screen(locked), label: "screen as a locked listener")
+    laysOut(screen(locked, signedIn), label: "screen as a locked listener")
     check("a locked listener may not drive the music", !locked.state.canControl)
     check("a locked listener is told so", locked.state.controlsLocked)
     check("a locked listener is still in the party", locked.inParty)
@@ -468,7 +480,7 @@ func run() {
         ),
         code: "FULL01"
     )
-    laysOut(screen(full), label: "a full party")
+    laysOut(screen(full, signedIn), label: "a full party")
     check("a full party has no room", !full.state.hasRoom && full.state.isFull)
     check("a full party is only full to somebody joining", full.state.isFullFor(joining: false) == false)
 
@@ -477,14 +489,14 @@ func run() {
         partyState(you: sam, members: [sam], connection: PartyConnection.connecting),
         code: "WAIT01"
     )
-    laysOut(screen(cold), label: "a connecting party")
+    laysOut(screen(cold, signedIn), label: "a connecting party")
 
     let measuring = PartyStore()
     measuring.setForCheck(
         partyState(you: sam, members: [sam], connection: PartyConnection.live, clockSynced: false),
         code: "MEAS01"
     )
-    laysOut(screen(measuring), label: "a party measuring its clock")
+    laysOut(screen(measuring, signedIn), label: "a party measuring its clock")
 
     let refused = PartyStore()
     refused.setForCheck(
@@ -492,14 +504,14 @@ func run() {
         code: "ERR001"
     )
     refused.failure = "This party is full"
-    laysOut(screen(refused), label: "a party showing a refusal")
+    laysOut(screen(refused, signedIn), label: "a party showing a refusal")
 
     let quiet = PartyStore()
     quiet.setForCheck(
         partyState(you: sam, members: [sam], connection: PartyConnection.live),
         code: "QUIET1"
     )
-    laysOut(screen(quiet), label: "a party with nothing in its log")
+    laysOut(screen(quiet, signedIn), label: "a party with nothing in its log")
 
     // The sheets, each at the size a sheet is actually presented at.
     func sheet<V: View>(_ view: V, _ label: String) {
@@ -507,7 +519,8 @@ func run() {
             NavigationStack { view }
                 .environment(idle)
                 .environment(ToastCenter())
-                .environment(AppModel()),
+                .environment(AppModel())
+                .environment(signedIn),
             label: label,
             width: 460,
             height: 640
