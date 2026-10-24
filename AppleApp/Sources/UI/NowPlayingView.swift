@@ -225,7 +225,14 @@ struct NowPlayingView: View {
     /// its seam-aware artwork mesh behind the edge-to-edge sleeve.
     private func usesBlurredArtworkBackdrop(width: CGFloat, height: CGFloat) -> Bool {
         pane != .main || PlayerLayout.takesLandscapeShape(width: width, height: height) ||
-            width >= PlayerLayout.tabletMinWidth
+            width >= PlayerLayout.tabletMinWidth || videoShowing
+    }
+
+    /// A music video is on screen. The phone's backdrop is then the blurred
+    /// sleeve, as on Mac and iPad: the cover continued under the hero fought
+    /// the video for contrast.
+    private var videoShowing: Bool {
+        showMusicVideos && VideoPlayback.shared.showsVideo
     }
 
     /// A regular-width window: an iPad, or a Max phone on its side. The player
@@ -291,7 +298,7 @@ struct NowPlayingView: View {
                 ZStack {
                     MeshBackdrop(seed: controller.current?.id.hashValue ?? 0, artwork: controller.current?.artworkData)
                         .ignoresSafeArea()
-                    if !isIPad && pane == .main && !PlayerLayout.takesLandscapeShape(width: geo.size.width, height: geo.size.height) && fullBleedOn {
+                    if !isIPad && pane == .main && !PlayerLayout.takesLandscapeShape(width: geo.size.width, height: geo.size.height) && fullBleedOn && !videoShowing {
                         ArtworkContinuation(entry: controller.current, seam: geo.size.width)
                             .ignoresSafeArea(edges: .bottom)
                     }
