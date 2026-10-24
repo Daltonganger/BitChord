@@ -17,9 +17,9 @@ import kotlin.test.assertEquals
  * rather than mint another signed URL.
  */
 class VideoSideCoalescingTest {
-    private suspend fun ask(videoId: String) = withTimeout(5_000) {
+    private suspend fun ask(videoId: String, forceRefresh: Boolean = false) = withTimeout(5_000) {
         kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
-            PlayerBridge.resolveVideo(videoId) { _, message ->
+            PlayerBridge.resolveVideo(videoId, forceRefresh = forceRefresh) { _, message ->
                 if (message == null) continuation.resume(Unit)
                 else continuation.resumeWithException(IllegalStateException(message))
             }
@@ -84,6 +84,16 @@ class VideoSideCoalescingTest {
             ask("coalesce-cached")
         }
         assertEquals(1, loads)
+    }
+
+    @Test
+    fun aForcedAskBypassesTheCache() = runBlocking {
+        var loads = 0
+        withLoader({ loads++; side() }) {
+            ask("coalesce-force")
+            ask("coalesce-force", forceRefresh = true)
+        }
+        assertEquals(2, loads)
     }
 
     @Test

@@ -139,6 +139,10 @@ final class PlaybackController {
     }
 
     var isPlaying: Bool { state == .playing }
+    /// Read-only, for the muted picture player (O9): the transport rate the
+    /// engine is actually running at. The video side follows it; nothing writes
+    /// through this.
+    var effectivePlaybackRate: Double { playbackRate }
     /// The listener paused while the track was still loading: finish the load,
     /// then sit paused at its start instead of discarding it.
     private var holdAfterLoad = false

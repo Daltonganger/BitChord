@@ -41,6 +41,7 @@ struct SettingsView: View {
     @State private var reduceAnimation = PlatformSettings.shared.getBoolean(key: "reduce_animation", default: false)
     @State private var fullBleed = PlatformSettings.shared.getBoolean(key: "full_bleed_artwork", default: true)
     @AppStorage("lyrics_blur") private var lyricsBlur = true
+    @AppStorage("show_music_videos") private var showMusicVideos = false
     @AppStorage("translation_language") private var translationLanguage = ""
     @State private var syncedLyrics = PlatformSettings.shared.getBoolean(key: "synced_lyrics", default: true)
     @State private var convertVideo = PlatformSettings.shared.getBoolean(key: "convert_video_to_audio", default: true)
@@ -756,6 +757,14 @@ struct SettingsView: View {
                     EmptyView()
                 }
             }
+        }
+        rows.row("Show Music Videos", "video", "music video", "clip", "picture", "avc", "mv") {
+            SettingsToggleLine(
+                glyph: .video,
+                title: "Show Music Videos",
+                subtitle: "Plays the picture with the song when a music video exists. Off by default; nothing loads while the player is closed.",
+                isOn: $showMusicVideos
+            )
         }
         rows.row("Trim Leading and Trailing Silence", "silence", "trim", "edges", "gap") {
             Toggle("Trim Leading and Trailing Silence", isOn: $trimEdges)

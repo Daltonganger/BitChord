@@ -95,9 +95,12 @@ struct PlaybackPill: View {
     @ViewBuilder
     private var artworkOrPlaceholder: some View {
         if controller.current != nil {
-            ArtworkView(entry: controller.current, side: 40)
-                .clipShape(.rect(cornerRadius: 8, style: .continuous))
-                .overlay {
+            VideoSurface(cornerRadius: 8) {
+                ArtworkView(entry: controller.current, side: 40)
+            }
+            .frame(width: 40, height: 40)
+            .clipShape(.rect(cornerRadius: 8, style: .continuous))
+            .overlay {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(.white.opacity(0.10), lineWidth: 0.5)
                 }
