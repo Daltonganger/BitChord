@@ -921,14 +921,34 @@ struct DetailView: View {
     /// the release's own page.
     @ViewBuilder
     private func latestReleaseCard(_ card: ShelfCard) -> some View {
-        if let id = card.browseId, !id.isEmpty {
-            NavigationLink(destination: DetailView(browseId: id, initialTitle: card.title)) {
+        HStack(spacing: 14) {
+            if let id = card.browseId, !id.isEmpty {
+                NavigationLink(destination: DetailView(browseId: id, initialTitle: card.title)) {
+                    latestReleaseBody(card)
+                }
+                .buttonStyle(.plain)
+            } else {
                 latestReleaseBody(card)
             }
-            .buttonStyle(.plain)
-        } else {
-            latestReleaseBody(card)
+
+            // The save circle is a sibling of the link, never inside its label:
+            // a Button nested in a NavigationLink label is unreliable (the tap
+            // opens the release or is swallowed), so the circle sits beside it.
+            if auth.signedIn, latestReleaseLibraryId != nil {
+                CircleIconButton(
+                    icon: Image(systemName: latestReleaseSaved ? "checkmark" : "plus"),
+                    label: latestReleaseSaved ? "Remove from Library" : "Add to Library",
+                    size: 40,
+                    active: latestReleaseSaved,
+                    disabled: savingLatestRelease
+                ) {
+                    Task { await toggleLatestReleaseSave() }
+                }
+            }
         }
+        .padding(12)
+        .frame(maxWidth: 860)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func latestReleaseBody(_ card: ShelfCard) -> some View {
@@ -953,26 +973,12 @@ struct DetailView: View {
                 }
             }
             Spacer(minLength: 8)
-            if auth.signedIn, latestReleaseLibraryId != nil {
-                CircleIconButton(
-                    icon: Image(systemName: latestReleaseSaved ? "checkmark" : "plus"),
-                    label: latestReleaseSaved ? "Remove from Library" : "Add to Library",
-                    size: 40,
-                    active: latestReleaseSaved,
-                    disabled: savingLatestRelease
-                ) {
-                    Task { await toggleLatestReleaseSave() }
-                }
-            }
             Image(.bchChevronRight)
                 .resizable()
                 .scaledToFit()
                 .frame(width: 12)
                 .foregroundStyle(.tertiary)
         }
-        .padding(12)
-        .frame(maxWidth: 860)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .contentShape(.rect)
     }
 
