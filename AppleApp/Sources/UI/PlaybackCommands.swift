@@ -82,5 +82,21 @@ struct PlaybackCommands: Commands {
             Button("Go to Library") { appModel.requestedTab = .libraryYouTube }
                 .keyboardShortcut(.rightArrow, modifiers: .command)
         }
+
+        // File ▸ Import. The toolbar copies of these live in the Playlists page's
+        // overflow, where the transport pushes them out of sight; the menu reaches
+        // them from anywhere by switching there first.
+        CommandGroup(after: .newItem) {
+            Button("Import from Spotify…") {
+                appModel.requestedTab = .libraryPlaylists
+                appModel.spotifyImportPresented = true
+            }
+            .keyboardShortcut("i", modifiers: [.command, .shift])
+
+            Button("Import Playlist File…") {
+                appModel.requestedTab = .libraryPlaylists
+                appModel.playlistFileImportPresented = true
+            }
+        }
     }
 }

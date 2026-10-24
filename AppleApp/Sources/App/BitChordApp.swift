@@ -275,6 +275,10 @@ final class AppModel {
     var playlistPicker: PlaylistPickerRequest?
     var downloadManagerPresented = false
     var replayPresented = false
+    /// The two import flows, reachable from the Mac's File menu from any page:
+    /// the command switches to Playlists and asks the page to open its sheet.
+    var spotifyImportPresented = false
+    var playlistFileImportPresented = false
     /// Which Replay story to open when the sheet arrives. Set alongside
     /// `replayPresented` by library heroes — a tapped card opens Replay at
     /// its chart, the empty-state banner at the intro — and consumed by
