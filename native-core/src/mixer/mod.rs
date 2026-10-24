@@ -525,6 +525,71 @@ fn cold_end_gains(progress: f64, hold: f64) -> (f32, f32) {
     (rise as f32, angle.cos() as f32)
 }
 
+/// The incoming's level by the throw when an effect plan does not carry one.
+const EFFECT_INTRO_DB: f64 = -4.0;
+/// Under the outgoing the incoming's bass is held out: one low end at a time,
+/// and the next record's arrives on the landing.
+const EFFECT_INTRO_HIGH_PASS_HZ: f64 = 300.0;
+/// With `filter_sweep` at 1 (two grids that do not agree) the incoming's top
+/// is held this low too, so its hats never tick against the outgoing's.
+const EFFECT_INTRO_LOW_PASS_HZ: f64 = 3_500.0;
+
+/// The `(rise, fall)` pair on an effect handover with an intro of `hold`
+/// (a fraction of the fade).
+///
+/// Across the intro the outgoing stays at unity and the incoming climbs to
+/// `intro_db`, filtered by [`ride_effect_intro`]: plainly audible, the two
+/// records playing together. From the throw the technique shapes the outgoing
+/// (its own dry curve, so `fall` matters only until then) and the incoming
+/// rises the rest of the way.
+fn effect_intro_gains(progress: f64, hold: f64, intro_db: f64) -> (f32, f32) {
+    let p = progress.clamp(0.0, 1.0);
+    let h = hold.clamp(0.0, 0.95);
+    if h <= 0.0 {
+        return fade_gains(p, false);
+    }
+    let intro = db_to_gain(intro_db.min(0.0));
+    if p <= h {
+        return ((intro * smoothstep(p / h)) as f32, 1.0);
+    }
+    let angle = ((p - h) / (1.0 - h)) * core::f64::consts::FRAC_PI_2;
+    let rise = intro + (1.0 - intro) * angle.sin();
+    (rise as f32, angle.cos() as f32)
+}
+
+/// The incoming's filter on an effect handover: bass out until the landing,
+/// and on a grid clash (`band` 1) the top held back until the throw, opening
+/// across it, so the record is whole when it lands.
+fn ride_effect_intro(progress: f64, hold: f64, landing: f64, band: f64, inc: &mut TransitionFilter) {
+    if progress >= landing {
+        inc.open();
+        return;
+    }
+    let opening = if landing > hold {
+        ((progress - hold) / (landing - hold)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let amount = band.clamp(0.0, 1.0) * (1.0 - opening);
+    let low_pass = glide(TransitionFilter::open_hz() as f64, EFFECT_INTRO_LOW_PASS_HZ, amount);
+    inc.set_cutoffs(low_pass as f32, EFFECT_INTRO_HIGH_PASS_HZ as f32);
+}
+
+/// Where an effect plan's incoming lands, as a fraction of a fade of
+/// `fade_seconds` whose last `1 - hold` is the technique window.
+fn effect_landing(plan: &TransitionPlan, hold: f64) -> f64 {
+    let land = fx::landing_fraction(plan.style, plan.beat_seconds).unwrap_or(0.5);
+    hold + (1.0 - hold) * land
+}
+
+fn effect_intro_db(plan: &TransitionPlan) -> f64 {
+    if plan.bed_gain_db < 0.0 {
+        plan.bed_gain_db
+    } else {
+        EFFECT_INTRO_DB
+    }
+}
+
 /// A plan's hold as a fraction of the fade actually being played. The engine's
 /// span can be shorter than the plan's `fade_seconds` (a short incoming is
 /// capped at a third of itself), and the hold is anchored to the blend start,
@@ -2896,22 +2961,18 @@ impl MixerState {
                 .as_ref()
                 .map(|voice| voice.emitted_dev_frames)
                 .unwrap_or(0);
-            let (rise, fall) = {
-                let p = (played as f64 / fade as f64).clamp(0.0, 1.0);
-                let hold = hold_fraction(&t.plan, fade as f64 / self.device_rate as f64);
-                if hold > 0.0 {
-                    cold_end_gains(p, hold)
-                } else {
-                    fade_gains(p, false)
-                }
-            };
+            let p = (played as f64 / fade as f64).clamp(0.0, 1.0);
+            let hold = hold_fraction(&t.plan, fade as f64 / self.device_rate as f64);
+            let (rise, fall) = effect_intro_gains(p, hold, effect_intro_db(&t.plan));
+            let landing = effect_landing(&t.plan, hold);
+            let band = t.plan.filter_sweep;
             if let Some(current) = &mut self.current {
                 current.gain = fall;
                 current.filter.open();
             }
             if let Some(incoming) = &mut self.incoming {
                 incoming.gain = rise;
-                incoming.filter.open();
+                ride_effect_intro(p, hold, landing, band, &mut incoming.filter);
             }
             return played >= fade;
         }
@@ -4683,7 +4744,9 @@ mod tests {
         let hold = hold_fraction(&plan, FADE_SECONDS);
         while done < fade_frames {
             let p = done as f64 / fade_frames as f64;
-            let (rise, fall) = if style.is_effect() || style == TransitionStyle::EqualPower {
+            let (rise, fall) = if style.is_effect() {
+                effect_intro_gains(p, hold, effect_intro_db(&plan))
+            } else if style == TransitionStyle::EqualPower {
                 if hold > 0.0 {
                     cold_end_gains(p, hold)
                 } else {
@@ -6899,6 +6962,36 @@ mod tests {
     /// E-2: the outgoing holds unity through the final chord's attack, the
     /// incoming waits underneath, and the two cross over the decay without the
     /// summed level lifting or dipping by even a decibel.
+    #[test]
+    fn an_effect_intro_has_both_records_playing_before_the_throw() {
+        let hold = 0.6;
+        // Across the intro the outgoing is at unity and the incoming climbs
+        // to its intro level, reaching it exactly at the throw.
+        let (mid_rise, mid_fall) = effect_intro_gains(0.3, hold, -4.0);
+        assert_eq!(mid_fall, 1.0);
+        assert!(mid_rise > 0.2, "the next record is audible mid-intro: {mid_rise}");
+        let (at_throw, fall) = effect_intro_gains(hold, hold, -4.0);
+        assert!((at_throw as f64 - db_to_gain(-4.0)).abs() < 1e-4);
+        assert_eq!(fall, 1.0);
+        // No step anywhere, and unity at the end.
+        let mut last = 0.0f32;
+        for step in 0..=1000 {
+            let (rise, _) = effect_intro_gains(step as f64 / 1000.0, hold, -4.0);
+            assert!(rise >= last - 1e-6 && rise - last < 0.01, "step at {step}");
+            last = rise;
+        }
+        assert!((last - 1.0).abs() < 1e-6);
+        // The bass waits for the landing; the top opens across the throw.
+        let mut filter = TransitionFilter::new(2, 48_000);
+        let landing = effect_landing(
+            &TransitionPlan { style: TransitionStyle::EchoOut, beat_seconds: 0.5, ..Default::default() },
+            hold,
+        );
+        assert!(landing > hold && landing < 1.0);
+        ride_effect_intro(0.3, hold, landing, 1.0, &mut filter);
+        assert!(filter.active(), "filtered under the outgoing");
+    }
+
     #[test]
     fn a_cold_ending_holds_the_chord_at_unity() {
         // Pair 5's shape: a 3.36 s phrase inside a 4.86 s blend, so the chord's
