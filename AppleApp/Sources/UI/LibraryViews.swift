@@ -15,6 +15,11 @@ struct HomeView: View {
     @Environment(PlaybackController.self) private var controller
     @Environment(AuthController.self) private var auth
     @Environment(ToastCenter.self) private var toast
+    /// An externally owned scroll position, when the caller survives the view:
+    /// the Mac sidebar recreates this view on every row switch, and the feed
+    /// is a singleton while the reader's place in it was not (upstream hoists
+    /// `homeListState` outside its tab switch for the same reason).
+    var scrollPosition: Binding<ScrollPosition>? = nil
 
     var body: some View {
         NavigationStack {
@@ -29,16 +34,19 @@ struct HomeView: View {
                     ToolbarItem(placement: .topBarTrailing) { TopBarAccountButton() }
                     #endif
                 }
-                .refreshable { await feed.load(force: true, epoch: auth.sessionEpoch) }
-                .task(id: auth.sessionEpoch) { await feed.load(force: false, epoch: auth.sessionEpoch) }
+                .refreshable { await loadFeed(force: true) }
+                .task(id: auth.sessionEpoch) { await loadFeed(force: false) }
                 .onAppear {
-                    // Upstream's onHomeShown: coming back to the tab refetches
-                    // the feed over the loaded shelves, because Recents went
-                    // stale the moment something played elsewhere. The first
-                    // appearance is skipped — the task above owns the initial
-                    // load, and a feed still loading has nothing to refresh.
-                    if case .loaded = feed.phase {
-                        Task { await feed.load(force: true, epoch: auth.sessionEpoch) }
+                    // Upstream's onHomeShown refetches only when a play has
+                    // been registered since the feed was fetched
+                    // (MainViewModel.kt:1478-1494): re-fetching otherwise
+                    // would rearrange the page under whoever is reading it,
+                    // and a NavigationStack root's onAppear fires on every
+                    // pop back as well. "A play since" reads here as "the
+                    // current track is not the one the feed loaded under".
+                    if case .loaded = feed.phase,
+                       feed.loadedDuringTrackId != controller.current?.id {
+                        Task { await loadFeed(force: true) }
                     }
                 }
                 .onChange(of: feed.refreshError) { _, message in
@@ -49,6 +57,13 @@ struct HomeView: View {
                     if let message { toast.show(message) }
                 }
         }
+    }
+
+    /// Every Home load goes through here so the loader knows what was playing
+    /// when it finished — the staleness mark the onAppear check reads.
+    private func loadFeed(force: Bool) async {
+        await feed.load(force: force, epoch: auth.sessionEpoch)
+        feed.noteLoaded(duringTrackId: controller.current?.id)
     }
 
     @ViewBuilder
@@ -93,6 +108,7 @@ struct HomeView: View {
                 .padding(.horizontal, 24)
                 .padding(.vertical, 20)
             }
+            .modifier(ExternalScrollPosition(position: scrollPosition))
         }
     }
 
