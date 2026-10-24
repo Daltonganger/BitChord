@@ -401,6 +401,77 @@ fn vocal_probability_from(low: f64, vocal: f64, high: f64, flatness: f64) -> f64
     clamp(1.0 / (1.0 + (-score).exp()), 0.0, 1.0)
 }
 
+/// Krumhansl-Schmuckler profiles, rotated over all twelve roots.
+const KEY_MAJOR: [f64; 12] = [
+    6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
+];
+const KEY_MINOR: [f64; 12] = [
+    6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
+];
+const KEY_NAMES: [&str; 12] = [
+    "C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B",
+];
+
+/// The best key of a chroma and how sure it is.
+fn estimate_key(chroma: &[f64; 12]) -> (String, f64) {
+    let mut candidates: Vec<(f64, String)> = Vec::with_capacity(24);
+    for root in 0..12usize {
+        let major: Vec<f64> = (0..12)
+            .map(|pitch| KEY_MAJOR[(pitch + 12 - root) % 12])
+            .collect();
+        let minor: Vec<f64> = (0..12)
+            .map(|pitch| KEY_MINOR[(pitch + 12 - root) % 12])
+            .collect();
+        candidates.push((
+            correlation(chroma, &major),
+            format!("{} major", KEY_NAMES[root]),
+        ));
+        candidates.push((
+            correlation(chroma, &minor),
+            format!("{} minor", KEY_NAMES[root]),
+        ));
+    }
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+    match (candidates.first(), candidates.get(1)) {
+        (Some(best), Some(runner_up)) => (best.1.clone(), key_confidence(best.0, runner_up.0)),
+        _ => (String::new(), 0.0),
+    }
+}
+
+/// Pearson correlation between a chroma and a key profile.
+///
+/// The dot product this replaced was not scale-free, and the profile sums are
+/// not equal (Krumhansl's minor profile sums about 6 % higher than the major
+/// one), so every track read minor regardless of its chroma. Correlation
+/// removes both the magnitude and the template's own mean, which is what makes
+/// the twenty-four rotations comparable.
+fn correlation(chroma: &[f64; 12], profile: &[f64]) -> f64 {
+    let count = chroma.len() as f64;
+    let mean_chroma = chroma.iter().sum::<f64>() / count;
+    let mean_profile = profile.iter().sum::<f64>() / count;
+    let mut covariance = 0.0;
+    let mut chroma_variance = 0.0;
+    let mut profile_variance = 0.0;
+    for (value, expected) in chroma.iter().zip(profile) {
+        let chroma_delta = value - mean_chroma;
+        let profile_delta = expected - mean_profile;
+        covariance += chroma_delta * profile_delta;
+        chroma_variance += chroma_delta * chroma_delta;
+        profile_variance += profile_delta * profile_delta;
+    }
+    if chroma_variance <= 0.0 || profile_variance <= 0.0 {
+        return 0.0;
+    }
+    covariance / (chroma_variance.sqrt() * profile_variance.sqrt())
+}
+
+/// How sure the best rotation is: the gap to the runner-up, on the correlation
+/// scale. A relative-major/minor pair (identical notes) lands near zero because
+/// the gap really is small; a clear key lands well above 0.25.
+fn key_confidence(best: f64, runner_up: f64) -> f64 {
+    clamp((best - runner_up) * 3.0, 0.0, 1.0)
+}
+
 fn analyze_key_and_timbre(
     samples: &[f32],
     sample_rate: f64,
@@ -512,34 +583,10 @@ fn analyze_key_and_timbre(
         }
     }
 
-    const MAJOR: [f64; 12] = [
-        6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88,
-    ];
-    const MINOR: [f64; 12] = [
-        6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
-    ];
-    const NAMES: [&str; 12] = [
-        "C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B",
-    ];
-    let mut candidates: Vec<(f64, String)> = Vec::with_capacity(24);
-    for root in 0..12usize {
-        let mut major_score = 0.0;
-        let mut minor_score = 0.0;
-        for pitch in 0..12usize {
-            major_score += chroma[pitch] * MAJOR[(pitch + 12 - root) % 12];
-            minor_score += chroma[pitch] * MINOR[(pitch + 12 - root) % 12];
-        }
-        candidates.push((major_score, format!("{} major", NAMES[root])));
-        candidates.push((minor_score, format!("{} minor", NAMES[root])));
-    }
-    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
-    if chroma_weight > 0.0 && !candidates.is_empty() {
-        result.key = candidates[0].1.clone();
-        result.key_confidence = clamp(
-            (candidates[0].0 - candidates[1].0) / candidates[0].0.max(0.01) * 4.0,
-            0.0,
-            1.0,
-        );
+    if chroma_weight > 0.0 {
+        let (key, confidence) = estimate_key(&chroma);
+        result.key = key;
+        result.key_confidence = confidence;
     }
 
     result.vocal_probability = vocal_probability_from(
@@ -983,6 +1030,51 @@ pub(crate) fn analyze_audio(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chroma_from(pairs: &[(usize, f64)]) -> [f64; 12] {
+        let mut chroma = [0.02f64; 12];
+        for (pitch, value) in pairs {
+            chroma[*pitch] = *value;
+        }
+        let sum: f64 = chroma.iter().sum();
+        for value in &mut chroma {
+            *value /= sum;
+        }
+        chroma
+    }
+
+    #[test]
+    fn a_c_major_chroma_reads_c_major_with_confidence() {
+        // The Krumhansl weights themselves: the answer has to be the template.
+        let key = KEY_MAJOR;
+        let (name, confidence) = estimate_key(&key);
+        assert_eq!(name, "C major");
+        assert!(confidence > 0.9, "confidence {confidence}");
+    }
+
+    #[test]
+    fn a_major_triad_reads_major_and_a_minor_triad_reads_minor() {
+        // C E G with a little D and B: C major, and confident enough to be
+        // trusted by the planner (0.25).
+        let major = chroma_from(&[(0, 6.0), (4, 4.5), (7, 4.0), (2, 2.0), (11, 2.0)]);
+        let (name, confidence) = estimate_key(&major);
+        assert_eq!(name, "C major");
+        assert!(confidence > 0.25, "confidence {confidence}");
+        // A C E with a little G and B: A minor, the relative of the same notes.
+        let minor = chroma_from(&[(9, 6.0), (0, 4.5), (4, 4.0), (7, 2.0), (11, 2.0)]);
+        let (name, confidence) = estimate_key(&minor);
+        assert_eq!(name, "A minor");
+        assert!(confidence > 0.25, "confidence {confidence}");
+    }
+
+    #[test]
+    fn a_flat_chroma_has_no_key_and_no_confidence() {
+        // Every rotation of a flat chroma correlates equally: no key, and the
+        // planner must not trust it (it gates keys at 0.25).
+        let flat = [1.0f64; 12];
+        let (_, confidence) = estimate_key(&flat);
+        assert!(confidence < 0.01, "confidence {confidence}");
+    }
 
     #[test]
     fn envelope_finds_audible_start_and_content_end() {
