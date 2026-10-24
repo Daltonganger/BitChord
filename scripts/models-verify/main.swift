@@ -202,6 +202,33 @@ do {
     }
 }
 
+// MARK: - 1e. The old 113 MB vocal download is removed
+
+print("\nlegacy vocal download")
+do {
+    let directory = temporaryDirectory("legacy-vocals")
+    let legacy = directory.appendingPathComponent("vocals_umxhq.onnx")
+    let part = directory.appendingPathComponent("vocals_umxhq.onnx.part")
+    let previous = directory.appendingPathComponent("vocals_umxhq.onnx.prev")
+    try Data(repeating: 0xAB, count: 4096).write(to: legacy)
+    try Data(repeating: 0xAB, count: 1024).write(to: part)
+    try Data(repeating: 0xAB, count: 1024).write(to: previous)
+    let record = "{\"sha256\":\"\(sha256(of: legacy))\",\"bytes\":4096,\"installedAt\":0}"
+    try Data("{\"vocals_umxhq.onnx\":\(record)}".utf8)
+        .write(to: directory.appendingPathComponent("installed.json"))
+    let store = AutomixModelStore(
+        directory: directory,
+        specs: [spec(.beat, path: "good.bin", name: "beat.fixture", sha: fixture.goodSHA, size: fixture.size)]
+    )
+    store.refresh()
+    check("the old vocal download is removed", !FileManager.default.fileExists(atPath: legacy.path))
+    check("its resume file is removed", !FileManager.default.fileExists(atPath: part.path))
+    check("its fallback is removed", !FileManager.default.fileExists(atPath: previous.path))
+    let after = (try? Data(contentsOf: directory.appendingPathComponent("installed.json")))
+        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+    check("its record is removed", after["vocals_umxhq.onnx"] == nil)
+}
+
 // MARK: - 2. The right length with the wrong bytes is refused
 
 print("\nchecksum mismatch")

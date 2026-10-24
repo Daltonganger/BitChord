@@ -136,8 +136,6 @@ struct Analysis {
     bass_activity_mask: Vec<f64>,
     /// The full beat grid, for downbeat snapping.
     beats: Vec<f64>,
-    vocal_mask: Vec<f32>,
-    vocal_times: Vec<f64>,
     /// Whole-track DSP vocal heuristic (`AnalyzeKeyAndTimbre`), not the model
     /// mask mean.
     vocal_probability: f64,
@@ -837,6 +835,7 @@ fn analyze(
     decode: &impl Fn(&str, f64, f64, bool) -> Option<(Vec<f32>, u32, f64)>,
     duration: f64,
 ) -> Analysis {
+    let analysis_started = std::time::Instant::now();
     let mut analysis = Analysis {
         duration,
         ..Analysis::default()
@@ -988,11 +987,27 @@ fn analyze(
     // the DSP heuristic, matching upstream's two-signal split.
     if !skip_vocals {
         let vocal_window = vocal::MAX_WINDOW_SECONDS;
-        ingest_vocals(&mut analysis, path, 0.0, head_len.min(vocal_window), decode);
         // Upstream `mergeMasks`: the open-unmix head mask is higher quality than
         // the DSP heuristic, so where it exists it overrides the DSP mask on the
         // energy-curve grid.
-        merge_open_unmix_mask(&mut analysis);
+        ingest_vocals(&mut analysis, path, 0.0, head_len.min(vocal_window), decode);
+        // The tail is the window a handover actually covers, and the DSP
+        // heuristic cannot tell a sung outro from an instrumental one there.
+        // Run the model over the last window too, ending at the content end
+        // rather than the file end (which is silence). The middle keeps the DSP
+        // heuristic; the two model windows are merged independently.
+        let content_end = if analysis.content_end > 0.0 {
+            analysis.content_end
+        } else {
+            duration
+        };
+        if content_end > head_len.min(vocal_window) + 2.0 {
+            let tail_start = (content_end - vocal_window).max(0.0);
+            let tail = (content_end - tail_start).min(vocal_window);
+            if tail > 2.0 {
+                ingest_vocals(&mut analysis, path, tail_start, tail, decode);
+            }
+        }
     }
     if let Some(overlay) = overlays::get(path) {
         apply_overlay(&mut analysis, &overlay);
@@ -1012,6 +1027,13 @@ fn analyze(
         analysis.bpm = counted;
         analysis.beat_interval = 60.0 / counted;
     }
+    // The per-track analysis is the price of the real vocal mask: the owner's
+    // devices and the iPad report it, so a slow track is visible rather than
+    // just felt.
+    log::info!(
+        "automix analysis time {path}: {} ms",
+        analysis_started.elapsed().as_millis()
+    );
     analysis
 }
 
@@ -1037,26 +1059,33 @@ fn fold_tempo(bpm: f64) -> f64 {
     folded
 }
 
-/// Resamples the open-unmix head mask onto the energy-curve grid and overrides
-/// the DSP vocal mask where the open-unmix mask covers (upstream `mergeMasks`).
-fn merge_open_unmix_mask(analysis: &mut Analysis) {
-    if analysis.vocal_mask.is_empty() || analysis.vocal_times.is_empty() {
+/// Overlay one open-unmix window onto the DSP mask on the energy-curve grid.
+///
+/// The model's probability wins where the window has a frame; outside it the
+/// DSP heuristic stands. `offset` is the window's start on the track's timeline,
+/// so the head and the tail can be merged independently (upstream `mergeMasks`).
+fn merge_open_unmix_window(analysis: &mut Analysis, mask: &[f32], offset: f64) {
+    if mask.is_empty() || analysis.energy_curve.is_empty() {
         return;
     }
-    let last_vocal_time = *analysis.vocal_times.last().unwrap();
+    let hop = vocal::HOP as f64 / vocal::SAMPLE_RATE;
+    let last = offset + (mask.len() as f64 - 1.0) * hop;
     let mut cursor = 0usize;
     for (index, point) in analysis.energy_curve.iter().enumerate() {
-        if point.time > last_vocal_time + 0.5 {
-            break; // beyond the head window; the DSP mask stands.
+        if point.time < offset - 0.5 || point.time > last + 0.5 {
+            continue;
         }
-        while cursor + 1 < analysis.vocal_times.len()
-            && (analysis.vocal_times[cursor + 1] - point.time).abs()
-                < (analysis.vocal_times[cursor] - point.time).abs()
+        if index >= analysis.vocal_activity_mask.len() {
+            break;
+        }
+        while cursor + 1 < mask.len()
+            && (offset + (cursor as f64 + 1.0) * hop - point.time).abs()
+                < (offset + cursor as f64 * hop - point.time).abs()
         {
             cursor += 1;
         }
-        if cursor < analysis.vocal_mask.len() && index < analysis.vocal_activity_mask.len() {
-            let probability = (analysis.vocal_mask[cursor] as f64
+        if cursor < mask.len() {
+            let probability = (mask[cursor] as f64
                 * if point.energy > 0.25 { 1.0 } else { 0.3 })
             .clamp(0.0, 1.0);
             analysis.vocal_activity_mask[index] = probability;
@@ -1071,18 +1100,22 @@ fn ingest_vocals(
     duration: f64,
     decode: &impl Fn(&str, f64, f64, bool) -> Option<(Vec<f32>, u32, f64)>,
 ) {
-    let Some((stereo, rate, offset)) = decode(path, start, duration, false) else {
+    let Some((mut stereo, rate, offset)) = decode(path, start, duration, false) else {
         return;
     };
+    // The decoder reads in 4096-frame chunks and can overshoot the requested
+    // window by up to one chunk. The model's input is a fixed 960 frames, and a
+    // 22.24 s overshoot lands at 961+ — which `vocal::track` rejects, silently
+    // leaving the DSP heuristic in place. Trim to the window that was asked for.
+    let wanted = ((duration.max(0.0) * rate as f64) as usize).saturating_mul(2);
+    if stereo.len() > wanted {
+        stereo.truncate(wanted);
+    }
     let (left, right) = split_stereo(&stereo);
     let Some(mask) = vocal::track(&left, &right, rate as f64) else {
         return;
     };
-    let hop = vocal::HOP as f64 / vocal::SAMPLE_RATE;
-    for (index, value) in mask.into_iter().enumerate() {
-        analysis.vocal_times.push(offset + index as f64 * hop);
-        analysis.vocal_mask.push(value);
-    }
+    merge_open_unmix_window(analysis, &mask, offset);
 }
 
 /// F-3: the bar grid a plan is phrased on.
@@ -2107,7 +2140,8 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
     // A phrase is the shortest thing a crossfade can be and still be music: the
     // last chord has to ring under it. The beat comes from the record, so the
     // length is the analysis's, and the fall sets the floor when it is longer.
-    let phrase = 8.0 * beat_seconds_of(outgoing);
+    let beat = beat_seconds_of(outgoing);
+    let phrase = 8.0 * beat;
     let fall = (mix_end - fall_start)
         .max(phrase)
         .clamp(2.0, AUTO_TRANSITION_MAX_SECONDS);
@@ -2115,7 +2149,7 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
     // rules (E/E-2 own it); the start moves to the nearest downbeat of the
     // chosen bar grid, preferring a phrase boundary (an even bar), taking or
     // giving at most one bar.
-    let bar = 4.0 * beat_seconds_of(outgoing);
+    let bar = 4.0 * beat;
     let start = mix_end - fall;
     // The phrase is the crossfade's floor; a bar snap may not eat into it.
     // Otherwise a slightly-nearer phrase bar would shorten a two-bar fade to
@@ -2703,11 +2737,11 @@ fn vocal_peak_between(analysis: &Analysis, start: f64, end: f64) -> Option<f64> 
     seen.then_some(peak)
 }
 
-/// The vocal ceiling for a bridge unit: mean and peak. The model's instrumental
-/// floor is about 0.28, so this admits an instrumental outro and rejects a
-/// sung one.
-const BRIDGE_VOCAL_MEAN_MAX: f64 = 0.35;
-const BRIDGE_VOCAL_PEAK_MAX: f64 = 0.55;
+/// The "no voice" bar for an outro window: mean and peak. The model's
+/// instrumental floor is about 0.28, so this admits an instrumental outro and
+/// rejects a sung one. F's bridge and L1's phrase extension read the same bar.
+const VOCAL_FREE_MEAN_MAX: f64 = 0.35;
+const VOCAL_FREE_PEAK_MAX: f64 = 0.55;
 
 /// F-3: the chosen bar grid only has to be *usable*: enough bars, a median
 /// spacing in a musical range. The 15 ms test the instruction names is per
@@ -2818,7 +2852,7 @@ fn bridge_unit(outgoing: &Analysis, plan: &TransitionPlan) -> Result<BridgeUnit,
                 continue;
             };
             let peak = vocal_peak_between(outgoing, begin, end).unwrap_or(1.0);
-            if mean > BRIDGE_VOCAL_MEAN_MAX || peak > BRIDGE_VOCAL_PEAK_MAX {
+            if mean > VOCAL_FREE_MEAN_MAX || peak > VOCAL_FREE_PEAK_MAX {
                 failure = "the unit has a voice";
                 continue;
             }
@@ -4056,6 +4090,25 @@ mod tests {
         // The [0.5, 2.5] window covers times 1.0 and 2.0 → mean of 0.5 and 1.0.
         let mean = vocal_activity_between(&a, 0.5, 2.5).unwrap();
         assert!((mean - 0.75).abs() < 1e-9, "mean {mean}");
+    }
+
+    /// The model windows override only their own ranges: the head and the tail
+    /// are merged independently, and the DSP heuristic stands between them.
+    #[test]
+    fn a_model_window_overrides_only_its_own_range() {
+        let mut a = analysis(0.0, 10.0, vec![0.0, 2.0, 4.0]);
+        with_energy(&mut a, 10.0, |_| 0.8);
+        for value in a.vocal_activity_mask.iter_mut() {
+            *value = 0.8; // the DSP heuristic this test stands in for
+        }
+        let head = vec![0.05f32; 50]; // ≈ 1.16 s at the model's hop
+        merge_open_unmix_window(&mut a, &head, 0.0);
+        let tail = vec![0.9f32; 50];
+        merge_open_unmix_window(&mut a, &tail, 8.0);
+        let at = |time: f64| a.vocal_activity_mask[(time / 0.1) as usize];
+        assert!(at(0.5) < 0.1, "head {}", at(0.5));
+        assert!((at(5.0) - 0.8).abs() < 1e-9, "middle {}", at(5.0));
+        assert!(at(8.5) > 0.8, "tail {}", at(8.5));
     }
 
     #[test]
