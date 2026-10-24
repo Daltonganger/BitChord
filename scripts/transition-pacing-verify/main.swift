@@ -38,12 +38,23 @@ check("three re-plans of one pair leave one entry",
 check("that entry is the pair's newest style",
       pacing.entries.first?.style == "effect" && pacing.entries.first?.pair == pair)
 
-check("the next pair after the effect is blocked",
-      !pacing.allowsEffect(for: other, isEffect: isEffect))
+check("the next pair after one effect may use one (3 in 4)",
+      pacing.allowsEffect(for: other, isEffect: isEffect))
 
-var reset = TransitionPacing<String>()
-reset.note("effect", for: pair)
-check("an unrelated pair after an effect is blocked", !reset.allowsEffect(for: other, isEffect: isEffect))
+// Three effects in a row hold the fourth to a blend.
+var run = TransitionPacing<String>()
+run.note("effect", for: TransitionPair(outgoing: "r1", incoming: "r2"))
+run.note("effect", for: TransitionPair(outgoing: "r2", incoming: "r3"))
+check("two effects in a row still allow a third",
+      run.allowsEffect(for: TransitionPair(outgoing: "r3", incoming: "r4"), isEffect: isEffect))
+run.note("effect", for: TransitionPair(outgoing: "r3", incoming: "r4"))
+check("three effects in a row block the fourth",
+      !run.allowsEffect(for: TransitionPair(outgoing: "r4", incoming: "r5"), isEffect: isEffect))
+check("a re-plan of the third effect does not count against itself",
+      run.allowsEffect(for: TransitionPair(outgoing: "r3", incoming: "r4"), isEffect: isEffect))
+run.note("blend", for: TransitionPair(outgoing: "r4", incoming: "r5"))
+check("a blend after three effects frees the next transition",
+      run.allowsEffect(for: TransitionPair(outgoing: "r5", incoming: "r6"), isEffect: isEffect))
 
 // The old bug: a note on every attempt filled the window with the same pair,
 // so an effect appeared three transitions in a row and then blocked the window.
@@ -59,7 +70,7 @@ check("a re-plan replaces the pair's style",
 check("the replaced blend does not block the next pair",
       copies.allowsEffect(for: other, isEffect: isEffect))
 
-// And once an effect sits in the last three *other* transitions, it blocks.
+// The window is four entries: an effect run older than that has aged out.
 var window = TransitionPacing<String>()
 let p1 = TransitionPair(outgoing: "a", incoming: "b")
 let p2 = TransitionPair(outgoing: "b", incoming: "c")

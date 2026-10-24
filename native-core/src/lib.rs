@@ -3436,7 +3436,11 @@ mod tests {
         let mut clipped_chords = 0usize;
         let mut bridged = 0usize;
         println!("automix corpus: {pairs} pairs from {} files", files.len());
+        // The corpus is one session in a row, paced as the app paces it
+        // (`TransitionPacing`): three effects in a row hold the next to a blend.
+        let mut recent_effects: std::collections::VecDeque<bool> = std::collections::VecDeque::new();
         for index in 0..pairs {
+            let allow_effects = !(recent_effects.len() == 3 && recent_effects.iter().all(|effect| *effect));
             let outgoing = &files[index];
             let incoming = &files[index + 1];
             let plan = plan_automix_impl_with_tier(
@@ -3451,9 +3455,13 @@ mod tests {
                 &headers,
                 &headers,
                 AutomixTier::Balanced,
-                true,
+                allow_effects,
             );
             let style = crate::mixer::TransitionPlan::from(plan.clone());
+            recent_effects.push_back(style.style.is_effect());
+            if recent_effects.len() > 3 {
+                recent_effects.pop_front();
+            }
             if plan.fade_seconds <= 0.0 {
                 unusable += 1;
             }
