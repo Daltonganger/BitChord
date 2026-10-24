@@ -1125,6 +1125,19 @@ struct DetailView: View {
         loading = page == nil
         error = nil
         subscriptionOverride = nil
+        // Offline-first: a collection saved to this device opens from the
+        // store before the network answers, and the network replaces it only
+        // when it succeeds (upstream e99edae0). Without this, a saved
+        // playlist opened offline was an error page over songs that are on
+        // the disk.
+        if page == nil, !browseId.hasPrefix("UC"),
+           let downloaded = DetailPageModel.downloadedCopy(browseId: browseId, from: DownloadStore.shared) {
+            page = downloaded
+            saved = false
+            continuation = nil
+            suggested = []
+            loading = false
+        }
         do {
             if browseId.hasPrefix("UC") {
                 let result = try await InnertubeDetail.shared.browseArtist(browseId: browseId, force: force)
