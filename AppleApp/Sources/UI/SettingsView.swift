@@ -211,6 +211,15 @@ struct SettingsView: View {
             replayGenres: $replayGenres,
             appModel: appModel
         ))
+        // Asked before the picker opens rather than after a file is chosen: the
+        // thing being confirmed is that this device's own data is about to be
+        // replaced, and that is true whichever file gets picked.
+        .alert("Replace this device's data?", isPresented: $confirmImport) {
+            Button("Cancel", role: .cancel) {}
+            Button("Choose File") { importPresented = true }
+        } message: {
+            Text("Importing a backup replaces the settings and listening history on this device. This cannot be undone.")
+        }
         .fileExporter(
             isPresented: $exportPresented,
             document: SettingsBackupFile(text: BitChordBackup.exportText()),
@@ -230,12 +239,12 @@ struct SettingsView: View {
         }
     }
 
-    /// The sections of this screen, in order, with what a listener might type to
-    /// find them.
+    /// The sections of this screen, in order.
     ///
-    /// The terms live here rather than in the rows they describe, for the same
-    /// reason the section titles do: a search index kept next to the setting it
-    /// describes cannot drift from it, and one kept in a table elsewhere does.
+    /// Only the order and the titles live here now. What a section *contains* is a
+    /// question its own rows answer (see `SettingsRows`): a keyword table kept
+    /// beside the section could only describe the section as a whole, which is how
+    /// typing "flac" came to mean "show every row in Audio Quality".
     enum SettingsSection: String, CaseIterable, Identifiable {
         case account, audioQuality, downloads, playback
         case appearance, performance, localMusic, storage, yourData, miscellaneous, advanced, about
@@ -258,123 +267,185 @@ struct SettingsView: View {
             case .about: return "About"
             }
         }
+    }
 
-        /// What is *in* the section, in the words a listener would use.
+    // MARK: - Rows
+
+    /// One row that survived the search filter, with whatever it draws itself as.
+    private struct SettingsRowEntry: Identifiable {
+        let id: Int
+        let content: AnyView
+    }
+
+    /// A group's rows, filtered by the search field as they are added.
+    ///
+    /// Ported from upstream's `SettingsGroupScope.row` (`Ua/ui/screens/SettingsSheet.kt:2332`):
+    /// each row declares the words somebody might type looking for it, and the
+    /// group's own title counts for every row beneath it, so searching "playback"
+    /// turns up the playback group entire rather than nothing at all. A group with
+    /// no rows left draws nothing — header, footer and all — which is why there is
+    /// no section-level filter any more: whether a group exists is a question only
+    /// its rows can answer, and a keyword table kept beside the group answered it
+    /// for the whole group at once ("flac" used to bring back all of Audio Quality).
+    private struct SettingsRows {
+        let query: String
+        let sectionTitle: String
+        private(set) var entries: [SettingsRowEntry] = []
+
+        /// Adds a row if the search field admits it.
         ///
-        /// The section titles are things like "Playback" and "Storage", which
-        /// nobody types when they mean "crossfade". Without these the search box
-        /// only finds the nine words already on screen.
-        var terms: [String] {
-            switch self {
-            case .account:
-                return ["sign in", "login", "google", "discord", "rich presence",
-                        "scrobbling", "last.fm", "lastfm", "listenbrainz", "spotify",
-                        "canvas", "paxsenix", "api key", "account", "profile",
-                        "primary artist", "album artist", "track artist", "scrobble artist"]
-            case .audioQuality:
-                return ["quality", "lossless", "flac", "bitrate", "bitrate cap",
-                        "wifi", "wi-fi", "cellular", "mobile data", "metered",
-                        "transcode", "streaming quality", "pcm", "bit depth",
-                        "output precision", "float", "usb", "dac", "headphone",
-                        "loudness", "normalize", "normalization", "replaygain", "lufs"]
-            case .downloads:
-                return ["download", "downloaded", "offline", "wifi only",
-                        "over cellular", "save", "storage location", "cache",
-                        "export", "compatible", "music folder", "visible"]
-            case .playback:
-                return ["crossfade", "gapless", "automix", "autoplay", "skip silence",
-                        "playback speed", "speed", "spatial audio", "fade", "sounds",
-                        "equalizer", "eq", "volume", "sleep timer", "queue", "repeat",
-                        "shuffle", "scrobble", "smart sequencing", "sequencing",
-                        "automix performance", "cpu", "threads",
-                        "automix models", "models", "model", "onnx", "beat", "downbeat",
-                        "vocal", "download models",
-                        "battery", "prefer music only", "music video"]
-            case .appearance:
-                return ["theme", "dark mode", "light mode", "appearance", "colour",
-                        "color", "accent", "transparency", "reduce motion",
-                        "reduce transparency", "animation", "full bleed", "artwork",
-                        "dynamic blur", "contrast", "mesh", "gradient", "legacy",
-                        "backdrop", "single wash"]
-            case .performance:
-                return ["performance", "high performance", "refresh rate",
-                        "frame rate", "hz", "smooth", "battery", "proMotion",
-                        "display", "animation"]
-            case .localMusic:
-                return ["local music", "local library", "folder", "scan", "files",
-                        "offline", "filter", "podcast", "recording", "ringtone",
-                        "voice", "non-music", "all audio folders"]
-            case .storage:
-                return ["storage", "cache", "clear cache", "local library",
-                        "local music", "library", "folder", "scan", "space", "disk",
-                        "webdav", "remote library", "nextcloud", "owncloud", "nas",
-                        "self hosted", "share", "server"]
-            case .yourData:
-                return ["backup", "export", "import", "reset", "privacy", "data",
-                        "pinned playlists", "delete", "erase"]
-            case .miscellaneous:
-                return ["language", "lyrics", "sources", "video", "lyric video",
-                        "swipe", "suggestions", "volume bar", "lyrics source", "translation language", "blur unfocused lyrics",
-                        "spotify canvas", "jiosaavn", "background", "stop when backgrounded",
-                        "listen together", "party", "jam", "party code", "invite",
-                        "party server", "in sync", "synchronise", "synchronize",
-                        "hide song status", "playing from", "played by", "caption"]
-            case .advanced:
-                return ["advanced", "version", "alignment", "waveform", "sync",
-                        "audio", "video", "intro", "skit", "debug", "bitrate", "codec"]
-            case .about:
-                return ["about", "version", "credits", "licence", "license",
-                        "acknowledgements", "privacy policy", "github"]
-            }
+        /// - Parameters:
+        ///   - title: what the row is called; also its first search term.
+        ///   - keywords: what the title does not say that the row's subtitle or its
+        ///     synonyms do — the words somebody would actually type ("flac" for a
+        ///     lossless quality row, "party" for Listen Together).
+        mutating func row<V: View>(
+            _ title: String,
+            _ keywords: String...,
+            @ViewBuilder content: () -> V
+        ) {
+            row(title, keywords: keywords, content: content)
+        }
+
+        /// The same, for a caller that already holds its keywords as a list.
+        mutating func row<V: View>(
+            _ title: String,
+            keywords: [String],
+            @ViewBuilder content: () -> V
+        ) {
+            let terms = ([sectionTitle, title] + keywords).joined(separator: Self.separator)
+            // The matching policy stays in the shared layer (SettingsSearchBridge),
+            // where the terms and the comparison cannot drift apart.
+            guard SettingsSearchBridge.shared.matches(
+                query: query,
+                title: sectionTitle,
+                termsCsv: terms
+            ) else { return }
+            entries.append(SettingsRowEntry(id: entries.count, content: AnyView(content())))
+        }
+
+        /// ASCII unit separator, as the bridge expects: the terms are phrases, and
+        /// a separator that can appear inside one is a separator that will split one.
+        private static let separator = "\u{1F}"
+    }
+
+    /// A section and the rows the search field left in it.
+    private struct BuiltSection: Identifiable {
+        let section: SettingsSection
+        let rows: [SettingsRowEntry]
+        var id: String { section.id }
+    }
+
+    /// Every section, in order, with only the rows the search field admits.
+    ///
+    /// Built for the whole screen at once rather than section by section, because
+    /// the "nothing matches" message is a question about the screen: a section that
+    /// lost every row is not drawn, so the form has to know whether that happened
+    /// to all of them.
+    private func builtSections() -> [BuiltSection] {
+        SettingsSection.allCases.compactMap { section in
+            let rows = rows(for: section)
+            return rows.isEmpty ? nil : BuiltSection(section: section, rows: rows)
         }
     }
 
-    private func shows(_ section: SettingsSection) -> Bool {
-        SettingsSearchBridge.shared.matches(
-            query: search,
-            title: section.title,
-            termsCsv: section.terms.joined(separator: "\u{1F}")
-        )
-    }
-
-    private var visibleSections: [SettingsSection] {
-        SettingsSection.allCases.filter(shows)
-    }
-
-    @ViewBuilder
-    private func sectionContents(_ section: SettingsSection) -> some View {
+    private func rows(for section: SettingsSection) -> [SettingsRowEntry] {
+        var rows = SettingsRows(query: search, sectionTitle: section.title)
         switch section {
-        case .account: accountSection
-        case .audioQuality: audioQualitySection
-        case .downloads: downloadsSection
-        case .playback: playbackSection
-        case .appearance: appearanceSection
-        case .performance: performanceSection
-        case .localMusic: localMusicSection
-        case .storage: storageSection
-        case .yourData: yourDataSection
-        case .miscellaneous: miscellaneousSection
-        case .advanced: advancedSection
-        case .about: aboutSection
+        case .account: buildAccountRows(&rows)
+        case .audioQuality: buildAudioQualityRows(&rows)
+        case .downloads: buildDownloadRows(&rows)
+        case .playback: buildPlaybackRows(&rows)
+        case .appearance: buildAppearanceRows(&rows)
+        case .performance: buildPerformanceRows(&rows)
+        case .localMusic: buildLocalMusicRows(&rows)
+        case .storage: buildStorageRows(&rows)
+        case .yourData: buildYourDataRows(&rows)
+        case .miscellaneous: buildMiscellaneousRows(&rows)
+        case .advanced: buildAdvancedRows(&rows)
+        case .about: buildAboutRows(&rows)
+        }
+        return rows.entries
+    }
+
+    /// What a section says underneath itself, when it has anything to say.
+    ///
+    /// The footer travels with the group: one that lost every row takes its footer
+    /// with it rather than leaving a paragraph about settings that are not there.
+    @ViewBuilder
+    private func footer(for section: SettingsSection) -> some View {
+        switch section {
+        case .audioQuality:
+            Text("Match Source Sample Rate asks the route to switch clock families between tracks. Bit-perfect output is available on macOS when the DAC grants exclusive access and the lossless source format is supported. The Audio Pipeline readout shows what is actually in effect.")
+        case .downloads:
+            Text("Exported downloads live in the shared Music folder. Private ones stay inside BitChord's own storage.")
+        case .playback:
+            Text("Gapless stays on at 0s. Automix picks timing per track; crossfade sets the manual blend length.")
+        case .performance:
+            Text("High Performance Mode holds the display at the chosen refresh rate instead of letting the system vary it. Expect noticeably shorter battery life while it is on.")
+        case .localMusic:
+            Text("BitChord watches the folder you choose for music files. Filtering keeps everything that is not a song out of the list.")
+        case .miscellaneous:
+            Text("With \u{201C}Stop When Backgrounded\u{201D} on, playback pauses when you leave the app — on Mac, closing the last window counts too.")
+        case .advanced:
+            Text("A version switch resumes where you left off. With this off it restarts from the top, since no alignment is attempted.")
+        case .about:
+            Text("BitChord \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0")")
+                .frame(maxWidth: .infinity)
+                .multilineTextAlignment(.center)
+        case .account, .appearance, .storage, .yourData:
+            EmptyView()
         }
     }
 
     private var settingsForm: some View {
-        Form {
-            ForEach(visibleSections) { section in
-                sectionContents(section)
+        let sections = builtSections()
+        return Form {
+            ForEach(sections) { built in
+                Section {
+                    ForEach(built.rows) { row in
+                        row.content
+                    }
+                } header: {
+                    Text(built.section.title)
+                } footer: {
+                    footer(for: built.section)
+                }
             }
-            if !search.isEmpty && visibleSections.isEmpty {
+            if !search.isEmpty && sections.isEmpty {
                 ContentUnavailableView.search(text: search)
             }
         }
         .formStyle(.grouped)
+        // The sheets, the picker and the warning belong to the screen rather than
+        // to one group: the group they used to hang off can be filtered away, and
+        // what it raises must still be able to appear.
+        .alert("Higher refresh rate?", isPresented: $showPerfWarning) {
+            Button("Cancel", role: .cancel) {}
+            Button("Turn On") { highPerf = true }
+        } message: {
+            Text("Holding a high refresh rate keeps the display working harder the whole time BitChord is open, and the battery drains faster for it. Turn it on anyway?")
+        }
+        .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result {
+                LocalLibrary.shared.scanPicked(url)
+                localFolderName = SettingsView.storedLocalFolderName()
+                    ?? url.lastPathComponent
+            }
+        }
+        .sheet(item: $updateSheet) { release in
+            UpdateSheet(release: release)
+                .environment(update)
+        }
     }
 
     // MARK: - Account
 
-    private var accountSection: some View {
-        Section {
+    private func buildAccountRows(_ rows: inout SettingsRows) {
+        rows.row("Account & Integrations", "sign in", "login", "google", "account", "profile",
+                 "discord", "rich presence", "scrobbling", "last.fm", "lastfm", "listenbrainz",
+                 "spotify", "sign out", "integrations", "primary artist", "album artist",
+                 "track artist", "scrobble artist") {
             NavigationLink {
                 AccountIntegrationsView(loginPresented: $loginPresented, discordPresented: $discordPresented)
             } label: {
@@ -422,8 +493,9 @@ struct SettingsView: View {
 
     // MARK: - Audio quality
 
-    private var audioQualitySection: some View {
-        Section {
+    private func buildAudioQualityRows(_ rows: inout SettingsRows) {
+        rows.row("Sources", "webdav", "server", "addons", "jiosaavn", "source order", "priority",
+                 "remote library", "nextcloud", "owncloud", "nas", "self hosted", "smb") {
             NavigationLink {
                 SourcesView()
             } label: {
@@ -435,45 +507,65 @@ struct SettingsView: View {
                     EmptyView()
                 }
             }
+        }
+        rows.row("Sound Mode", "transparent", "enhanced", "clarity", "preset", "dsp") {
             Picker("Sound Mode", selection: Binding(get: { controller.soundMode }, set: { controller.updateSoundMode($0) })) {
                 Text("Transparent").tag("TRANSPARENT")
                 Text("Enhanced").tag("ENHANCED")
             }
-            if controller.soundMode == "ENHANCED" {
+        }
+        if controller.soundMode == "ENHANCED" {
+            rows.row("Clarity Preset", "reference", "speaker", "headphone", "dac", "clarity") {
                 Picker("Clarity Preset", selection: Binding(get: { controller.clarityPreset }, set: { controller.updateClarity(preset: $0) })) {
                     Text("Reference").tag("REFERENCE")
                     Text("Speaker").tag("SPEAKER")
                     Text("Headphone").tag("HEADPHONE")
                     Text("DAC").tag("DAC")
                 }
+            }
+            rows.row("Clarity Mix", "wet", "clarity", "enhanced", "tone") {
                 VStack(alignment: .leading) {
                     Text("Clarity Mix · \(Int(controller.clarityWet * 100))%")
                     Slider(value: Binding(get: { controller.clarityWet }, set: { controller.updateClarity(wet: $0) }), in: 0...1)
                 }
+            }
+            rows.row("Normalization", "loudness", "normalize", "track", "album", "off") {
                 Picker("Normalization", selection: Binding(get: { controller.loudnessMode }, set: { controller.updateLoudnessMode($0) })) {
                     Text("Off").tag("OFF")
                     Text("Track").tag("TRACK")
                     Text("Album").tag("ALBUM")
                 }
             }
+        }
+        rows.row("Sound Mode", "preserves", "recording", "transparent", "clarity", "spatial") {
             Text(controller.soundMode == "TRANSPARENT" ? "Preserves the recording. Playback speed, Automix and crossfade keep their own settings." : "Reference clarity adds tonal contour, centered bass and gentle width. Manual EQ and spatial remain optional.")
                 .font(.footnote).foregroundStyle(.secondary)
-            qualityRow(
-                glyph: .wifi,
-                title: "On Wi-Fi",
-                badge: metered ? nil : "In Use",
-                selection: $wifiQuality,
-                options: AudioQualityOption.stream
-            )
-            qualityRow(
-                glyph: .cellular,
-                title: "On Mobile Data",
-                badge: metered ? "In Use" : nil,
-                selection: $cellQuality,
-                options: AudioQualityOption.stream
-            )
+        }
+        qualityRow(
+            &rows,
+            glyph: .wifi,
+            title: "On Wi-Fi",
+            badge: metered ? nil : "In Use",
+            selection: $wifiQuality,
+            options: AudioQualityOption.stream,
+            keywords: ["wifi", "wi-fi", "quality", "bitrate", "bitrate cap", "lossless", "flac", "hi-res",
+                       "streaming", "unmetered", "transcode"]
+        )
+        qualityRow(
+            &rows,
+            glyph: .cellular,
+            title: "On Mobile Data",
+            badge: metered ? "In Use" : nil,
+            selection: $cellQuality,
+            options: AudioQualityOption.stream,
+            keywords: ["cellular", "mobile data", "metered", "quality", "bitrate", "bitrate cap", "lossless",
+                       "flac", "streaming", "transcode"]
+        )
+        rows.row("Lossless", "hi-res", "pipeline", "format", "quality", "bitrate") {
             Text("Lossless includes Hi-Res when an enabled source supplies it. Audio Pipeline shows the format actually decoded.")
                 .font(.footnote).foregroundStyle(.secondary)
+        }
+        rows.row("Output Precision", "pcm", "float", "bit depth", "precision", "output", "dac", "bit perfect") {
             VStack(alignment: .leading, spacing: 10) {
                 SettingsLine(
                     glyph: .precision,
@@ -491,30 +583,32 @@ struct SettingsView: View {
                 .padding(.leading, 41)
             }
             .padding(.vertical, 4)
+        }
+        rows.row("Match Source Sample Rate", "sample rate", "clock", "route", "dac", "precision") {
             SettingsToggleLine(
                 glyph: .precision,
                 title: "Match Source Sample Rate",
                 subtitle: "Request each track’s native rate from the output route",
                 isOn: $matchSourceRate
             )
-            #if os(macOS)
+        }
+        #if os(macOS)
+        rows.row("Bit-perfect Output", "bit perfect", "bypass", "exclusive", "lossless", "dac", "hog", "precision") {
             SettingsToggleLine(
                 glyph: .precision,
                 title: "Bit-perfect Output",
                 subtitle: "Bypasses app volume, DSP and transitions for supported lossless stereo",
                 isOn: $bitPerfect
             )
-            #endif
+        }
+        #endif
+        rows.row("Prefer USB DAC", "usb", "dac", "headphone", "output", "precision") {
             SettingsSubToggle(title: "Prefer USB DAC", isOn: $preferUsbDac)
+        }
+        rows.row("Dolby Atmos", "dolby", "atmos", "surround", "immersive", "spatial", "renderer") {
             SettingsToggleLine(glyph: .dolby, title: "Dolby Atmos",
                 subtitle: "Use Apple’s renderer when a source provides supported Dolby audio", isOn: $dolbyAtmos)
                 .disabled(!AppleDolbyRenderer.available)
-
-
-        } header: {
-            Text("Audio Quality")
-        } footer: {
-            Text("Match Source Sample Rate asks the route to switch clock families between tracks. Bit-perfect output is available on macOS when the DAC grants exclusive access and the lossless source format is supported. The Audio Pipeline readout shows what is actually in effect.")
         }
     }
 
@@ -547,20 +641,25 @@ struct SettingsView: View {
 
     // MARK: - Downloads
 
-    private var downloadsSection: some View {
-        Section {
-            qualityRow(
-                glyph: .download,
-                title: "Download Quality",
-                subtitle: "\(AudioQualityOption.label(downloadQuality, in: AudioQualityOption.download)) per track, whatever the connection",
-                selection: $downloadQuality,
-                options: AudioQualityOption.download
-            )
+    private func buildDownloadRows(_ rows: inout SettingsRows) {
+        qualityRow(
+            &rows,
+            glyph: .download,
+            title: "Download Quality",
+            subtitle: "\(AudioQualityOption.label(downloadQuality, in: AudioQualityOption.download)) per track, whatever the connection",
+            selection: $downloadQuality,
+            options: AudioQualityOption.download,
+            keywords: ["download", "bitrate", "lossless", "flac", "offline", "saved", "quality", "transcode"]
+        )
+        rows.row("Download over Wi-Fi Only", "wifi", "wi-fi", "wifi only", "wi-fi only", "cellular",
+                 "mobile data", "blocking", "download", "offline") {
             SettingsSubToggle(
                 title: "Download over Wi-Fi Only",
                 isOn: $wifiOnlyDownloads,
                 badge: (wifiOnlyDownloads && metered) ? "Blocking" : nil
             )
+        }
+        rows.row("Export Compatible Downloads", "export", "music folder", "shared", "visible", "download") {
             SettingsToggleLine(
                 glyph: .sharedFolder,
                 title: "Export Compatible Downloads",
@@ -569,27 +668,25 @@ struct SettingsView: View {
                     : "Keeps downloads where other music apps can see them",
                 isOn: $exportDownloads
             )
-        } header: {
-            Text("Downloads")
-        } footer: {
-            Text("Exported downloads live in the shared Music folder. Private ones stay inside BitChord's own storage.")
         }
     }
 
     // MARK: - Playback
 
-    private var playbackSection: some View {
-        Section {
-            // Automix decides its own length from each pair of tracks, so it
-            // replaces the manual slider rather than needing it set to anything
-            // first — upstream's rule, which is why the slider goes away
-            // entirely instead of greying out.
-            if automix {
+    private func buildPlaybackRows(_ rows: inout SettingsRows) {
+        // Automix decides its own length from each pair of tracks, so it
+        // replaces the manual slider rather than needing it set to anything
+        // first — upstream's rule, which is why the slider goes away
+        // entirely instead of greying out.
+        if automix {
+            rows.row("Crossfade", "automix", "blend", "fade", "transition", "gapless") {
                 Text("Automix times every transition itself; the crossfade slider returns when Automix is off.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
-            } else {
+            }
+        } else {
+            rows.row("Crossfade", "blend", "fade", "transition", "gapless", "automix") {
                 SettingsSliderRow(
                     glyph: .crossfade,
                     title: "Crossfade",
@@ -603,6 +700,8 @@ struct SettingsView: View {
                     step: 1
                 )
             }
+        }
+        rows.row("Automix", "blend", "transition", "beat", "model", "timing", "crossfade", "overheating", "lag") {
             SettingsToggleLine(
                 glyph: .automix,
                 title: "Automix [Beta]",
@@ -613,7 +712,9 @@ struct SettingsView: View {
                     : "Times and blends transitions automatically, no slider needed.",
                 isOn: $automix
             )
-            if automix {
+        }
+        if automix {
+            rows.row("Smart Sequencing", "sequence", "order", "suggestions", "autoplay", "transition", "shuffle") {
                 SettingsToggleLine(
                     glyph: .automix,
                     title: "Smart Sequencing",
@@ -621,6 +722,8 @@ struct SettingsView: View {
                     isOn: $automixSequence
                 )
             }
+        }
+        rows.row("Automix Performance", "cpu", "threads", "analysis", "budget", "efficient", "balanced", "performance", "battery") {
             NavigationLink {
                 AutomixPerformancePage(selection: $automixPerf)
             } label: {
@@ -633,6 +736,8 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+        rows.row("Automix Models", "models", "model", "onnx", "beat", "downbeat", "vocal", "install", "download models") {
             NavigationLink {
                 AutomixModelsPage()
             } label: {
@@ -644,25 +749,37 @@ struct SettingsView: View {
                     EmptyView()
                 }
             }
+        }
+        rows.row("Trim Leading and Trailing Silence", "silence", "trim", "edges", "gap") {
             Toggle("Trim Leading and Trailing Silence", isOn: $trimEdges)
                 .onChange(of: trimEdges) { _, value in
                     PlatformSettings.shared.putBoolean(key: "trim_edge_silence", value: value)
                     controller.refreshPlaybackRegions()
                 }
+        }
+        rows.row("Skip Non-Music Segments", "non-music", "segments", "skit", "intro", "podcast") {
             Toggle("Skip Non-Music Segments", isOn: $skipNonMusic)
                 .onChange(of: skipNonMusic) { _, value in
                     PlatformSettings.shared.putBoolean(key: "skip_non_music", value: value)
                     controller.refreshPlaybackRegions()
                 }
+        }
+        rows.row("Non-music Segments", "automix", "boundaries", "segments") {
             Text("Non-music segments and audible boundaries are always used by Automix.")
                 .font(.caption).foregroundStyle(.secondary)
+        }
+        rows.row("Diagnostic Reports", "debug", "log", "report", "diagnostics") {
             NavigationLink("Diagnostic Reports") { DiagnosticReportsView() }
+        }
+        rows.row("Skip Silence", "silence", "gaps", "trim") {
             SettingsToggleLine(
                 glyph: .skipSilence,
                 title: "Skip Silence",
                 subtitle: "Trim gaps longer than a second",
                 isOn: $skipSilence
             )
+        }
+        rows.row("Playback Speed", "speed", "tempo", "rate", "pitch", "slow", "fast") {
             SettingsSliderRow(
                 glyph: .speed,
                 title: "Playback Speed",
@@ -672,15 +789,21 @@ struct SettingsView: View {
                 range: 0.5...2.0,
                 step: 0.05
             )
+        }
+        rows.row("BitChord spatial effect", "spatial", "widening", "head tracking", "stereo") {
             SettingsToggleLine(
                 glyph: .spatial,
                 title: "BitChord spatial effect",
                 subtitle: "Optional stereo widening and head tracking. Suspended when Apple reports Spatial Audio is enabled.",
                 isOn: $spatial
             )
+        }
+        rows.row("Spatial Audio", "airpods", "adaptive", "accessibility", "headphone", "accommodations") {
             Text("Apple’s Headphone Accommodations, Adaptive Audio and Conversation Awareness are managed in system Accessibility, AirPods settings and Control Center. BitChord keeps your manual EQ choices.")
                 .font(.caption).foregroundStyle(.secondary)
+        }
 #if os(iOS)
+        rows.row("Play Alongside Other Apps", "mix", "other apps", "background audio", "interrupt") {
             SettingsToggleLine(
                 glyph: .musicOnly,
                 title: "Play Alongside Other Apps",
@@ -690,7 +813,9 @@ struct SettingsView: View {
                     set: { controller.setMixWithOtherAudio($0) }
                 )
             )
+        }
 #endif
+        rows.row("Equalizer", "eq", "bands", "bass", "treble") {
             NavigationLink {
                 EqualizerView()
             } label: {
@@ -702,12 +827,16 @@ struct SettingsView: View {
                     EmptyView()
                 }
             }
+        }
+        rows.row("Show Stats for Nerds", "nerds", "stats", "codec", "bitrate", "sample rate") {
             SettingsToggleLine(
                 glyph: .nerd,
                 title: "Show Stats for Nerds",
                 subtitle: "Codec, bitrate and sample rate on the player",
                 isOn: $nerdStats
             )
+        }
+        rows.row("Stop Converting Video Songs to Audio", "video", "music video", "convert", "audio") {
             SettingsToggleLine(
                 glyph: .video,
                 title: "Stop Converting Video Songs to Audio",
@@ -717,16 +846,14 @@ struct SettingsView: View {
                     set: { convertVideo = !$0 }
                 )
             )
+        }
+        rows.row("Prefer Music Only", "music video", "video", "catalogue", "upload") {
             SettingsToggleLine(
                 glyph: .musicOnly,
                 title: "Prefer Music Only",
                 subtitle: "Starts a music-video result on its catalogue audio release instead of the video's own upload",
                 isOn: $preferMusicOnly
             )
-        } header: {
-            Text("Playback")
-        } footer: {
-            Text("Gapless stays on at 0s. Automix picks timing per track; crossfade sets the manual blend length.")
         }
     }
 
@@ -761,8 +888,8 @@ struct SettingsView: View {
 
     // MARK: - Appearance
 
-    private var appearanceSection: some View {
-        Section {
+    private func buildAppearanceRows(_ rows: inout SettingsRows) {
+        rows.row("Appearance", "theme", "dark mode", "light mode", "colour", "color", "system", "accent", "tint") {
             VStack(alignment: .leading, spacing: 10) {
                 SettingsLine(glyph: .theme, title: "Appearance") { EmptyView() }
                 Picker("Appearance", selection: $theme) {
@@ -775,60 +902,83 @@ struct SettingsView: View {
                 .padding(.leading, 41)
             }
             .padding(.vertical, 4)
+        }
+        rows.row("Reduce Animation", "reduce motion", "animation", "gradient", "drift") {
             SettingsToggleLine(
                 glyph: .reduceMotion,
                 title: "Reduce Animation",
                 subtitle: "Freezes the main player's gradient instead of drifting",
                 isOn: $reduceAnimation
             )
+        }
+        rows.row("Reduce Dynamic Blur", "reduce transparency", "dynamic blur", "blur", "glass", "frosted",
+                 "transparency", "contrast") {
             SettingsToggleLine(
                 glyph: .reduceBlur,
                 title: "Reduce Dynamic Blur",
                 subtitle: "Swaps frosted glass for solid fills across the app",
                 isOn: $reduceBlur
             )
+        }
+        rows.row("Full-Screen Cover Art", "artwork", "full bleed", "cover", "sleeve", "art") {
             SettingsToggleLine(
                 glyph: .fullBleed,
                 title: "Full-Screen Cover Art",
                 subtitle: "Runs the cover to the edges of the player instead of a square sleeve",
                 isOn: $fullBleed
             )
+        }
+        rows.row("Legacy Mesh Gradient", "mesh", "gradient", "backdrop", "wash", "background") {
             SettingsToggleLine(
                 glyph: .mesh,
                 title: "Legacy Mesh Gradient",
                 subtitle: "The single-wash backdrop instead of colours sampled from the artwork",
                 isOn: $legacyMesh
             )
+        }
+        rows.row("Animated Cover Art", "canvas", "animated", "cover art", "video", "motion") {
             SettingsToggleLine(
                 glyph: .canvas,
                 title: "Animated Cover Art",
                 subtitle: "Plays the looping video some releases ship instead of a still sleeve",
                 isOn: $canvas
             )
-            if canvas {
+        }
+        if canvas {
+            rows.row("Play Animated Cover over Cellular", "canvas", "cellular", "mobile data", "animated") {
                 SettingsSubToggle(title: "Play Animated Cover over Cellular", isOn: $canvasCellular)
             }
+        }
+        rows.row("Synced Lyrics", "lyrics", "synced", "karaoke", "words") {
             SettingsToggleLine(
                 glyph: .lyrics,
                 title: "Synced Lyrics",
                 subtitle: "Lights up the words on the player as they’re sung",
                 isOn: $syncedLyrics
             )
-            if syncedLyrics {
+        }
+        if syncedLyrics {
+            rows.row("Blur Unfocused Lyrics", "blur", "lyrics", "focus") {
                 SettingsToggleLine(glyph: .reduceBlur, title: "Blur Unfocused Lyrics",
                                    subtitle: "Softens lines away from the words being sung", isOn: $lyricsBlur)
+            }
+            rows.row("Translation Language", "translation", "language", "romanize", "lyrics") {
                 NavigationLink {
                     TranslationPreferenceView(selection: $translationLanguage, translator: controller.lyricsTranslator)
                 } label: {
                     SettingsLine(glyph: .lyricsSources, title: "Translation Language",
                                  subtitle: translationLanguage.isEmpty ? "Follow the app language" : (Locale.current.localizedString(forIdentifier: translationLanguage) ?? translationLanguage)) { EmptyView() }
                 }
+            }
+            rows.row("Prefer Word-Synced Lyrics", "syllable", "word", "synced", "lyrics", "timing") {
                 SettingsToggleLine(
                     glyph: .lyrics,
                     title: "Prefer Word-Synced Lyrics",
                     subtitle: "Syllable timings win the lyrics race when a source has them",
                     isOn: $syllableSync
                 )
+            }
+            rows.row("Lyrics Sources", "lyrics", "sources", "provider", "paxsenix", "api key", "lrc", "translation") {
                 NavigationLink {
                     LyricsSourcesView(selection: $lyricsSources, order: $lyricsSourceOrder, syllableSync: $syllableSync)
                 } label: {
@@ -841,18 +991,18 @@ struct SettingsView: View {
                     }
                 }
             }
-            #if os(macOS)
-            Toggle("Show Player in Menu Bar", isOn: $menuBarPlayer)
-            #endif
-        } header: {
-            Text("Appearance")
         }
+        #if os(macOS)
+        rows.row("Show Player in Menu Bar", "menu bar", "player", "status bar", "extra") {
+            Toggle("Show Player in Menu Bar", isOn: $menuBarPlayer)
+        }
+        #endif
     }
 
     // MARK: - Performance
 
-    private var performanceSection: some View {
-        Section {
+    private func buildPerformanceRows(_ rows: inout SettingsRows) {
+        rows.row("High Performance Mode", "performance", "refresh rate", "hz", "promotion", "battery", "smooth") {
             Toggle(isOn: Binding(
                 get: { highPerf },
                 set: { enabled in
@@ -873,7 +1023,9 @@ struct SettingsView: View {
                 }
             }
             .padding(.vertical, 2)
-            if highPerf {
+        }
+        if highPerf {
+            rows.row("Refresh Rate", "frame rate", "hz", "display", "performance") {
                 VStack(alignment: .leading, spacing: 10) {
                     SettingsLine(glyph: .refreshRate, title: "Refresh Rate") { EmptyView() }
                     Picker("Refresh Rate", selection: $refreshRate) {
@@ -887,23 +1039,14 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 4)
             }
-        } header: {
-            Text("Performance")
-        } footer: {
-            Text("High Performance Mode holds the display at the chosen refresh rate instead of letting the system vary it. Expect noticeably shorter battery life while it is on.")
-        }
-        .alert("Higher refresh rate?", isPresented: $showPerfWarning) {
-            Button("Cancel", role: .cancel) {}
-            Button("Turn On") { highPerf = true }
-        } message: {
-            Text("Holding a high refresh rate keeps the display working harder the whole time BitChord is open, and the battery drains faster for it. Turn it on anyway?")
         }
     }
 
     // MARK: - Local music
 
-    private var localMusicSection: some View {
-        Section {
+    private func buildLocalMusicRows(_ rows: inout SettingsRows) {
+        rows.row("Folder", "local music", "local library", "folder", "scan", "files", "library", "voice",
+                 "all audio folders") {
             Button {
                 pickLocalFolder()
             } label: {
@@ -918,7 +1061,9 @@ struct SettingsView: View {
                 }
             }
             .buttonStyle(.plain)
-            if localFolderName != nil {
+        }
+        if localFolderName != nil {
+            rows.row("Use All Audio Folders", "folders", "forget", "local music", "library") {
                 Button {
                     AppSettings.shared.setLocalLibraryPath(value: "")
                     localFolderName = nil
@@ -933,23 +1078,14 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+        rows.row("Filter Non-Music Audio", "filter", "non-music", "podcast", "recording", "ringtone", "clips") {
             SettingsToggleLine(
                 glyph: .filter,
                 title: "Filter Non-Music Audio",
                 subtitle: "Hides clips under 30 seconds, ringtones, podcasts and recorder output",
                 isOn: $filterNonMusic
             )
-        } header: {
-            Text("Local Music")
-        } footer: {
-            Text("BitChord watches the folder you choose for music files. Filtering keeps everything that is not a song out of the list.")
-        }
-        .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
-            if case .success(let url) = result {
-                LocalLibrary.shared.scanPicked(url)
-                localFolderName = SettingsView.storedLocalFolderName()
-                    ?? url.lastPathComponent
-            }
         }
     }
 
@@ -983,8 +1119,9 @@ struct SettingsView: View {
 
     // MARK: - Storage
 
-    private var storageSection: some View {
-        Section {
+    private func buildStorageRows(_ rows: inout SettingsRows) {
+        rows.row("Song Cache Limit", "cache", "storage", "disk", "limit", "space", "songs", "size",
+                 "clear cache", "show cache folder") {
             SettingsSliderRow(
                 glyph: .storage,
                 title: "Song Cache Limit",
@@ -1002,9 +1139,11 @@ struct SettingsView: View {
                 step: 512
             )
             .disabled(cacheUnlimited)
+        }
 
-            // Upstream's "Unlimited": the ceiling is a disk-space question, and
-            // someone with the room should be able to say yes to all of it.
+        // Upstream's "Unlimited": the ceiling is a disk-space question, and
+        // someone with the room should be able to say yes to all of it.
+        rows.row("Unlimited", "cache", "disk", "space", "storage") {
             Toggle("Unlimited", isOn: $cacheUnlimited)
                 .onChange(of: cacheUnlimited) { _, unlimited in
                     AppSettings.shared.setAudioCacheLimitBytes(
@@ -1012,15 +1151,19 @@ struct SettingsView: View {
                     )
                     Task { await StreamFileCache.shared.trim() }
                 }
-            // Upstream gates the Library's cached-songs folder on a switch like
-            // this one. The row used to be always visible, which put a storage
-            // detail in the middle of somebody's music.
+        }
+        // Upstream gates the Library's cached-songs folder on a switch like
+        // this one. The row used to be always visible, which put a storage
+        // detail in the middle of somebody's music.
+        rows.row("Show Cached Songs in Library", "cache", "cached songs", "library", "folder", "show") {
             SettingsToggleLine(
                 glyph: .storage,
                 title: "Show Cached Songs in Library",
                 subtitle: "Adds the stream cache to the Library's folders",
                 isOn: $showCachedSongs
             )
+        }
+        rows.row("Clear Song Cache", "clear", "clear cache", "cache", "free space", "delete", "songs") {
             Button {
                 Task {
                     await StreamFileCache.shared.clear()
@@ -1036,6 +1179,8 @@ struct SettingsView: View {
                 }
             }
             .buttonStyle(.plain)
+        }
+        rows.row("Clear Image Cache", "clear", "image", "artwork", "cache", "space") {
             Button {
                 ArtworkCache.shared.clear()
                 imageCacheNote = "Image cache cleared"
@@ -1049,15 +1194,13 @@ struct SettingsView: View {
                 }
             }
             .buttonStyle(.plain)
-        } header: {
-            Text("Storage")
         }
     }
 
     // MARK: - Your data
 
-    private var yourDataSection: some View {
-        Section {
+    private func buildYourDataRows(_ rows: inout SettingsRows) {
+        rows.row("Replay", "top songs", "top artists", "stats", "year", "listening") {
             Button {
                 appModel.replayPresented = true
             } label: {
@@ -1070,6 +1213,8 @@ struct SettingsView: View {
                 }
             }
             .buttonStyle(.plain)
+        }
+        rows.row("Work Out Genres", "genres", "last.fm", "lastfm", "replay", "chart", "artist") {
             SettingsToggleLine(
                 glyph: .genres,
                 title: "Work Out Genres",
@@ -1078,6 +1223,8 @@ struct SettingsView: View {
                     : "Replay's genre chart is hidden while this is off",
                 isOn: $replayGenres
             )
+        }
+        rows.row("Export Data", "export", "backup", "json", "data", "history", "reset", "erase", "privacy") {
             Button {
                 exportPresented = true
             } label: {
@@ -1090,6 +1237,8 @@ struct SettingsView: View {
                 }
             }
             .buttonStyle(.plain)
+        }
+        rows.row("Import Data", "import", "backup", "restore", "data", "reset", "erase") {
             Button {
                 confirmImport = true
             } label: {
@@ -1102,24 +1251,13 @@ struct SettingsView: View {
                 }
             }
             .buttonStyle(.plain)
-        } header: {
-            Text("Your Data")
-        }
-        // Asked before the picker opens rather than after a file is chosen: the
-        // thing being confirmed is that this device's own data is about to be
-        // replaced, and that is true whichever file gets picked.
-        .alert("Replace this device's data?", isPresented: $confirmImport) {
-            Button("Cancel", role: .cancel) {}
-            Button("Choose File") { importPresented = true }
-        } message: {
-            Text("Importing a backup replaces the settings and listening history on this device. This cannot be undone.")
         }
     }
 
     // MARK: - Miscellaneous
 
-    private var miscellaneousSection: some View {
-        Section {
+    private func buildMiscellaneousRows(_ rows: inout SettingsRows) {
+        rows.row("Play Next on Swipe", "swipe", "queue", "next", "gesture", "song") {
             SettingsToggleLine(
                 glyph: .swipe,
                 title: "Play Next on Swipe",
@@ -1128,36 +1266,49 @@ struct SettingsView: View {
                     : "Swiping a song adds it to the end of the queue when disabled",
                 isOn: $swipeNext
             )
+        }
+        rows.row("Don’t Repeat Songs in Current Session", "repeat", "suggestions", "autoplay", "session", "duplicate") {
             SettingsToggleLine(
                 glyph: .dontRepeat,
                 title: "Don’t Repeat Songs in Current Session",
                 subtitle: "AutoPlay won’t suggest a song already played or suggested this session",
                 isOn: $dontRepeat
             )
+        }
+        rows.row("Hide Volume Bar", "volume", "bar", "slider", "player", "hide") {
             SettingsToggleLine(
                 glyph: .hideVolume,
                 title: "Hide Volume Bar",
                 subtitle: "Removes the volume slider from the main player",
                 isOn: $hideVolume
             )
+        }
+        rows.row("Hide Song Status", "song status", "playing from", "played by", "caption", "hide", "player") {
             SettingsToggleLine(
                 glyph: .songStatus,
                 title: "Hide Song Status",
                 subtitle: "Hides the “Playing from” caption on the main player",
                 isOn: $hideSongStatus
             )
+        }
+        rows.row("JioSaavn", "jiosaavn", "saavn", "source", "bitrate", "race", "match") {
             SettingsToggleLine(
                 glyph: .sources,
                 title: "JioSaavn",
                 subtitle: "Race JioSaavn for high-bitrate matches alongside YouTube Music",
                 isOn: $jiosaavn
             )
+        }
+        rows.row("Stop When Backgrounded", "background", "stop", "pause", "close", "quit") {
             SettingsToggleLine(
                 glyph: .video,
                 title: "Stop When Backgrounded",
                 subtitle: "Pauses playback when the app leaves the foreground",
                 isOn: $stopBackground
             )
+        }
+        rows.row("Listen together", "listen together", "party", "jam", "invite", "party code", "party server",
+                 "in sync", "synchronise", "synchronize") {
             NavigationLink {
                 ListenTogetherView()
             } label: {
@@ -1170,6 +1321,8 @@ struct SettingsView: View {
                     EmptyView()
                 }
             }
+        }
+        rows.row("Spotify Canvas", "spotify", "canvas", "sp_dc", "cookie", "motion art") {
             NavigationLink {
                 SpotifyCanvasAuthView(cookie: $spotifyCookie)
             } label: {
@@ -1181,6 +1334,8 @@ struct SettingsView: View {
                     EmptyView()
                 }
             }
+        }
+        rows.row("App Language", "language", "locale", "translate", "english", "spanish", "french", "german", "portuguese", "hindi", "japanese", "korean", "chinese") {
             Picker(selection: $language) {
                 Text("System").tag("")
                 Text("English").tag("en")
@@ -1197,58 +1352,51 @@ struct SettingsView: View {
                     EmptyView()
                 }
             }
-        } header: {
-            Text("Miscellaneous")
-        } footer: {
-            // The cookie is edited in Spotify Canvas above, where its screen
-            // lives; a second raw field here edited the same binding and read
-            // as a second place to set it.
-            Text("With “Stop When Backgrounded” on, playback pauses when you leave the app — on Mac, closing the last window counts too.")
         }
     }
 
     // MARK: - Advanced options
 
-    private var advancedSection: some View {
-        Section {
+    private func buildAdvancedRows(_ rows: inout SettingsRows) {
+        rows.row("Smart Version Alignment", "version", "alignment", "waveform", "sync", "switch", "audio",
+                 "video", "intro", "skit", "codec", "bitrate") {
             SettingsToggleLine(
                 glyph: .align,
                 title: "Smart Version Alignment",
                 subtitle: "Keeps your place when switching between versions of a track",
                 isOn: $smartAlign
             )
-        } header: {
-            Text("Advanced Options")
-        } footer: {
-            Text("A version switch resumes where you left off. With this off it restarts from the top, since no alignment is attempted.")
         }
     }
 
     // MARK: - About
 
-    private var aboutSection: some View {
-        Section {
+    private func buildAboutRows(_ rows: inout SettingsRows) {
+        rows.row("Engine", "native core", "version", "engine") {
             LabeledContent("Engine", value: "native-core v\(coreVersion())")
-            LabeledContent("Logic Core", value: GreetingKt.sharedGreeting())
-            LabeledContent("Version", value: update.currentVersion)
-            #if os(macOS)
-            MacUpdateSettings()
-            #else
-            updateRow
-            #endif
-            Link("GitHub", destination: URL(string: "https://github.com/bagumamartin/BitChord")!)
-            Link("Developer", destination: URL(string: "https://github.com/bagumamartin")!)
-            Link("Discord", destination: URL(string: "https://discord.gg/pDdKfrdHY6")!)
-        } header: {
-            Text("About")
-        } footer: {
-            Text("BitChord \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0")")
-                .frame(maxWidth: .infinity)
-                .multilineTextAlignment(.center)
         }
-        .sheet(item: $updateSheet) { release in
-            UpdateSheet(release: release)
-                .environment(update)
+        rows.row("Logic Core", "logic core", "kotlin", "version") {
+            LabeledContent("Logic Core", value: GreetingKt.sharedGreeting())
+        }
+        rows.row("Version", "version", "build", "release", "credits", "licence", "license",
+                 "acknowledgements", "privacy policy") {
+            LabeledContent("Version", value: update.currentVersion)
+        }
+        #if os(macOS)
+        rows.row("Updates", "update", "sparkle", "version", "check") {
+            MacUpdateSettings()
+        }
+        #else
+        buildUpdateRows(&rows)
+        #endif
+        rows.row("GitHub", "github", "source", "code", "repository") {
+            Link("GitHub", destination: URL(string: "https://github.com/bagumamartin/BitChord")!)
+        }
+        rows.row("Developer", "developer", "author", "github") {
+            Link("Developer", destination: URL(string: "https://github.com/bagumamartin")!)
+        }
+        rows.row("Discord", "discord", "community", "chat") {
+            Link("Discord", destination: URL(string: "https://discord.gg/pDdKfrdHY6")!)
         }
     }
 
@@ -1257,42 +1405,45 @@ struct SettingsView: View {
     /// A release is offered with its version in the subtitle rather than as a badge:
     /// an update notice that is only a coloured dot asks the reader to guess, and the
     /// one question here is "what is it".
-    @ViewBuilder
-    private var updateRow: some View {
+    private func buildUpdateRows(_ rows: inout SettingsRows) {
         if let release = update.available {
-            Button {
-                updateSheet = release
-            } label: {
-                SettingsLine(
-                    glyph: .update,
-                    title: release.version,
-                    subtitle: "A newer BitChord is out"
-                ) {
-                    Image(.bchChevronRight)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 12, height: 12)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .buttonStyle(.plain)
-        } else {
-            Button {
-                Task { await update.check() }
-            } label: {
-                if update.checking {
-                    ProgressView().controlSize(.small)
-                } else {
+            rows.row(release.version, "update", "newer", "release", "version") {
+                Button {
+                    updateSheet = release
+                } label: {
                     SettingsLine(
                         glyph: .update,
-                        title: "Check for Updates",
-                        subtitle: update.problem ?? "BitChord \(update.comparableVersion)"
+                        title: release.version,
+                        subtitle: "A newer BitChord is out"
                     ) {
-                        EmptyView()
+                        Image(.bchChevronRight)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 12, height: 12)
+                            .foregroundStyle(.tertiary)
                     }
                 }
+                .buttonStyle(.plain)
             }
-            .disabled(update.checking)
+        } else {
+            rows.row("Check for Updates", "update", "version", "release", "check") {
+                Button {
+                    Task { await update.check() }
+                } label: {
+                    if update.checking {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        SettingsLine(
+                            glyph: .update,
+                            title: "Check for Updates",
+                            subtitle: update.problem ?? "BitChord \(update.comparableVersion)"
+                        ) {
+                            EmptyView()
+                        }
+                    }
+                }
+                .disabled(update.checking)
+            }
         }
     }
 
@@ -1313,36 +1464,43 @@ struct SettingsView: View {
         #endif
     }
 
-    @ViewBuilder
+    /// One audio-quality row: a menu on the Mac, a drill-down on iOS.
+    ///
+    /// Registers itself with the group like any other row, so the keywords follow
+    /// the row rather than living in a per-section table.
     private func qualityRow(
+        _ rows: inout SettingsRows,
         glyph: SettingsGlyph.Kind,
         title: String,
         subtitle: String? = nil,
         badge: String? = nil,
         selection: Binding<String>,
-        options: [AudioQualityOption]
-    ) -> some View {
-        #if os(macOS)
-        Picker(selection: selection) {
-            ForEach(options) { option in
-                Text(option.title).tag(option.id)
+        options: [AudioQualityOption],
+        keywords: [String]
+    ) {
+        rows.row(title, keywords: keywords) {
+            #if os(macOS)
+            Picker(selection: selection) {
+                ForEach(options) { option in
+                    Text(option.title).tag(option.id)
+                }
+            } label: {
+                SettingsLine(glyph: glyph, title: title, subtitle: subtitle, badge: badge) {
+                    EmptyView()
+                }
             }
-        } label: {
-            SettingsLine(glyph: glyph, title: title, subtitle: subtitle, badge: badge) {
-                EmptyView()
+            .pickerStyle(.menu)
+            #else
+            NavigationLink {
+                QualityPickerPage(title: title, selection: selection, options: options)
+            } label: {
+                SettingsLine(glyph: glyph, title: title, subtitle: subtitle, badge: badge) {
+                    Text(AudioQualityOption.label(selection.wrappedValue, in: options))
+                        .foregroundStyle(.secondary)
+                }
             }
+            #endif
         }
-        .pickerStyle(.menu)
-        #else
-        NavigationLink {
-            QualityPickerPage(title: title, selection: selection, options: options)
-        } label: {
-            SettingsLine(glyph: glyph, title: title, subtitle: subtitle, badge: badge) {
-                Text(AudioQualityOption.label(selection.wrappedValue, in: options))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        #endif
     }
 
     private static func cacheLimitMegabytes() -> Int {
