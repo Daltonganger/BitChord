@@ -25,6 +25,10 @@ use crate::decode::{SourceKind, SymphoniaDecoder};
 /// Everything is measured at this rate: chroma below 4 kHz and onsets need
 /// nothing higher, and it keeps a five-minute track to a few million samples.
 const RATE: f64 = 11_025.0;
+/// The resampler's kernel for that rate. Chroma and onset envelopes need no
+/// studio-grade stopband; six zero crossings instead of the analysis path's
+/// 32 made a pair of five-minute decodes about 2.5 s faster.
+const RESAMPLE_ZERO_CROSSINGS: f64 = 6.0;
 /// Chroma frame: 2048 samples (186 ms) every 1102 (100 ms, 10 frames a second).
 const CHROMA_FFT: usize = 2048;
 const CHROMA_HOP: usize = 1102;
@@ -102,15 +106,21 @@ impl Alignment {
 
 /// Align two files. None when either cannot be decoded or is too short.
 pub fn align_files(song: &str, other: &str) -> Option<Alignment> {
-    let a = decode_mono(song)?;
-    let b = decode_mono(other)?;
-    align(&a, &b)
+    // The two decodes are independent: side by side, the wait is the longer one.
+    let (a, b) = std::thread::scope(|scope| {
+        let other = scope.spawn(|| decode_mono(other));
+        (decode_mono(song), other.join().ok().flatten())
+    });
+    align(&a?, &b?)
 }
 
 /// Align two mono signals already at [`RATE`].
 pub fn align(song: &[f32], other: &[f32]) -> Option<Alignment> {
-    let song_chroma = chroma(song);
-    let other_chroma = chroma(other);
+    let ((song_chroma, song_onsets), (other_chroma, other_onsets)) = std::thread::scope(|scope| {
+        let theirs = scope.spawn(|| (chroma(other), onsets(other)));
+        let ours = (chroma(song), onsets(song));
+        (ours, theirs.join().expect("feature thread"))
+    });
     if song_chroma.len() < 20 || other_chroma.len() < 20 {
         return None;
     }
@@ -119,8 +129,6 @@ pub fn align(song: &[f32], other: &[f32]) -> Option<Alignment> {
     if segments.is_empty() {
         return None;
     }
-    let song_onsets = onsets(song);
-    let other_onsets = onsets(other);
     for segment in &mut segments {
         segment.offset = refine(segment, &song_onsets, &other_onsets);
     }
@@ -158,7 +166,7 @@ fn decode_mono(path: &str) -> Option<Vec<f32>> {
     if mono.is_empty() {
         return None;
     }
-    Some(crate::analyzer::resample(&mono, rate, RATE))
+    Some(crate::analyzer::resample_with(&mono, rate, RATE, RESAMPLE_ZERO_CROSSINGS))
 }
 
 /// One L2-normalised 12-bin pitch-class vector per frame; None for a frame

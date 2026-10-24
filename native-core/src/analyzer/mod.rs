@@ -56,6 +56,13 @@ const AMPLITUDE_FLOOR: f64 = 1e-10;
 /// `resampler.cpp`. Used by the analysis path; the playback path uses the
 /// streaming variant in `decode::resampler`.
 pub fn resample(input: &[f32], input_rate: f64, output_rate: f64) -> Vec<f32> {
+    resample_with(input, input_rate, output_rate, RESAMPLER_ZERO_CROSSINGS)
+}
+
+/// [`resample`] with a narrower or wider kernel: the cost is proportional to
+/// `zero_crossings`, and a caller that needs no studio-grade stopband (the
+/// version aligner's chroma) can trade it for speed.
+pub fn resample_with(input: &[f32], input_rate: f64, output_rate: f64, zero_crossings: f64) -> Vec<f32> {
     if input.is_empty() || input_rate <= 0.0 || output_rate <= 0.0 {
         return Vec::new();
     }
@@ -65,7 +72,7 @@ pub fn resample(input: &[f32], input_rate: f64, output_rate: f64) -> Vec<f32> {
 
     let ratio = output_rate / input_rate;
     let cutoff = 0.5 * ratio.min(1.0);
-    let half_width = RESAMPLER_ZERO_CROSSINGS / (2.0 * cutoff);
+    let half_width = zero_crossings / (2.0 * cutoff);
 
     let output_count = (input.len() as f64 * ratio).floor() as usize;
     if output_count == 0 {
