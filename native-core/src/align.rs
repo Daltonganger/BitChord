@@ -72,11 +72,23 @@ pub struct Alignment {
 
 impl Alignment {
     /// Whether the map is trustworthy enough to lay a picture by.
+    ///
+    /// Calibrated on real pairs, not just the fixtures. A song against its own
+    /// music video (Cardi B, "Money": an intro and an 11.6 s interlude) scored
+    /// 0.97 against a 0.86 baseline, and against a still-image upload of the
+    /// same audio 0.98 against 0.87. The same song against three different
+    /// cached songs scored 0.83–0.89 against 0.81–0.87: harmonically similar
+    /// pop clears its own baseline by about 0.02, a true match by 0.11. A
+    /// tonal genre raises both numbers together, so the margin decides and the
+    /// floor only keeps silence-heavy pairs out. A different song also comes
+    /// back as a staircase of short segments, which a real cut never is.
     pub fn is_confident(&self) -> bool {
+        let song_seconds = self.segments.last().map_or(0.0, |s| s.song_end);
         !self.segments.is_empty()
-            && self.similarity - self.baseline >= 0.15
-            && self.similarity >= 0.7
+            && self.similarity - self.baseline >= 0.06
+            && self.similarity >= 0.9
             && self.coverage >= 0.85
+            && self.segments.len() as f64 <= 1.0 + song_seconds / 30.0
     }
 
     /// Other-upload time for a song time, or None in a gap between segments.
