@@ -2497,7 +2497,11 @@ fn technique_plan(
         filter_sweep: 0.0,
         vocal_overlap: 0.0,
         fade_seconds: blend_fade,
-        outgoing_hold_seconds: 0.0,
+        // The outgoing stays at unity, the next record rising underneath it,
+        // until the technique takes it out: an echo thrown, a beat rolled or
+        // a wash sent from a record already faded most of the way down was
+        // 20–40 dB under the mix.
+        outgoing_hold_seconds: (blend_fade - effect_seconds).max(0.0),
         bridge_start_seconds: 0.0,
         bridge_seconds: 0.0,
         bridge_repeats: 0,
