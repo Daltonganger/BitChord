@@ -26,6 +26,69 @@ object LyricsBridge {
         fun onResult(source: String, sourceLabel: String, lines: List<LyricLineDto>)
     }
 
+    /**
+     * What the per-source picker knows about one provider for the current
+     * track — upstream's `LyricsProviderState`.
+     */
+    enum class LyricsProviderState { NOT_FETCHED, FETCHING, FOUND, NOT_FOUND }
+
+    /** Swift: one provider's state changed. [lines] is non-empty only for FOUND. */
+    fun interface SourceStateCallback {
+        fun onSourceState(source: String, sourceLabel: String, state: LyricsProviderState, lines: List<LyricLineDto>)
+    }
+
+    /**
+     * [fetchAttributed] plus the provider picker's feed: every enabled source
+     * is announced FETCHING when its attempt starts, then FOUND (with its
+     * lines, so a tap can apply them from memory) or NOT_FOUND when it
+     * settles, and a cancelled race loser returns to NOT_FETCHED. The winner
+     * also arrives through [callback], so the lyrics pane and the picker
+     * cannot disagree about who won. Both passes of a romanised retry report
+     * into the same stream, each source once per state.
+     */
+    fun fetchWithSourceStates(
+        title: String,
+        artist: String,
+        durationMs: Long,
+        album: String?,
+        videoId: String?,
+        localPath: String?,
+        callback: AttributedLyricsCallback,
+        onSourceState: SourceStateCallback,
+    ) {
+        scope.launch {
+            // The repository fires started and result from the provider job
+            // itself, and a romanised retry runs the race twice; each source
+            // is reported once per state, first answer wins.
+            val started = mutableSetOf<String>()
+            val settled = mutableSetOf<String>()
+            fun report(source: LyricsSource, state: LyricsProviderState, lines: List<LyricLineDto> = emptyList()) {
+                when (state) {
+                    LyricsProviderState.FETCHING -> if (!started.add(source.name)) return
+                    LyricsProviderState.FOUND, LyricsProviderState.NOT_FOUND ->
+                        if (!settled.add(source.name)) return
+                    LyricsProviderState.NOT_FETCHED -> { }
+                }
+                onSourceState.onSourceState(source.name, source.label, state, lines)
+            }
+            val onStarted: (LyricsSource) -> Unit = { report(it, LyricsProviderState.FETCHING) }
+            val onResult: (LyricsSource, LyricsRepository.Result?) -> Unit = { source, result ->
+                if (result != null) report(source, LyricsProviderState.FOUND, result.lines)
+                else report(source, LyricsProviderState.NOT_FOUND)
+            }
+            val onCancelled: (LyricsSource) -> Unit = { report(it, LyricsProviderState.NOT_FETCHED) }
+            val (source, lines) = runCatching {
+                lookup(
+                    title, artist, durationMs, album, videoId, localPath,
+                    onSourceStarted = onStarted,
+                    onSourceResult = onResult,
+                    onSourceCancelled = onCancelled,
+                )
+            }.getOrElse { null to emptyList() }
+            callback.onResult(source?.name.orEmpty(), source?.label.orEmpty(), lines)
+        }
+    }
+
     fun fetch(title: String, artist: String, durationMs: Long, callback: LyricsCallback) {
         fetch(title, artist, durationMs, album = null, callback)
     }
@@ -93,6 +156,9 @@ object LyricsBridge {
         album: String?,
         videoId: String?,
         localPath: String?,
+        onSourceStarted: ((LyricsSource) -> Unit)? = null,
+        onSourceResult: ((LyricsSource, LyricsRepository.Result?) -> Unit)? = null,
+        onSourceCancelled: ((LyricsSource) -> Unit)? = null,
     ): Pair<LyricsSource?, List<LyricLineDto>> {
         if (!localPath.isNullOrBlank()) {
             EmbeddedLyrics.forPath(localPath)?.let { return null to it }
@@ -114,6 +180,9 @@ object LyricsBridge {
             sources = sources,
             order = AppSettings.lyricsSourceOrderList(),
             prioritizeSyllableSync = AppSettings.prioritizeSyllableSync.value,
+            onSourceStarted = onSourceStarted,
+            onSourceResult = onSourceResult,
+            onSourceCancelled = onSourceCancelled,
         )
         if (found != null && found.lines.isNotEmpty()) {
             return found.source to found.lines
