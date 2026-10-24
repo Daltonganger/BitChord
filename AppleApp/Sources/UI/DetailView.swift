@@ -176,7 +176,20 @@ struct DetailView: View {
                                     .padding(.bottom, 8)
                             }
                         } else if page.sections.isEmpty {
-                            EmptyStateView(icon: Image(.bchMusicNote), title: "No tracks", subtitle: "This page has no playable tracks.", buttonTitle: nil, action: nil)
+                            if kind(of: page) == .playlist, page.playlistOwned == true, auth.signedIn {
+                                // An empty playlist of one's own: deleting it is
+                                // the likeliest thing to want, so it is a button
+                                // here rather than only a row in the menu.
+                                EmptyStateView(
+                                    icon: Image(.bchMusicNote),
+                                    title: "No tracks",
+                                    subtitle: "This playlist is empty.",
+                                    buttonTitle: "Delete Playlist",
+                                    action: { confirmDelete(page) }
+                                )
+                            } else {
+                                EmptyStateView(icon: Image(.bchMusicNote), title: "No tracks", subtitle: "This page has no playable tracks.", buttonTitle: nil, action: nil)
+                            }
                         }
 
                         if !suggested.isEmpty {
@@ -647,16 +660,20 @@ struct DetailView: View {
                     Task { await removeDuplicates(page) }
                 }
                 Button("Delete Playlist", role: .destructive) {
-                    toast.requestConfirmation(ConfirmationRequest(
-                        title: "Delete this playlist?",
-                        message: "“\(page.title)” will be removed from your YouTube Music account. This cannot be undone.",
-                        confirm: "Delete Playlist"
-                    ) {
-                        Task { await deletePlaylist(page) }
-                    })
+                    confirmDelete(page)
                 }
             }
         }
+    }
+
+    private func confirmDelete(_ page: DetailPageModel) {
+        toast.requestConfirmation(ConfirmationRequest(
+            title: "Delete this playlist?",
+            message: "“\(page.title)” will be removed from your YouTube Music account. This cannot be undone.",
+            confirm: "Delete Playlist"
+        ) {
+            Task { await deletePlaylist(page) }
+        })
     }
 
     /// Deletes an owned playlist and leaves the dead page behind it.
