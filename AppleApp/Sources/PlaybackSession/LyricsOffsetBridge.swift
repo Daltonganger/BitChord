@@ -80,4 +80,9 @@ extension Notification.Name {
     /// `AuthController` observes it and goes signed-out, so every screen can
     /// offer a sign-in rather than an error a retry could never fix.
     static let sessionExpired = Notification.Name("bitchord.sessionExpired")
+
+    /// A playlist was deleted. On the Mac the detail column is not a push
+    /// stack, so `dismiss()` does nothing there and the page a deleted playlist
+    /// left behind has to give way to the Playlists list itself.
+    static let playlistDeleted = Notification.Name("bitchord.playlistDeleted")
 }

@@ -713,6 +713,12 @@ struct DetailView: View {
             return
         }
         NotificationCenter.default.post(name: .libraryPlaylistsChanged, object: nil)
+        // The Mac's split view has no stack to pop: its detail column keeps the
+        // deleted page unless the shell moves the sidebar selection. Carry the
+        // id so only the page that was deleted is replaced.
+        NotificationCenter.default.post(
+            name: .playlistDeleted, object: nil, userInfo: ["browseId": browseId]
+        )
         toast.show("Deleted \(page.title)")
         dismiss()
     }
