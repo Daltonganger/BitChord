@@ -104,8 +104,38 @@ final class PlaybackController {
     private(set) var duration: Double = 0
     private(set) var lastError: String?
 
+    /// Where the volume slider sits, 0…1 — a position, not an amplitude. See
+    /// `outputGain(forVolume:)` for what the output is multiplied by.
     var volume: Double = 0.9 {
-        didSet { engine.setVolume(gain: Float(volume)); dolbyRenderer?.volume = Float(volume) }
+        didSet { applyOutputGain() }
+    }
+
+    /// The amplitude a slider position stands for.
+    ///
+    /// Linear amplitude put half the slider at only −6 dB, so most of its travel
+    /// sounded alike and every quiet level was crammed into the bottom sliver —
+    /// the very range somebody needs when balancing this app against another one
+    /// playing at the same time. A cubic taper spreads about 60 dB evenly across
+    /// the travel (0.5 ≈ −18 dB, 0.1 ≈ −60 dB), the shape system volume controls
+    /// approximate.
+    static func outputGain(forVolume volume: Double) -> Double {
+        let position = min(max(volume, 0), 1)
+        return position * position * position
+    }
+
+    /// The gain the output should be at now: the slider's, lowered while ducked.
+    private var targetOutputGain: Float {
+        Float(Self.outputGain(forVolume: volume) * (isDucked ? Self.duckGain : 1))
+    }
+
+    /// The one writer of the output gain outside the duck ramp, so a slider move,
+    /// a Dolby load or a cancelled sleep fade cannot put the output back to full
+    /// while another app holds the primary audio slot.
+    private func applyOutputGain() {
+        duckTask?.cancel()
+        let gain = targetOutputGain
+        engine.setVolume(gain: gain)
+        dolbyRenderer?.volume = gain
     }
 
     var isPlaying: Bool { state == .playing }
@@ -418,6 +448,9 @@ final class PlaybackController {
         let configuredSpeed = Double(PlatformSettings.shared.getFloat(key: "playback_speed", default: 1))
         playbackRate = configuredSpeed.isFinite ? min(max(configuredSpeed, 0.5), 2.0) : 1.0
         engine.registerCallback(callback: EngineCallbacks(controller: self))
+        // `didSet` does not run for the initial value: without this the engine
+        // plays at its own default of full gain until something moves the slider.
+        applyOutputGain()
         // The engine rebuilds the *device* on a route change; only the app can
         // re-activate the session it rebuilds against. See `outputRouteChanged`.
         // Also pause if the old device became unavailable (e.g. headphones unplugged).
@@ -751,8 +784,9 @@ final class PlaybackController {
         guard shouldDuck != isDucked else { return }
         isDucked = shouldDuck
         duckTask?.cancel()
-        let from = Float(volume * (shouldDuck ? 1.0 : Self.duckGain))
-        let to = Float(volume * (shouldDuck ? Self.duckGain : 1.0))
+        let full = Self.outputGain(forVolume: volume)
+        let from = Float(full * (shouldDuck ? 1.0 : Self.duckGain))
+        let to = targetOutputGain
         let engine = self.engine
         duckTask = Task(priority: .userInitiated) { [weak self] in
             let steps = 20
@@ -1871,7 +1905,7 @@ final class PlaybackController {
                 try? engine.setSleepGain(gain: Float(min(1, remaining / 6)))
                 await MainActor.run { [weak self] in
                     guard let self, self.sleepDeadline == deadline else { return }
-                    self.dolbyRenderer?.volume = Float(self.volume * min(1, remaining / 6))
+                    self.dolbyRenderer?.volume = self.targetOutputGain * Float(min(1, remaining / 6))
                 }
                 let whole = Int(remaining.rounded(.up))
                 if whole != displayedSeconds {
@@ -1897,7 +1931,7 @@ final class PlaybackController {
         sleepDeadline = nil; sleepSecondsRemaining = nil
         sleepAfterTrack = false
         try? engine.setSleepGain(gain: 1)
-        dolbyRenderer?.volume = Float(volume * (isDucked ? Self.duckGain : 1))
+        dolbyRenderer?.volume = targetOutputGain
         try? engine.holdTrackEnd(hold: false)
         syncEngineQueueNext()
     }
@@ -2168,7 +2202,7 @@ final class PlaybackController {
     private func loadDolby(_ source: ResolvedSource, entry: QueueEntry, index: Int, start: Double, generation: UInt64) async throws {
         guard playGeneration == generation else { return }
         let renderer = AppleDolbyRenderer()
-        renderer.volume = Float(volume)
+        renderer.volume = targetOutputGain
         renderer.rate = Float(playbackRate)
         dolbyRenderer = renderer
         applySpatialPreference()
@@ -5415,9 +5449,9 @@ extension PlaybackController {
             checks["started_audio"] = isPlaying
             armSleep(seconds: 8)
             try await Task.sleep(for: .seconds(4))
-            checks["six_second_fade"] = engine.applicationOutputGain() < Float(volume) * 0.9
+            checks["six_second_fade"] = engine.applicationOutputGain() < targetOutputGain * 0.9
             cancelSleep()
-            checks["cancel_restores_volume"] = abs(engine.applicationOutputGain() - Float(volume)) < 0.0001
+            checks["cancel_restores_volume"] = abs(engine.applicationOutputGain() - targetOutputGain) < 0.0001
             armSleep(seconds: 8)
             try await Task.sleep(for: .seconds(9))
             let stoppedPosition = engine.positionSeconds()
@@ -5426,7 +5460,7 @@ extension PlaybackController {
             checks["background_deadline"] = UIApplication.shared.applicationState == .background
             #endif
             checks["deadline_pauses"] = state == .paused && abs(engine.positionSeconds() - stoppedPosition) < 0.15
-            checks["deadline_restores_volume"] = abs(engine.applicationOutputGain() - Float(volume)) < 0.0001
+            checks["deadline_restores_volume"] = abs(engine.applicationOutputGain() - targetOutputGain) < 0.0001
             cancelSleep(); setAutomixEnabled(false)
             play([first, second])
             for _ in 0..<100 { if isPlaying { break }; try await Task.sleep(for: .milliseconds(100)) }
