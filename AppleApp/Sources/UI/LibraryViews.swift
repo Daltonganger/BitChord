@@ -1223,6 +1223,7 @@ struct LibraryLandingView: View {
             shelves = result
         } catch {
             guard generation == PageSession.generation(), !Task.isCancelled else { return }
+            AuthController.reportIfSessionExpired(error)
             self.error = error.localizedDescription
         }
         loading = false
@@ -2090,6 +2091,7 @@ struct SavedShelfView: View {
             shelves = result
         } catch {
             guard generation == PageSession.generation(), !Task.isCancelled else { return }
+            AuthController.reportIfSessionExpired(error)
             self.error = error.localizedDescription
         }
         loading = false
@@ -2342,6 +2344,7 @@ struct SavedPlaylistsView: View {
             shelves = result
         } catch {
             guard generation == PageSession.generation(), !Task.isCancelled else { return }
+            AuthController.reportIfSessionExpired(error)
             self.error = error.localizedDescription
         }
         loading = false
@@ -2935,6 +2938,7 @@ struct UnifiedAlbumsView: View {
             shelves = result
         } catch {
             guard generation == PageSession.generation(), !Task.isCancelled else { return }
+            AuthController.reportIfSessionExpired(error)
             self.error = error.localizedDescription
         }
         loading = false
@@ -3149,6 +3153,7 @@ struct UnifiedArtistsView: View {
             shelves = result
         } catch {
             guard generation == PageSession.generation(), !Task.isCancelled else { return }
+            AuthController.reportIfSessionExpired(error)
             self.error = error.localizedDescription
         }
         loading = false
@@ -3403,6 +3408,7 @@ struct HistoryView: View {
             songs = result
         } catch {
             guard generation == PageSession.generation(), !Task.isCancelled else { return }
+            AuthController.reportIfSessionExpired(error)
             self.error = error.localizedDescription
         }
         loading = false
@@ -3544,6 +3550,7 @@ private struct YoutubeLibraryView: View {
             shelves = result
         } catch {
             guard generation == PageSession.generation(), !Task.isCancelled else { return }
+            AuthController.reportIfSessionExpired(error)
             self.error = error.localizedDescription
         }
         loading = false

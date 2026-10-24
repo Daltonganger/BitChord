@@ -75,4 +75,9 @@ extension Notification.Name {
     /// Playlists page and the Mac sidebar load their lists once, so without
     /// this a new playlist only appeared after relaunching.
     static let libraryPlaylistsChanged = Notification.Name("bitchord.libraryPlaylistsChanged")
+
+    /// A signed-in request was refused because the session itself is over.
+    /// `AuthController` observes it and goes signed-out, so every screen can
+    /// offer a sign-in rather than an error a retry could never fix.
+    static let sessionExpired = Notification.Name("bitchord.sessionExpired")
 }
