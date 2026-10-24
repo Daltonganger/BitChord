@@ -1011,6 +1011,11 @@ struct LibraryLandingView: View {
                 // 3. Signed-out prompt or Signed-in shelves
                 if !auth.signedIn {
                     signedInPrompt
+                    // Upstream keeps the Playlists row visible signed out, so the
+                    // page still says where playlists will live and how to start
+                    // one — its New Playlist tile asks for a sign-in instead of
+                    // opening a picker that could not save anything.
+                    shelfSection(FeedShelf(title: "Playlists", items: []))
                 } else if loading {
                     FeedSkeleton()
                 } else if let error, shelves.isEmpty {
@@ -1172,7 +1177,14 @@ struct LibraryLandingView: View {
                 LazyHStack(alignment: .top, spacing: 14) {
                     if isPlaylists {
                         NewPlaylistTile {
-                            appModel.playlistPicker = PlaylistPickerRequest(videoId: "", title: "")
+                            // Signed out there is nothing to save into: ask for the
+                            // sign-in the page is already about, rather than opening
+                            // a picker whose create button cannot work.
+                            if auth.signedIn {
+                                appModel.playlistPicker = PlaylistPickerRequest(videoId: "", title: "")
+                            } else {
+                                auth.loginPresented = true
+                            }
                         }
                     }
                     ForEach(displayItems(shelf)) { card in
