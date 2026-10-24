@@ -2442,7 +2442,14 @@ struct MeshBackdrop: View {
 /// display's own scale — the card is rendered the way it is laid out here, which
 /// is also what makes it previewable in the canvas.
 struct LyricShareCard: View {
-    let lines: [String]
+    /// One row of the card. A picked lyric, or the mark that says a passage
+    /// was skipped between two picks.
+    struct Line {
+        var text: String
+        var isGap: Bool = false
+    }
+
+    let lines: [Line]
     let title: String
     let artist: String
     let tint: ArtworkPalette.PageTint
@@ -2469,10 +2476,21 @@ struct LyricShareCard: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                    Text(line)
-                        .font(.title2.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if line.isGap {
+                        // The skipped passage, as the conventional editorial
+                        // omission mark — smaller and dimmer than a lyric line,
+                        // so the quote says the verse was cut here rather than
+                        // letting two distant halves read as if they ran on
+                        // (upstream LyricsShareCard.kt:190).
+                        Text("(…)")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.4))
+                    } else {
+                        Text(line.text)
+                            .font(.title2.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
@@ -2840,11 +2858,22 @@ struct LyricsPane: View {
         Haptics.play(.select)
     }
 
-    private var selectedLines: [String] {
-        selection.sorted().compactMap { index in
-            guard lines.indices.contains(index) else { return nil }
-            return lines[index].text
+    /// The picked lines as the card draws them. A jump over unchosen lines
+    /// becomes the omission mark, so the picture says the verse was cut rather
+    /// than letting two distant halves read as if they ran on (upstream
+    /// LyricsShare.kt:249).
+    private var pickedCardLines: [LyricShareCard.Line] {
+        var out: [LyricShareCard.Line] = []
+        var previous = -1
+        for index in selection.sorted() {
+            guard lines.indices.contains(index) else { continue }
+            if previous >= 0, index > previous + 1 {
+                out.append(LyricShareCard.Line(text: "", isGap: true))
+            }
+            out.append(LyricShareCard.Line(text: lines[index].text))
+            previous = index
         }
+        return out
     }
 
     /// Draws the card once per selection. `ImageRenderer` is main-actor work, so
@@ -2860,7 +2889,7 @@ struct LyricsPane: View {
             dark: true
         )
         let card = LyricShareCard(
-            lines: selectedLines,
+            lines: pickedCardLines,
             title: trackTitle,
             artist: trackArtist,
             tint: tint,
