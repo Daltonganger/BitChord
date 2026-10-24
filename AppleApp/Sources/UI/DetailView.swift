@@ -67,7 +67,7 @@ struct DetailView: View {
     /// is shared with Library rows that don't push (upstream's
     /// `onActiveShelfChange`). The pushed grid keeps its own scroll state, and
     /// popping back restores this page's shelf run underneath it.
-    @State private var showAllShelf: FeedShelf?
+    @State private var showAllGrid: ShowAllGrid?
 
     /// Whether the window is wide enough for the roomier header controls.
     ///
@@ -135,8 +135,8 @@ struct DetailView: View {
         // The shelf's "Show all" grid is a normal push, so the grid keeps its
         // own scroll state and popping back restores this page's carousels
         // underneath it (upstream's `parentShelf` restore).
-        .navigationDestination(item: $showAllShelf) { shelf in
-            LibraryGridView(title: shelf.title, items: shelf.items)
+        .navigationDestination(item: $showAllGrid) { grid in
+            LibraryGridView(title: grid.title, items: grid.items)
         }
     }
 
@@ -254,7 +254,9 @@ struct DetailView: View {
                                 ShelfCarousel(
                                     shelf: shelf,
                                     items: canShowAll ? Array(cards.prefix(5)) : cards,
-                                    onShowAll: canShowAll ? { showAllShelf = shelf } : nil,
+                                    onShowAll: canShowAll
+                                        ? { showAllGrid = ShowAllGrid(title: shelf.title, items: cards) }
+                                        : nil,
                                     inset: 28
                                 )
                                 .padding(.horizontal, 28)
@@ -1185,6 +1187,14 @@ struct DetailView: View {
     }
 
     private enum Kind { case album, artist, playlist, other }
+
+    /// One shelf's "Show all" destination: a snapshot of the same cards the
+    /// carousel drew, so the promoted latest release is not repeated in the
+    /// grid (the carousel drops it; the shelf itself still carries it).
+    private struct ShowAllGrid: Hashable {
+        let title: String
+        let items: [ShelfCard]
+    }
 
     private func kind(of page: DetailPageModel) -> Kind {
         switch page.type?.uppercased() {
