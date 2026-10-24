@@ -653,6 +653,12 @@ struct SongRow: View {
     }
     private var buffering: Bool { controller.current?.id == entry.id && controller.isBuffering }
 
+    /// Whether this song's audio already sits in the download store. Read in
+    /// the body, so a download finishing re-renders the rows it touched.
+    private var isDownloaded: Bool {
+        !entry.isLocal && DownloadStore.shared.asset(for: entry) != nil
+    }
+
     var body: some View {
         Group {
             #if os(macOS)
@@ -765,6 +771,14 @@ struct SongRow: View {
                 }
             }
             Spacer(minLength: 8)
+            if isDownloaded {
+                // Upstream's downloadedTint: the row says the song is already
+                // on the device, so a Download menu row is not a mystery.
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Downloaded")
+            }
             if let text = entry.durationText, !text.isEmpty {
                 Text(text)
                     .font(.callout.monospacedDigit())
