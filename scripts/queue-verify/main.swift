@@ -54,8 +54,14 @@ for changed in [context("yt:next", index: 1), context(index: 1), context(generat
 }
 let rated = refresh.begin(initial, force: true)!
 check(!refresh.accepts(request, current: initial) && refresh.accepts(rated, current: initial), "A successful rating supersedes the old request even with the same seed")
+check(!refresh.shouldRetry(request), "A superseded reply is never retried")
+check((1...AutoplayRefreshState.maxRetries).allSatisfy { _ in refresh.shouldRetry(rated) }, "A reply that landed mid-load is retried while it is the newest request")
+check(!refresh.shouldRetry(rated), "Retries stop at the budget")
+refresh.noteFilled()
+check(refresh.shouldRetry(rated), "A landed fill restores the retry budget")
 refresh.invalidate()
 check(!refresh.accepts(rated, current: initial), "Disabling autoplay or entering repeat-all invalidates pending recommendations")
+check(!refresh.shouldRetry(rated), "An invalidated request is not retried")
 let now = 1_800_000_000_000.0
 let fresh = PlaybackQueuePolicy.score(transitionFit: nil, affinity: 0, playedAt: nil, now: now)
 check(fresh > PlaybackQueuePolicy.score(transitionFit: nil, affinity: 0, playedAt: now - 1000, now: now), "Freshness works without audio analysis")
