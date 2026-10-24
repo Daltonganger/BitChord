@@ -3352,6 +3352,10 @@ mod tests {
         let mut fades = Vec::new();
         let mut effects = 0usize;
         let mut unusable = 0usize;
+        let mut out_discarded = Vec::new();
+        let mut in_discarded = Vec::new();
+        let mut cold_endings = 0usize;
+        let mut clipped_chords = 0usize;
         println!("automix corpus: {pairs} pairs from {} files", files.len());
         for index in 0..pairs {
             let outgoing = &files[index];
@@ -3380,8 +3384,18 @@ mod tests {
             if plan.fade_seconds > 0.0 {
                 fades.push(plan.fade_seconds);
             }
+            let edges = crate::analyzer::last_transition_edges();
+            out_discarded.push(edges.outgoing_discarded_seconds);
+            in_discarded.push(edges.incoming_discarded_seconds);
+            if edges.cold_ending {
+                cold_endings += 1;
+            }
+            if edges.clipped_final_chord {
+                clipped_chords += 1;
+            }
             println!(
-                "{:>2}. {:?} fade={:.2}s effect={:.2}s end={:.2}s beat={:.3}s rate={:.4} | {} → {} | {}",
+                "{:>2}. {:?} fade={:.2}s effect={:.2}s end={:.2}s beat={:.3}s rate={:.4} | {} → {} | \
+                 discarded out {:.1}s in {:.1}s{} | {}",
                 index + 1,
                 plan.style,
                 plan.fade_seconds,
@@ -3391,12 +3405,23 @@ mod tests {
                 plan.playback_rate,
                 title(outgoing),
                 title(incoming),
+                edges.outgoing_discarded_seconds,
+                edges.incoming_discarded_seconds,
+                if edges.clipped_final_chord { " CLIPPED CHORD" } else { "" },
                 plan.reason
             );
         }
         let mut sorted = fades.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
+        let median_of = |values: &mut Vec<f64>| {
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            values.get(values.len() / 2).copied().unwrap_or(0.0)
+        };
+        let median_out = median_of(&mut out_discarded);
+        let median_in = median_of(&mut in_discarded);
+        let max_out = out_discarded.iter().copied().fold(0.0f64, f64::max);
+        let max_in = in_discarded.iter().copied().fold(0.0f64, f64::max);
         println!(
             "automix scorecard: usable {}/{}, median fade {:.2}s, effects {}/{}, min fade {:.2}s",
             fades.len(),
@@ -3405,6 +3430,11 @@ mod tests {
             effects,
             pairs,
             sorted.first().copied().unwrap_or(0.0)
+        );
+        println!(
+            "automix edges: discarded out median {median_out:.1}s max {max_out:.1}s, in median \
+             {median_in:.1}s max {max_in:.1}s, cold endings {cold_endings}, clipped final chords \
+             {clipped_chords}"
         );
         // A′3 turns these into gates; A′2 reports them. The cached files are
         // Opus-in-MP4 and the Rust analyser does not decode every one, so an
