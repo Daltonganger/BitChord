@@ -136,8 +136,6 @@ struct NowPlayingView: View {
                         .allowsHitTesting(false)
                         .transition(.opacity)
                 }
-                VideoBackdrop()
-                    .ignoresSafeArea()
 
                 if PlayerLayout.takesLandscapeShape(
                     width: geo.size.width, height: geo.size.height
@@ -302,8 +300,6 @@ struct NowPlayingView: View {
                             .ignoresSafeArea()
                             .transition(.opacity)
                     }
-                    VideoBackdrop()
-                        .ignoresSafeArea()
 
                     // One decision, then one of two arrangements. The
                     // cross-fade is bound to `pane` rather than to the shape,
