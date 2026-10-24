@@ -289,11 +289,34 @@ struct ShelfCardTap<Content: View>: View {
     }
 }
 
+/// The now-playing accent a shelf card shows when this card is the track
+/// playing: the bars sit on a black pill at the artwork's foot, upstream's
+/// search-badge style, and the caller tints the title. Nothing moves for a
+/// paused current track — the tint alone says which card it is.
+struct NowPlayingCardAccent: ViewModifier {
+    let isCurrent: Bool
+    let isPlaying: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .bottomLeading) {
+                if isCurrent, isPlaying {
+                    PlayingBars(color: .white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(.black.opacity(0.52), in: Capsule())
+                        .padding(6)
+                }
+            }
+    }
+}
+
 struct ShelfCardView: View {
     let card: ShelfCard
     /// The sleeve's side, and with it the card's width. A carousel on a wide
     /// window passes a larger one; everywhere else this is the phone size.
     var artworkSide: CGFloat = Theme.Metrics.shelfCard
+    @Environment(PlaybackController.self) private var controller
     /// Whether the pointer is over the card. A card is a target, not just a
     /// picture, and on the Mac that has to show before the click.
     @State private var hovering = false
@@ -327,6 +350,10 @@ struct ShelfCardView: View {
                 ArtworkView(url: card.thumbnailUrl, data: nil, side: artworkSide)
                     .clipShape(.rect(cornerRadius: 10, style: .continuous))
                     .shadow(color: .black.opacity(0.15), radius: 5, y: 2)
+                    .modifier(NowPlayingCardAccent(
+                        isCurrent: isCurrentTrack,
+                        isPlaying: controller.isPlaying
+                    ))
                 if isPinned {
                     Image(systemName: "pin.fill")
                         .font(.caption2)
@@ -339,6 +366,7 @@ struct ShelfCardView: View {
             }
             Text(card.title)
                 .font(.callout.weight(.semibold))
+                .foregroundStyle(isCurrentTrack ? Theme.accent : .primary)
                 .lineLimit(1)
             if let subtitle = card.subtitle, !subtitle.isEmpty {
                 Text(subtitle)
@@ -358,6 +386,12 @@ struct ShelfCardView: View {
         .contentShape(.rect)
         .onHover { hovering = $0 }
         .shelfCardContextMenu(card)
+    }
+
+    /// Whether this card is the track loaded in the player right now.
+    private var isCurrentTrack: Bool {
+        guard let videoId = card.videoId, !videoId.isEmpty else { return false }
+        return controller.current?.id == videoId
     }
 }
 
@@ -439,7 +473,14 @@ struct HeroCard: View {
     var preferTrack: Bool = false
     /// The tile's width; the height follows at the 0.92 ratio.
     let side: CGFloat
+    @Environment(PlaybackController.self) private var controller
     @State private var hovering = false
+
+    /// Whether this card is the track loaded in the player right now.
+    private var isCurrentTrack: Bool {
+        guard let videoId = card.videoId, !videoId.isEmpty else { return false }
+        return controller.current?.id == videoId
+    }
 
     var body: some View {
         ShelfCardTap(card: card, preferTrack: preferTrack) {
@@ -454,7 +495,7 @@ struct HeroCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(card.title)
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(isCurrentTrack ? Theme.accent : .white)
                         .lineLimit(1)
                     if let subtitle = card.subtitle, !subtitle.isEmpty {
                         Text(subtitle)
@@ -467,6 +508,12 @@ struct HeroCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(width: side, height: side * 0.92)
+            // Over the scrim, not under it: the pill sits on the darkest part
+            // of the tile, and the gradient would grey it out from beneath.
+            .modifier(NowPlayingCardAccent(
+                isCurrent: isCurrentTrack,
+                isPlaying: controller.isPlaying
+            ))
             .clipShape(.rect(cornerRadius: 18, style: .continuous))
             .shadow(color: .black.opacity(0.15), radius: 5, y: 2)
             // The highlight reaches past the tile so the whole card reads as

@@ -309,10 +309,17 @@ struct RecentShelf: View {
 }
 
 /// One recent track: 48pt sleeve, title/artist, overflow menu. Matches
-/// upstream's `RecentTrackRow` (artwork + two lines + more button).
+/// upstream's `RecentTrackRow` (artwork + two lines + more button), with the
+/// now-playing accent the other shelf cards carry.
 private struct RecentTrackRow: View {
     let card: ShelfCard
     @Environment(PlaybackController.self) private var controller
+
+    /// Whether this row is the track loaded in the player right now.
+    private var isCurrentTrack: Bool {
+        guard let videoId = card.videoId, !videoId.isEmpty else { return false }
+        return controller.current?.id == videoId
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -327,8 +334,15 @@ private struct RecentTrackRow: View {
                 HStack(spacing: 12) {
                     ArtworkView(url: card.thumbnailUrl, data: nil, side: 48)
                         .clipShape(.rect(cornerRadius: 7, style: .continuous))
+                        .modifier(NowPlayingCardAccent(
+                            isCurrent: isCurrentTrack,
+                            isPlaying: controller.isPlaying
+                        ))
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(card.title).font(.body.weight(.medium)).lineLimit(1)
+                        Text(card.title)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(isCurrentTrack ? Theme.accent : .primary)
+                            .lineLimit(1)
                         if let subtitle = card.subtitle, !subtitle.isEmpty {
                             Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                         }
