@@ -903,8 +903,21 @@ struct NowPlayingView: View {
         } label: {
             Group {
                 if let line = currentLyric {
-                    Text(line)
-                        .foregroundStyle(.white.opacity(0.92))
+                    // Upstream's strip carries a small chevron after the sung
+                    // line (PlayerLyrics.kt:2741): the strip previews a pane,
+                    // and the glyph is the part that says "this opens
+                    // something".
+                    HStack(spacing: 6) {
+                        Text(line)
+                            .foregroundStyle(.white.opacity(0.92))
+                            .layoutPriority(1)
+                        Image(.bchChevronRight)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 9, height: 9)
+                            .foregroundStyle(.white.opacity(0.55))
+                            .accessibilityHidden(true)
+                    }
                 } else if controller.lyricsLoading {
                     Text("Looking for lyrics…")
                         .foregroundStyle(.white.opacity(0.5))
