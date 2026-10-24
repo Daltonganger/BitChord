@@ -10,7 +10,7 @@ import Foundation
 //
 // Run: scripts/check-models.sh
 // Set MODELS_LIVE=1 to also download the real pinned beat model and check its
-// SHA-256, which is how manifest drift against Hugging Face gets caught.
+// SHA-256, which is how manifest drift against the release asset gets caught.
 
 let environment = ProcessInfo.processInfo.environment
 guard let base = environment["MODELS_FIXTURE"], let baseURL = URL(string: base) else {
@@ -117,6 +117,27 @@ do {
     store.remove(.beat)
     check("remove leaves notInstalled", store.status(of: .beat) == .notInstalled)
     check("remove deletes the file", store.installedPath(.beat) == nil)
+}
+
+// MARK: - 1b. A stale install of the same name is not "installed"
+
+print("\nmigration from a stale graph")
+do {
+    let directory = temporaryDirectory("stale")
+    let newSpec = spec(.beat, path: "good.bin", name: "beat.fixture", sha: fixture.goodSHA, size: fixture.size)
+    let store = AutomixModelStore(directory: directory, specs: [newSpec])
+    // The previous small graph: the same file name, a different length. The
+    // size/hash check must treat it as absent, not as the new model.
+    let stale = directory.appendingPathComponent("beat.fixture")
+    try Data(repeating: 0xAB, count: 1024).write(to: stale)
+    store.refresh()
+    check("stale graph is not installed", store.status(of: .beat) == .notInstalled, "\(store.status(of: .beat))")
+    check("stale graph is removed", !FileManager.default.fileExists(atPath: stale.path))
+    await store.download(.beat, allowMetered: true)
+    check("the new graph installs under the old name", store.status(of: .beat).isInstalled, "\(store.status(of: .beat))")
+    if let path = store.installedPath(.beat) {
+        check("the installed graph is the new one", sha256(of: URL(fileURLWithPath: path)) == fixture.goodSHA)
+    }
 }
 
 // MARK: - 2. The right length with the wrong bytes is refused

@@ -11,7 +11,7 @@
 #
 # Set MODELS_LIVE=1 to also download the real pinned Beat This! graph and check it
 # against the digest in AutomixModelStore.swift, which is the only thing that
-# catches the manifest drifting away from Hugging Face.
+# catches the manifest drifting away from the release asset.
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

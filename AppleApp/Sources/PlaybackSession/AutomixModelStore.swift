@@ -51,15 +51,19 @@ final class AutomixModelStore {
             ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)
         }
 
+        // Beat This! final0 (CPJKU, MIT). Dynamic int8 quantization of the
+        // official final0 checkpoint (81,058,141 B, sha256 8c328b45…), exported
+        // with torch 2.14.1 + onnxscript, opset 18. 20.25M parameters, 23.5 MB.
+        // Provenance: https://github.com/CPJKU/beat_this (final0 checkpoint).
         static let beat = ModelSpec(
             id: .beat,
             fileName: "beat_this.onnx",
             displayName: "Beat + downbeat detection",
             detail: "Beat This! reads the beat grid and downbeats, so transitions land on the music rather than near it.",
-            byteCount: 10_401_044,
-            sha256: "c462b064a4033050ca6a5354bf866ff4610ab1fd8f1dec1e494b20b22d870aea",
-            // Pinned to the revision, not `main`: a branch can move, a commit cannot.
-            url: URL(string: "https://huggingface.co/ashudesai/songbird-models/resolve/345312bf5604913b3c0d05815f93c81c4b114e4d/small0.onnx")!
+            byteCount: 23_478_460,
+            sha256: "9f10e5efa37d3e120da2121141825fe54b23b487b32dd25a54f89039fd8f85cb",
+            // The owner's release asset; the tag is the pin, not a branch.
+            url: URL(string: "https://github.com/bagumamartin/BitChord/releases/download/model-beat-this-final0-v1/beat_this_full_int8.onnx")!
         )
 
         static let vocals = ModelSpec(

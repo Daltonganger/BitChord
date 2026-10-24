@@ -3340,8 +3340,14 @@ mod tests {
             });
         let models = PathBuf::from(std::env::var("HOME").unwrap_or_default())
             .join("Library/Application Support/BitChord/Models");
-        let beat = models.join("beat_this.onnx");
-        let vocals = models.join("vocals_umxhq.onnx");
+        // A model comparison is a different graph on the same corpus, so the
+        // test can be pointed at one without touching the owner's install.
+        let beat = std::env::var("AUTOMIX_BEAT_MODEL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| models.join("beat_this.onnx"));
+        let vocals = std::env::var("AUTOMIX_VOCALS_MODEL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| models.join("vocals_umxhq.onnx"));
         if beat.exists() && vocals.exists() {
             crate::analyzer::configure(
                 beat.to_str().unwrap_or_default(),
