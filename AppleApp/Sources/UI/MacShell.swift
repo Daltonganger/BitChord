@@ -310,6 +310,7 @@ private struct MacLyricsInspector: View {
         TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
             LyricsPane(
                 lines: controller.displayedLyrics,
+                originalLines: controller.lyrics,
                 loading: controller.lyricsLoading,
                 position: controller.livePosition(at: timeline.date),
                 hasTrack: controller.current != nil,
