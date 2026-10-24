@@ -2318,12 +2318,9 @@ fn loud_reference(analysis: &Analysis) -> Option<f64> {
     values.get((values.len() - 1) * 3 / 4).copied()
 }
 
-/// An unmatched pair, mixed with a plain equal-power crossfade.
-///
-/// The length is the outgoing record's own falling tail — from the last moment
-/// it is still at its loud level to its content end — clamped to what a
-/// crossfade can use. No rate change, no bed, no duck: the simplest thing that
-/// can work, which is what the pair gets when nothing else is justified.
+/// An unmatched pair, mixed with a plain equal-power crossfade. An instrumental
+/// phrase before the fall may extend the blend, but never moves its end or
+/// shortens the fall the ordinary crossfade already chose.
 fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Option<TransitionPlan> {
     if mix_end <= 0.0 {
         return None;
@@ -2382,9 +2379,38 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
     } else {
         None
     };
-    let (fall, start, snapped) = match snapped_start {
+    let (legacy_fall, legacy_start, snapped) = match snapped_start {
         Some(bar_time) => (mix_end - bar_time, bar_time, true),
         None => (fall, start, false),
+    };
+    let target = (16.0 * beat).min(AUTO_TRANSITION_MAX_SECONDS);
+    let floor = 8.0 * beat;
+    let outro_phrase = if beat > 0.0 && target >= floor {
+        outgoing
+            .downbeats
+            .iter()
+            .enumerate()
+            .filter(|(index, time)| *index % 2 == 0 && time.is_finite() && **time <= fall_start)
+            .filter_map(|(_, time)| {
+                let candidate_fall = mix_end - *time;
+                if candidate_fall + 1e-6 < floor
+                    || candidate_fall > target + 1e-6
+                    || candidate_fall <= legacy_fall + 1e-6
+                {
+                    return None;
+                }
+                let mean = vocal_activity_between(outgoing, *time, mix_end)?;
+                let peak = vocal_peak_between(outgoing, *time, mix_end)?;
+                (mean <= VOCAL_FREE_MEAN_MAX && peak <= VOCAL_FREE_PEAK_MAX)
+                    .then_some((*time, candidate_fall))
+            })
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+    } else {
+        None
+    };
+    let (fall, start, extended, snapped) = match outro_phrase {
+        Some((phrase_start, phrase_fall)) => (phrase_fall, phrase_start, true, true),
+        None => (legacy_fall, legacy_start, false, snapped),
     };
     Some(TransitionPlan {
         // A filter fade, not a bare one: the outgoing closes down through a
@@ -2414,11 +2440,18 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
         post_glide_seconds: 0.0,
         outgoing_duration_seconds: outgoing.duration,
         beat_seconds: 0.0,
-        reason: format!(
-            "filter fade: no shared tempo; the outgoing falls away from {fall_start:.1}s and the \
-             {fall:.1}s blend starts at {start:.1}s{}",
-            if snapped { " (bar-aligned)" } else { "" }
-        ),
+        reason: if extended {
+            format!(
+                "filter fade: outro phrase; the outgoing falls away from {fall_start:.1}s and the \
+                 {fall:.1}s blend starts at {start:.1}s (bar-aligned)"
+            )
+        } else {
+            format!(
+                "filter fade: no shared tempo; the outgoing falls away from {fall_start:.1}s and the \
+                 {fall:.1}s blend starts at {start:.1}s{}",
+                if snapped { " (bar-aligned)" } else { "" }
+            )
+        },
     })
 }
 
@@ -5301,6 +5334,7 @@ mod tests {
         out.content_end = 100.0;
         // Last full-energy point 95.5 -> a 4.5 s fall, start 95.5.
         with_energy(&mut out, 100.0, |time| if time <= 95.5 { 0.8 } else { 0.1 });
+        out.vocal_activity_mask.fill(0.8); // Keep this fixture on the F-4 fallback path.
         let plan = clean_crossfade(&out, 100.0, 0.0).expect("a crossfade");
         let start = plan.transition_end_seconds - plan.fade_seconds;
         assert!((start - 96.0).abs() < 1e-6, "start {start}");
@@ -5315,11 +5349,79 @@ mod tests {
         ]);
         out.content_end = 100.0;
         with_energy(&mut out, 100.0, |time| if time <= 95.5 { 0.8 } else { 0.1 });
+        out.vocal_activity_mask.fill(0.8); // Keep this fixture on the F-4 fallback path.
         let plan = clean_crossfade(&out, 100.0, 0.0).expect("a crossfade");
         let start = plan.transition_end_seconds - plan.fade_seconds;
         // 95 is the only downbeat inside the one-bar radius.
         assert!((start - 95.0).abs() < 1e-6, "start {start}");
         assert!((plan.fade_seconds - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_clean_crossfade_extends_to_the_longest_vocal_free_phrase_before_the_fall() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |time| if time <= 95.5 { 0.8 } else { 0.1 });
+        let plan = clean_crossfade(&out, 100.0, 0.0).expect("a crossfade");
+        let start = plan.transition_end_seconds - plan.fade_seconds;
+        assert!((start - 92.0).abs() < 1e-6, "start {start}");
+        assert!((plan.fade_seconds - 8.0).abs() < 1e-6, "fade {}", plan.fade_seconds);
+        assert!(plan.reason.contains("outro phrase"), "{}", plan.reason);
+    }
+
+    #[test]
+    fn a_vocal_outro_keeps_the_existing_clean_crossfade() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |time| if time <= 95.5 { 0.8 } else { 0.1 });
+        for index in 0..out.vocal_activity_mask.len() {
+            if out.energy_curve[index].time >= 92.0 {
+                out.vocal_activity_mask[index] = 0.8;
+            }
+        }
+        let plan = clean_crossfade(&out, 100.0, 0.0).expect("fallback crossfade");
+        let start = plan.transition_end_seconds - plan.fade_seconds;
+        assert!((start - 96.0).abs() < 1e-6, "start {start}");
+        assert!((plan.fade_seconds - 4.0).abs() < 1e-6, "fade {}", plan.fade_seconds);
+        assert!(!plan.reason.contains("outro phrase"), "{}", plan.reason);
+    }
+
+    #[test]
+    fn a_vocal_incoming_does_not_block_an_instrumental_outro_phrase() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |time| if time <= 95.5 { 0.8 } else { 0.1 });
+        let mut incoming = analysis(0.0, 100.0, vec![]);
+        with_vocal_curve(&mut incoming, 100.0, 0.9);
+        let plan = clean_crossfade(&out, 100.0, incoming_entry(&incoming)).expect("outro phrase blend");
+        assert!((plan.fade_seconds - 8.0).abs() < 1e-6);
+        assert!(plan.reason.contains("outro phrase"));
+    }
+
+    #[test]
+    fn a_slow_clean_crossfade_is_capped_at_twelve_seconds() {
+        // At 75 BPM, 16 beats would be 12.8 s. The 4.8 s grid phase makes
+        // 88 s an even-bar candidate at the 12 s cap, while F-4 stays shorter.
+        let mut out = analysis(0.0, 100.0, (0..=30).map(|i| 4.8 + i as f64 * 3.2).collect());
+        out.bpm = 75.0;
+        out.beat_interval = 0.8;
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |time| if time <= 95.5 { 0.8 } else { 0.1 });
+        let plan = clean_crossfade(&out, 100.0, 0.0).expect("a crossfade");
+        let start = plan.transition_end_seconds - plan.fade_seconds;
+        assert!((start - 88.0).abs() < 1e-6, "start {start}");
+        assert!((plan.fade_seconds - 12.0).abs() < 1e-6, "fade {}", plan.fade_seconds);
+        assert!(plan.reason.contains("outro phrase"), "{}", plan.reason);
+    }
+
+    #[test]
+    fn an_outro_extension_never_shortens_the_existing_fall() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |time| if time <= 85.0 { 0.8 } else { 0.1 });
+        let plan = clean_crossfade(&out, 100.0, 0.0).expect("a crossfade");
+        assert!((plan.fade_seconds - 12.0).abs() < 1e-6, "fade {}", plan.fade_seconds);
+        assert!(!plan.reason.contains("outro phrase"), "{}", plan.reason);
     }
 
     /// F: a vocal-free, phrase-aligned unit after the blend start is replayed
