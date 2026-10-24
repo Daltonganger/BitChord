@@ -99,6 +99,9 @@ struct SettingsView: View {
     /// The settings search box. Empty means "no filter", not "nothing" — clearing
     /// it must bring the whole screen back.
     @State private var search = ""
+    #if os(macOS)
+    @State private var settingsHistory = PathNavigator()
+    #endif
 
     private var metered: Bool { NetworkQuality.shared.metered }
 
@@ -109,18 +112,35 @@ struct SettingsView: View {
                     .navigationTitle("Settings")
                     .searchable(text: $search, prompt: "Search settings")
             } else {
+                #if os(macOS)
+                // A Mac settings window navigates the way Finder does: back and
+                // forward in the titlebar, over the panes opened in it.
+                NavigationStack(path: Bindable(settingsHistory).path) {
+                    settingsForm
+                        .navigationTitle("Settings")
+                        .searchable(text: $search, prompt: "Search settings")
+                        .navigationDestination(for: PushRoute.self) { route in
+                            route.make().navigationBarBackButtonHidden(true)
+                        }
+                }
+                .environment(\.inBrowseStack, true)
+                .toolbar {
+                    ToolbarItem(placement: .navigation) {
+                        MacHistoryButtons(navigator: settingsHistory)
+                    }
+                }
+                #else
                 NavigationStack {
                     settingsForm
                         .navigationTitle("Settings")
                         .searchable(text: $search, prompt: "Search settings")
-                        #if os(iOS)
                         .toolbar {
                             ToolbarItem(placement: .confirmationAction) {
                                 Button("Done") { dismiss() }
                             }
                         }
-                        #endif
                 }
+                #endif
             }
         }
         #if os(macOS)
@@ -454,7 +474,7 @@ struct SettingsView: View {
                  "discord", "rich presence", "scrobbling", "last.fm", "lastfm", "listenbrainz",
                  "spotify", "sign out", "integrations", "primary artist", "album artist",
                  "track artist", "scrobble artist") {
-            NavigationLink {
+            PushLink {
                 AccountIntegrationsView(loginPresented: $loginPresented, discordPresented: $discordPresented)
             } label: {
                 SettingsLine(
@@ -504,7 +524,7 @@ struct SettingsView: View {
     private func buildAudioQualityRows(_ rows: inout SettingsRows) {
         rows.row("Sources", "webdav", "server", "addons", "jiosaavn", "source order", "priority",
                  "remote library", "nextcloud", "owncloud", "nas", "self hosted", "smb") {
-            NavigationLink {
+            PushLink {
                 SourcesView()
             } label: {
                 SettingsLine(
@@ -732,7 +752,7 @@ struct SettingsView: View {
             }
         }
         rows.row("Automix Performance", "cpu", "threads", "analysis", "budget", "efficient", "balanced", "performance", "battery") {
-            NavigationLink {
+            PushLink {
                 AutomixPerformancePage(selection: $automixPerf)
             } label: {
                 SettingsLine(
@@ -746,7 +766,7 @@ struct SettingsView: View {
             }
         }
         rows.row("Automix Models", "models", "model", "onnx", "beat", "downbeat", "vocal", "install", "download models") {
-            NavigationLink {
+            PushLink {
                 AutomixModelsPage()
             } label: {
                 SettingsLine(
@@ -785,7 +805,7 @@ struct SettingsView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
         rows.row("Diagnostic Reports", "debug", "log", "report", "diagnostics") {
-            NavigationLink("Diagnostic Reports") { DiagnosticReportsView() }
+            PushLink("Diagnostic Reports") { DiagnosticReportsView() }
         }
         rows.row("Skip Silence", "silence", "gaps", "trim") {
             SettingsToggleLine(
@@ -832,7 +852,7 @@ struct SettingsView: View {
         }
 #endif
         rows.row("Equalizer", "eq", "bands", "bass", "treble") {
-            NavigationLink {
+            PushLink {
                 EqualizerView()
             } label: {
                 SettingsLine(
@@ -976,7 +996,7 @@ struct SettingsView: View {
                                    subtitle: "Softens lines away from the words being sung", isOn: $lyricsBlur)
             }
             rows.row("Translation Language", "translation", "language", "romanize", "lyrics") {
-                NavigationLink {
+                PushLink {
                     TranslationPreferenceView(selection: $translationLanguage, translator: controller.lyricsTranslator)
                 } label: {
                     SettingsLine(glyph: .lyricsSources, title: "Translation Language",
@@ -992,7 +1012,7 @@ struct SettingsView: View {
                 )
             }
             rows.row("Lyrics Sources", "lyrics", "sources", "provider", "paxsenix", "api key", "lrc", "translation") {
-                NavigationLink {
+                PushLink {
                     LyricsSourcesView(selection: $lyricsSources, order: $lyricsSourceOrder, syllableSync: $syllableSync)
                 } label: {
                     SettingsLine(
@@ -1322,7 +1342,7 @@ struct SettingsView: View {
         }
         rows.row("Listen together", "listen together", "party", "jam", "invite", "party code", "party server",
                  "in sync", "synchronise", "synchronize") {
-            NavigationLink {
+            PushLink {
                 ListenTogetherView()
             } label: {
                 SettingsLine(
@@ -1336,7 +1356,7 @@ struct SettingsView: View {
             }
         }
         rows.row("Spotify Canvas", "spotify", "canvas", "sp_dc", "cookie", "motion art") {
-            NavigationLink {
+            PushLink {
                 SpotifyCanvasAuthView(cookie: $spotifyCookie)
             } label: {
                 SettingsLine(
@@ -1504,7 +1524,7 @@ struct SettingsView: View {
             }
             .pickerStyle(.menu)
             #else
-            NavigationLink {
+            PushLink {
                 QualityPickerPage(title: title, selection: selection, options: options)
             } label: {
                 SettingsLine(glyph: glyph, title: title, subtitle: subtitle, badge: badge) {
@@ -1620,7 +1640,7 @@ private struct AccountIntegrationsView: View {
                     // and with one channel there is nothing to choose, so the
                     // row is hidden rather than shown as a dead end.
                     if (auth.listeningAs?.profiles.count ?? 0) > 1 {
-                        NavigationLink {
+                        PushLink {
                             AccountProfileSheet(scopedAccountId: auth.listeningAs?.id)
                         } label: {
                             SettingsLine(

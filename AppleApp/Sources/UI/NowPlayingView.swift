@@ -156,6 +156,8 @@ struct NowPlayingView: View {
 
     @ToolbarContentBuilder
     private var macPlayerToolbar: some ToolbarContent {
+        // Close sits alone by the traffic lights, where a Mac window's way
+        // out is.
         ToolbarItem(placement: .navigation) {
             Button("Close", systemImage: "xmark") {
                 appModel.nowPlayingPresented = false
@@ -166,25 +168,15 @@ struct NowPlayingView: View {
             .accessibilityLabel("Close")
         }
 
-        // The player already hides the title and the toolbar's background; going
-        // full screen takes the traffic lights and the menu bar with it, which
-        // is the borderless player upstream offers.
-        ToolbarItem(placement: .navigation) {
-            Button("Toggle Full Screen", systemImage: "arrow.up.left.and.arrow.down.right") {
-                NSApp.keyWindow?.toggleFullScreen(nil)
-            }
-            .keyboardShortcut("f", modifiers: [.command, .control])
-            .labelStyle(.iconOnly)
-            .help("Toggle Full Screen")
-            .accessibilityLabel("Toggle Full Screen")
-        }
-
-        if #available(macOS 26.0, *) {
-            ToolbarSpacer(.flexible)
+        // Full screen, volume and AirPlay are the trailing edge's: each its
+        // own control. Going full screen takes the traffic lights and the menu
+        // bar with it, which is the borderless player upstream offers.
+        ToolbarItem(placement: .primaryAction) {
+            MacFullScreenButton()
         }
 
         if !controller.hideVolumeBar {
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 ToolbarVolumeSlider(volume: Binding(
                     get: { controller.volume },
                     set: { controller.volume = $0 }
@@ -194,12 +186,7 @@ struct NowPlayingView: View {
         }
 
         if #available(macOS 26.0, *) {
-            ToolbarSpacer(.fixed)
-            ToolbarSpacer(.fixed)
-        }
-
-        if #available(macOS 26.0, *) {
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 AirPlayRouteButton()
                     .frame(width: 22, height: 22)
                     .frame(width: 32, height: 32)
@@ -208,7 +195,7 @@ struct NowPlayingView: View {
             }
             .sharedBackgroundVisibility(.hidden)
         } else {
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 AirPlayRouteButton()
                     .frame(width: 22, height: 22)
                     .frame(width: 32, height: 32)

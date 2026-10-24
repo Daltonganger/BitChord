@@ -438,6 +438,8 @@ struct RootView: View {
             Section {
                 sideRow(.home, "Home", "house")
                 sideRow(.explore, "Explore", "square.grid.2x2")
+                // Music keeps Search with the top-level destinations.
+                sideRow(.search, "Search", "magnifyingglass")
             }
             Section("Library") {
                 sideRow(.recent, "Recent", "clock.arrow.circlepath")
@@ -465,9 +467,6 @@ struct RootView: View {
                         )
                     }
                 }
-            }
-            Section {
-                sideRow(.search, "Search", "magnifyingglass")
             }
         }
         .listStyle(.sidebar)
