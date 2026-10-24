@@ -22,6 +22,7 @@ final class VideoPlayback {
     @ObservationIgnored private var resolvedId: String?
     @ObservationIgnored private var retriedId: String?
     @ObservationIgnored private var resolveTask: Task<Void, Never>?
+    @ObservationIgnored private var lastGateLog: String?
 
     private init() {}
 
@@ -38,6 +39,7 @@ final class VideoPlayback {
 
     func setEnabled(_ on: Bool) {
         guard gate.enabled != on else { return }
+        PlaybackDebugLog.shared.record("video: switch \(on ? "on" : "off")", about: gate.trackId)
         gate.setEnabled(on)
         reconcile()
     }
@@ -66,13 +68,14 @@ final class VideoPlayback {
     /// once. A nil side (an art track) or a failure is remembered for this
     /// track, so a body pass cannot turn into a request loop.
     private func reconcile() {
-        guard gate.canRequest, let id = gate.trackId else {
-            if gate.enabled, mountedId != nil || resolveTask != nil {
-                NSLog(
-                    "[BitChord] video: stopped (surfaces=%d active=%@ track=%@)",
-                    gate.surfaces, gate.active ? "yes" : "no", gate.trackId ?? "none"
-                )
+        if gate.enabled {
+            let state = "surfaces=\(gate.surfaces) active=\(gate.active) track=\(gate.trackId ?? "none") mounted=\(mountedId ?? "none")"
+            if state != lastGateLog {
+                lastGateLog = state
+                PlaybackDebugLog.shared.record("video gate: \(state)", about: gate.trackId)
             }
+        }
+        guard gate.canRequest, let id = gate.trackId else {
             stop()
             return
         }
@@ -90,6 +93,7 @@ final class VideoPlayback {
         side = nil
         controller.detach()
 
+        PlaybackDebugLog.shared.record("video: resolving (forceRefresh=\(forceRefresh))", about: id)
         resolveTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -100,19 +104,20 @@ final class VideoPlayback {
                 // The audit's art-track guard: a square picture is the sleeve,
                 // not a music video, even when it happens to be AVC/MP4.
                 if side.url != nil, side.looksLikeMusicVideo {
-                    NSLog("[BitChord] video %@: attaching the picture", id)
+                    PlaybackDebugLog.shared.record("video: attaching the picture", about: id)
                     self.side = side
                     self.controller.attach(side)
                 } else {
-                    NSLog(
-                        "[BitChord] video %@: no picture (%@)", id,
-                        side.url == nil ? "no AVC/MP4 rendition" : "not a music video: the art track's square sleeve"
+                    PlaybackDebugLog.shared.record(
+                        "video: no picture (" + (side.url == nil
+                            ? "no AVC/MP4 rendition" : "not a music video: the art track's square sleeve") + ")",
+                        about: id
                     )
                     self.side = nil
                     self.controller.detach()
                 }
             } catch {
-                NSLog("[BitChord] video %@: resolve failed: %@", id, String(describing: error))
+                PlaybackDebugLog.shared.record("video: resolve failed: \(error)", about: id)
                 guard !Task.isCancelled, self.mountedId == id else { return }
                 self.resolvedId = id
                 self.resolveTask = nil
@@ -125,7 +130,7 @@ final class VideoPlayback {
     /// The picture failed (usually an expired signed URL): ask once more,
     /// bypassing the shared cache, then let the artwork stay.
     func videoFailed() {
-        NSLog("[BitChord] video %@: the player failed", gate.trackId ?? "-")
+        PlaybackDebugLog.shared.record("video: the player failed", about: gate.trackId)
         guard gate.canRequest, let id = gate.trackId,
               mountedId == id, resolvedId == id, retriedId != id else { return }
         retriedId = id
