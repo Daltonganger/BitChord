@@ -1007,6 +1007,10 @@ final class PlaybackController {
             widgetPublisher.publish(entry: entry, isPlaying: false,
                                     canNext: playingIndex + 1 < queue.count,
                                     canPrevious: playingIndex > 0)
+            // A restored track is paused, not unloaded: its lyric is a network
+            // lookup with no audio behind it, and without it the pane claims
+            // "No lyrics for this track." about a song nobody has asked yet.
+            fetchLyrics(for: entry)
         }
     }
 
