@@ -1,6 +1,7 @@
 import AVFoundation
 import Observation
 import SwiftUI
+import BitChordShared
 
 /// App-wide owner of the O9 video side.
 ///
@@ -31,18 +32,38 @@ final class VideoPlayback {
     /// Whether a surface should draw the picture instead of the artwork.
     var showsVideo: Bool { side != nil && controller.state == .ready }
 
+    /// What the picture needs from the player beyond its clock: the playing
+    /// song's credits and length, to find its music video, and the way to put
+    /// the music-video upload itself on the audio side when the two cuts do not
+    /// line up.
+    struct PlayerHooks {
+        var track: () -> (title: String, artist: String, seconds: Double, durationText: String?)?
+        var playVideoVersion: (_ videoId: String, _ durationText: String?) -> Void
+        var playSongVersion: () -> Void
+    }
+
+    @ObservationIgnored private var hooks: PlayerHooks?
+
     /// The clock is the audio player's; every surface passes the same closures
     /// because there is exactly one audio player.
-    func configure(clock: VideoClock) {
+    func configure(clock: VideoClock, hooks: PlayerHooks) {
         controller.setClock(clock)
+        self.hooks = hooks
     }
 
     func setEnabled(_ on: Bool) {
         guard gate.enabled != on else { return }
         PlaybackDebugLog.shared.record("video: switch \(on ? "on" : "off")", about: gate.trackId)
         gate.setEnabled(on)
+        // Off puts the song back if the music-video upload had taken its place.
+        if !on { hooks?.playSongVersion() }
         reconcile()
     }
+
+    /// A music video's length may differ from the song's by this much and still
+    /// be laid over the song's own audio. More than this is an intro, a skit or
+    /// a longer ending, and the picture would run visibly out of step.
+    static let pictureOnlyDrift: Double = 2
 
     func setSurfaceVisible(_ visible: Bool, videoId: String?) {
         if visible {
@@ -107,14 +128,38 @@ final class VideoPlayback {
                     PlaybackDebugLog.shared.record("video: attaching the picture", about: id)
                     self.side = side
                     self.controller.attach(side)
-                } else {
-                    PlaybackDebugLog.shared.record(
-                        "video: no picture (" + (side.url == nil
-                            ? "no AVC/MP4 rendition" : "not a music video: the art track's square sleeve") + ")",
-                        about: id
-                    )
+                    return
+                }
+                // An art track: its picture is the sleeve, and the music video is
+                // another upload. Find it the way upstream does.
+                guard let track = self.hooks?.track(),
+                      let version = await Self.findVideoVersion(videoId: id, track: track),
+                      !Task.isCancelled, self.mountedId == id, self.gate.canRequest else {
+                    PlaybackDebugLog.shared.record("video: no music video for this song", about: id)
                     self.side = nil
                     self.controller.detach()
+                    return
+                }
+                let drift = abs(version.seconds - track.seconds)
+                if track.seconds > 0, version.seconds > 0, drift <= Self.pictureOnlyDrift {
+                    let videoSide = try await InnertubeStreamResolver.shared.resolveVideo(videoId: version.videoId)
+                    guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
+                    guard videoSide.url != nil, videoSide.looksLikeMusicVideo else {
+                        PlaybackDebugLog.shared.record("video: music video \(version.videoId) has no usable picture", about: id)
+                        return
+                    }
+                    PlaybackDebugLog.shared.record(
+                        "video: picture of \(version.videoId) over the song (drift \(String(format: "%.1f", drift))s)",
+                        about: id
+                    )
+                    self.side = videoSide
+                    self.controller.attach(videoSide)
+                } else {
+                    PlaybackDebugLog.shared.record(
+                        "video: playing the music video \(version.videoId) instead (its cut is \(String(format: "%.0f", version.seconds))s, the song \(String(format: "%.0f", track.seconds))s)",
+                        about: id
+                    )
+                    self.hooks?.playVideoVersion(version.videoId, version.durationText)
                 }
             } catch {
                 PlaybackDebugLog.shared.record("video: resolve failed: \(error)", about: id)
@@ -145,6 +190,37 @@ final class VideoPlayback {
         side = nil
         controller.detach()
     }
+
+    private struct VideoVersion {
+        let videoId: String
+        let durationText: String?
+        var seconds: Double {
+            QueueEntry.youtube(videoId: videoId, title: "", artist: "", durationText: durationText).durationSeconds
+        }
+    }
+
+    private static func findVideoVersion(
+        videoId: String, track: (title: String, artist: String, seconds: Double, durationText: String?)
+    ) async -> VideoVersion? {
+        await withCheckedContinuation { continuation in
+            VideoVersionBridge.shared.find(
+                videoId: videoId, title: track.title, artist: track.artist,
+                durationText: track.durationText ?? (track.seconds > 0 ? QueueEntry.formatDuration(track.seconds) : nil),
+                callback: VideoVersionAdapter { found, durationText, message in
+                    if let message {
+                        PlaybackDebugLog.shared.record("video: music-video search failed: \(message)", about: videoId)
+                    }
+                    continuation.resume(returning: found.map { VideoVersion(videoId: $0, durationText: durationText) })
+                }
+            )
+        }
+    }
+}
+
+private final class VideoVersionAdapter: VideoVersionBridgeVideoVersionCallback {
+    private let handler: (String?, String?, String?) -> Void
+    init(_ handler: @escaping (String?, String?, String?) -> Void) { self.handler = handler }
+    func onResult(videoId: String?, durationText: String?, message: String?) { handler(videoId, durationText, message) }
 }
 
 /// One place the picture can appear. The fallback is what the surface shows
@@ -179,11 +255,24 @@ struct VideoSurface<Fallback: View>: View {
         .onAppear {
             guard !registered else { return }
             registered = true
-            VideoPlayback.shared.configure(clock: VideoClock(
-                position: { controller.livePosition(at: Date()) },
-                isPlaying: { controller.isPlaying },
-                rate: { controller.effectivePlaybackRate }
-            ))
+            VideoPlayback.shared.configure(
+                clock: VideoClock(
+                    position: { controller.livePosition(at: Date()) },
+                    isPlaying: { controller.isPlaying },
+                    rate: { controller.effectivePlaybackRate }
+                ),
+                hooks: .init(
+                    track: { [controller] in
+                        guard let entry = controller.current else { return nil }
+                        let seconds = controller.duration > 0 ? controller.duration : entry.durationSeconds
+                        return (entry.title, entry.artist, seconds, entry.durationText)
+                    },
+                    playVideoVersion: { [controller] id, durationText in
+                        controller.playVideoVersion(videoId: id, durationText: durationText)
+                    },
+                    playSongVersion: { [controller] in controller.playSongVersion() }
+                )
+            )
             VideoPlayback.shared.setActive(scenePhase == .active)
             VideoPlayback.shared.setEnabled(showMusicVideos)
             VideoPlayback.shared.setSurfaceVisible(true, videoId: controller.current?.videoId)

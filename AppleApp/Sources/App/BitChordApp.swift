@@ -33,6 +33,13 @@ struct BitChordApp: App {
     @AppStorage("menu_bar_player") private var menuBarPlayer = true
     #endif
 
+    init() {
+        // Music videos are a per-session choice: the owner wants every session
+        // to start with the artwork, and the pill's toggle to turn the picture
+        // on for this session only.
+        UserDefaults.standard.set(false, forKey: "show_music_videos")
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
