@@ -3959,10 +3959,17 @@ final class PlaybackController {
                 guard let currentContext = self.recommendationContext,
                       self.autoplayRefresh.accepts(request, current: currentContext) else {
                     let now = self.recommendationContext
+                    let retry = self.autoplayRefresh.shouldRetry(request)
                     PlaybackDebugLog.shared.record(
-                        "autoplay: fill discarded (source=\(now?.source == context.source) index=\(now?.index == context.index) playGen=\(now?.playbackGeneration == context.playbackGeneration) queueRev=\(now?.queueEditRevision == context.queueEditRevision) session=\(now?.sessionGeneration == context.sessionGeneration) latest=\(now != nil))",
+                        "autoplay: fill discarded (state=\(self.state) context=\(now != nil) source=\(now?.source == context.source) index=\(now?.index == context.index) playGen=\(now?.playbackGeneration == context.playbackGeneration) queueRev=\(now?.queueEditRevision == context.queueEditRevision) session=\(now?.sessionGeneration == context.sessionGeneration)) retry=\(retry)",
                         about: videoId
                     )
+                    if retry {
+                        Task { @MainActor [weak self] in
+                            try? await Task.sleep(for: .seconds(2))
+                            self?.maybeAutoplay(force: true)
+                        }
+                    }
                     return
                 }
                 // Fills only ever append. Anything already queued — list rows,
@@ -4001,6 +4008,7 @@ final class PlaybackController {
                 let ordered = PlaybackQueuePolicy.ranked(Array(extras.indices), scores: scores).map { extras[$0] }
                 PlaybackDebugLog.shared.record("autoplay: \(songs.count) candidates, \(ordered.count) appended (room=\(room))", about: videoId)
                 guard !ordered.isEmpty else { return }
+                self.autoplayRefresh.noteFilled()
                 self.queue = PlaybackQueuePolicy.appendingFill(kept, extras: ordered)
                 self.persistSession()
                 self.syncEngineQueueNext()

@@ -114,8 +114,28 @@ struct AutoplayRefreshState {
         latest == request && request.context == current
     }
 
+    /// A reply that landed while the context moved — usually the first song of a
+    /// session, whose load is still settling when the recommendations arrive —
+    /// is asked for again, but only while it is still the newest request and at
+    /// most `maxRetries` times. Without this, a session started from one song
+    /// never filled: nothing else asks until the queue is already empty.
+    static let maxRetries = 3
+    private var retries = 0
+
+    mutating func shouldRetry(_ request: Request) -> Bool {
+        guard latest == request, retries < Self.maxRetries else { return false }
+        retries += 1
+        return true
+    }
+
+    /// A fill landed, so the next miss starts a fresh retry budget.
+    mutating func noteFilled() {
+        retries = 0
+    }
+
     mutating func invalidate() {
         serial &+= 1
         latest = nil
+        retries = 0
     }
 }
