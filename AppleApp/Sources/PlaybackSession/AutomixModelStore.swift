@@ -187,8 +187,7 @@ final class AutomixModelStore {
 
     var totalBytesOnDisk: Int64 {
         ModelID.allCases.reduce(0) { total, id in
-            guard status(of: id).isInstalled else { return total }
-            return total + sizeOnDisk(of: spec(id).fileName)
+            total + sizeOnDisk(of: spec(id).fileName) + sizeOnDisk(of: previousName(for: spec(id)))
         }
     }
 
@@ -205,12 +204,19 @@ final class AutomixModelStore {
     /// how CI gets a model without a network step at test time. An empty string is
     /// what `configureAnalyzer` already means by "unload" — so a listener with no
     /// models gets today's tempo fallback and no vocal mask, unchanged.
+    ///
+    /// A **previous** graph wins over the bundle too: when the manifest moves to a
+    /// new model, the old file is kept as `.prev` and stays in use until the new
+    /// download hashes correctly. Losing a working beat model for the length of a
+    /// download is worse than any transition it plans.
     var analyzerPaths: (beat: String, vocal: String) {
         (analyzerPath(for: .beat), analyzerPath(for: .vocals))
     }
 
     private func analyzerPath(for id: ModelID) -> String {
         if let downloaded = installedPath(id) { return downloaded }
+        let previous = directory.appendingPathComponent(previousName(for: spec(id)), isDirectory: false)
+        if FileManager.default.fileExists(atPath: previous.path) { return previous.path }
         guard let bundled = Self.bundleURL(for: spec(id).fileName) else { return "" }
         return bundled.path
     }
@@ -245,6 +251,10 @@ final class AutomixModelStore {
             if FileManager.default.fileExists(atPath: file.path) {
                 let size = sizeOnDisk(of: spec.fileName)
                 if size == spec.byteCount, records[spec.fileName]?.sha256 == spec.sha256 {
+                    // The new graph is in place; the fallback copy is dead weight.
+                    try? FileManager.default.removeItem(
+                        at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+                    )
                     status[id] = .installed
                     continue
                 }
@@ -255,12 +265,26 @@ final class AutomixModelStore {
                     changed = true
                     continue
                 }
-                // Wrong length, or a length that does not survive its own hash: the
-                // only states worth having are "usable" and "absent".
-                try? FileManager.default.removeItem(at: file)
-                records[spec.fileName] = nil
-                saveRecords()
-                changed = true
+                // Not the current graph. If it is the graph this store verified
+                // under the previous manifest, keep it as the fallback — the
+                // analyser keeps working while the replacement downloads. An
+                // unverified file (a hand copy, a truncated transfer) is still
+                // removed: only "usable" and "absent" are safe.
+                if let previous = records[spec.fileName],
+                   previous.bytes == size,
+                   hashMatches(file, sha256: previous.sha256) {
+                    let fallback = directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+                    try? FileManager.default.removeItem(at: fallback)
+                    try? FileManager.default.moveItem(at: file, to: fallback)
+                    records[spec.fileName] = nil
+                    saveRecords()
+                    changed = true
+                } else {
+                    try? FileManager.default.removeItem(at: file)
+                    records[spec.fileName] = nil
+                    saveRecords()
+                    changed = true
+                }
             }
 
             let partSize = sizeOnDisk(of: spec.fileName + ".part")
@@ -409,6 +433,9 @@ final class AutomixModelStore {
         let spec = spec(id)
         try? FileManager.default.removeItem(at: fileURL(for: spec))
         try? FileManager.default.removeItem(at: partURL(for: spec))
+        try? FileManager.default.removeItem(
+            at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+        )
         records[spec.fileName] = nil
         saveRecords()
         status[id] = .notInstalled
@@ -459,6 +486,12 @@ final class AutomixModelStore {
         directory.appendingPathComponent(spec.fileName + ".part", isDirectory: false)
     }
 
+    /// The graph this store used under a previous manifest; it stays in use until
+    /// the current graph hashes correctly.
+    private func previousName(for spec: ModelSpec) -> String {
+        spec.fileName + ".prev"
+    }
+
     private func ensureDirectory() {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var values = URLResourceValues()
@@ -491,12 +524,19 @@ final class AutomixModelStore {
         } catch {
             return .failed(error.localizedDescription)
         }
+        try? FileManager.default.removeItem(
+            at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+        )
         records[spec.fileName] = Record(sha256: spec.sha256, bytes: spec.byteCount, installedAt: Date())
         saveRecords()
         return .installed
     }
 
     private func hashMatches(_ url: URL, spec: ModelSpec) -> Bool {
+        hashMatches(url, sha256: spec.sha256)
+    }
+
+    private func hashMatches(_ url: URL, sha256 expected: String) -> Bool {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -504,7 +544,7 @@ final class AutomixModelStore {
             hasher.update(data: chunk)
         }
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        return digest == spec.sha256
+        return digest == expected
     }
 
     // MARK: - Sidecar
