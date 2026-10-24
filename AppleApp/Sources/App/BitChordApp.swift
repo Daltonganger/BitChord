@@ -114,11 +114,11 @@ struct BitChordApp: App {
                     controller.onLocalIntent = { [weak binding] in
                         binding?.onLocalIntent()
                     }
-                    // Offer what is playing to the listener's other devices. Handoff
-                    // reads the activity when the other device asks for it, so the
-                    // offer is refreshed at the moments the answer can change — a
-                    // new track, a play/pause, leaving the app — rather than
-                    // tracked continuously.
+                    // Offer what is playing to the listener's other devices. The
+                    // offer is (re)published when the answer can change — a new
+                    // track, a play/pause, leaving the app; the playhead itself is
+                    // written by the activity's own save hook, immediately before
+                    // the system sends it to the other device.
                     PlaybackHandoff.shared.refresh(controller: controller)
                     // What is on disk decides what the analyzer gets. Refreshed first
                     // so a resumed or already-downloaded graph is visible, and loaded
@@ -162,8 +162,9 @@ struct BitChordApp: App {
                         // and serves Automix from its disk cache instead.
                         MusicUnderstandingAnalyzer.noteBackground()
                         controller.persistSession()
-                        // The position at the moment the listener leaves is the
-                        // one "continue where you left off" needs.
+                        // Keep the offer current as the app goes away. The
+                        // playhead is written at save time, so this is about the
+                        // track and the paused/running state.
                         PlaybackHandoff.shared.refresh(controller: controller)
                         if PlatformSettings.shared.getBoolean(key: "stop_when_backgrounded", default: false) {
                             controller.pauseForBackground()
