@@ -98,12 +98,13 @@ min_nondropcut="$(echo "$summary" | sed -E 's/.*min non-DropCut fade ([0-9.]+)s.
 bridged="$(echo "$summary" | sed -E 's/.*bridged ([0-9]+)\/([0-9]+).*/\1/')"
 
 fail=0
-# Enforced: freshness. A session may not be mostly effects.
+# Enforced: freshness. At most three transitions in four use an effect (the
+# owner's pacing, 2026-10-25); the corpus is paced as the app paces it.
 if [ "$pairs" -gt 0 ]; then
-  if [ $((effects * 100)) -le $((pairs * 25)) ]; then
-    echo "ok   effects are within the 25% budget — $effects of $pairs"
+  if [ $((effects * 100)) -le $((pairs * 75)) ]; then
+    echo "ok   effects are within the 75% budget — $effects of $pairs"
   else
-    echo "FAIL effects are $effects of $pairs, over the 25% budget"
+    echo "FAIL effects are $effects of $pairs, over the 75% budget"
     fail=1
   fi
 fi

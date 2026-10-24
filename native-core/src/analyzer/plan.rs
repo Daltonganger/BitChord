@@ -1807,7 +1807,7 @@ fn plan_from(
     }
     if matches!(tier, Tier::Plain) {
         if allow_effects {
-            if let Some(plan) = technique_plan(outgoing, incoming, tier, entry, None) {
+            if let Some(plan) = technique_plan(outgoing, incoming, tier, entry, None, None) {
                 return plan;
             }
         }
@@ -2007,11 +2007,12 @@ fn plan_from(
     // its own. The corpus firing rates will decide whether that should earn an
     // effect or a shorter filtered blend.
     let key_clash = keys_clash(&outgoing.key, outgoing.key_confidence, &incoming.key, incoming.key_confidence);
-    // Principle H: an unmatched tempo is not an effect. A pair whose outgoing
-    // end falls away is mixed with a plain equal-power crossfade, placed where
-    // the tail falls, and only a handover with no falling tail on either side
-    // (both records still busy across it) or a real key clash earns a
-    // technique.
+    // An unmatched tempo or a key clash earns a technique, and the session's
+    // pacing (`allow_effects`, up to three transitions in four) decides whether it
+    // gets one. The owner's call (2026-10-24): the effects are part of the
+    // set, so a spent budget, not a falling tail, is what sends an unmatched
+    // pair to the clean crossfade below (principle H, now the default
+    // rather than the rule).
     let out_busy = handover_is_busy(outgoing, mix_end);
     let in_busy = handover_is_busy(incoming, cue);
     log::info!(
@@ -2020,11 +2021,17 @@ fn plan_from(
          out_busy={out_busy} in_busy={in_busy}",
         tier
     );
-    let effect_wanted =
-        effect_earned(key_clash, tempo_gap) && (key_clash || !falls_away(out_busy, in_busy));
+    let effect_wanted = effect_earned(key_clash, tempo_gap);
     if effect_wanted && allow_effects {
         if let Some(plan) =
-            technique_plan(outgoing, incoming, tier, entry, Some((transition_start, fade_seconds, cue)))
+            technique_plan(
+                outgoing,
+                incoming,
+                tier,
+                entry,
+                Some((transition_start, fade_seconds, cue)),
+                if out_busy { None } else { last_strong_downbeat(outgoing, mix_end) },
+            )
         {
             return plan;
         }
@@ -2199,6 +2206,72 @@ fn falls_away(out_busy: bool, in_busy: bool) -> bool {
     !(out_busy && in_busy)
 }
 
+/// The techniques the last few *other* transitions used, newest first, keyed
+/// by pair salt so a re-plan replaces its own entry. Process-wide in the app
+/// (plans run on several threads); per thread under test, so parallel tests
+/// cannot steer each other's choices.
+#[cfg(not(test))]
+static RECENT_TECHNIQUES: std::sync::Mutex<Vec<(usize, TransitionStyle)>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+thread_local! {
+    static RECENT_TECHNIQUES: std::cell::RefCell<Vec<(usize, TransitionStyle)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn with_recent_techniques<R>(body: impl FnOnce(&mut Vec<(usize, TransitionStyle)>) -> R) -> R {
+    #[cfg(not(test))]
+    {
+        let mut recent = RECENT_TECHNIQUES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        body(&mut recent)
+    }
+    #[cfg(test)]
+    {
+        RECENT_TECHNIQUES.with(|recent| body(&mut recent.borrow_mut()))
+    }
+}
+
+fn recent_techniques(salt: usize) -> Vec<TransitionStyle> {
+    with_recent_techniques(|recent| {
+        recent.iter().rev().filter(|(key, _)| *key != salt).map(|(_, style)| *style).collect()
+    })
+}
+
+fn note_technique(salt: usize, style: TransitionStyle) {
+    with_recent_techniques(|recent| {
+        recent.retain(|(key, _)| *key != salt);
+        recent.push((salt, style));
+        if recent.len() > 4 {
+            recent.remove(0);
+        }
+    });
+}
+
+/// The most outgoing tail an effect thrown early may skip.
+const MAX_THROW_DISCARD_SECONDS: f64 = 10.0;
+
+/// Where the outgoing record is last at full strength before `mix_end`
+/// (within 3 dB of its loud reference), on the downbeat at or before it: the
+/// moment a DJ throws an effect when the record's own outro falls away.
+/// `clean_crossfade` measures the same fall.
+fn last_strong_downbeat(outgoing: &Analysis, mix_end: f64) -> Option<f64> {
+    let reference = loud_reference(outgoing)?;
+    let strong = outgoing
+        .energy_curve
+        .iter()
+        .filter(|point| point.time.is_finite() && point.time <= mix_end)
+        .filter(|point| point.energy >= reference * 0.707)
+        .map(|point| point.time)
+        .next_back()?;
+    let bar = 4.0 * beat_seconds_of(outgoing);
+    outgoing
+        .downbeats
+        .iter()
+        .copied()
+        .filter(|time| time.is_finite() && *time <= strong + 1e-6 && strong - *time <= bar + 1e-6)
+        .next_back()
+        .or(Some(strong))
+}
+
 /// Is this record still at full energy at `time`?
 fn handover_is_busy(analysis: &Analysis, time: f64) -> bool {
     let Some(reference) = loud_reference(analysis) else {
@@ -2298,10 +2371,15 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
         None => (fall, start, false),
     };
     Some(TransitionPlan {
-        style: TransitionStyle::EqualPower,
+        // A filter fade, not a bare one: the outgoing closes down through a
+        // low-pass while the next record opens up through a high-pass, so
+        // two grids that do not agree are never both full-range at once.
+        // The owner's rule (2026-10-24): a plain crossfade is only for a
+        // pair nothing else suits.
+        style: TransitionStyle::DjFilter,
         bass_swap: false,
         bass_swap_fraction: DEFAULT_BASS_SWAP_FRACTION,
-        filter_sweep: 0.0,
+        filter_sweep: FILTER_SWEEP,
         vocal_overlap: 0.0,
         fade_seconds: fall,
         outgoing_hold_seconds: 0.0,
@@ -2321,7 +2399,7 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
         outgoing_duration_seconds: outgoing.duration,
         beat_seconds: 0.0,
         reason: format!(
-            "crossfade: no shared tempo; the outgoing falls away from {fall_start:.1}s and the \
+            "filter fade: no shared tempo; the outgoing falls away from {fall_start:.1}s and the \
              {fall:.1}s blend starts at {start:.1}s{}",
             if snapped { " (bar-aligned)" } else { "" }
         ),
@@ -2391,7 +2469,9 @@ fn technique_plan(
     tier: Tier,
     entry: f64,
     blend: Option<(f64, f64, f64)>,
+    throw_at: Option<f64>,
 ) -> Option<TransitionPlan> {
+    let outgoing_falls = throw_at.is_some();
     let out_bpm = outgoing.bpm;
     let in_bpm = incoming.bpm;
     let has_tempo = (MIN_BPM..=MAX_BPM).contains(&out_bpm);
@@ -2432,11 +2512,18 @@ fn technique_plan(
     let mut eligible: Vec<(TransitionStyle, &str)> = Vec::new();
     if grid && out_vocal >= 0.35 {
         eligible.push((TransitionStyle::EchoOut, "echo out: the outgoing record ends on a vocal"));
+    } else if grid {
+        // An echo thrown on the last beat finishes an instrumental ending as
+        // well as a sung one. Without it the wash, eligible on almost every
+        // unmatched pair, took two effects in three and repeated back to back.
+        eligible.push((TransitionStyle::EchoOut, "echo out: thrown on the record's last beat"));
     }
     if grid && outgoing.beat_confidence >= 0.45 && !slow && out_vocal < 0.5 {
         eligible.push((TransitionStyle::LoopRoll, "loop roll: a strong grid and an instrumental ending"));
     }
-    if grid && incoming_grid && energetic_in {
+    // A cut needs a record still going: on a tail that is already falling
+    // it holds the next record back across a quiet stretch, a gap.
+    if grid && incoming_grid && energetic_in && !outgoing_falls {
         eligible.push((TransitionStyle::DropCut, "cut on the one: the next record comes in hot"));
     }
     if slow || key_clash || !grid || tempo_gap > 0.12 {
@@ -2456,7 +2543,24 @@ fn technique_plan(
     if grid && eligible.is_empty() {
         eligible.push((TransitionStyle::EchoOut, "echo out: tempos too far apart for a blend"));
     }
-    let (style, why) = *eligible.get(pair_salt(outgoing, incoming) % eligible.len().max(1))?;
+    // Variety: an effect the last two other transitions used is passed over
+    // while an unused one fits. Re-plans of this same pair (keyed by its
+    // salt) never count as a repeat of themselves.
+    let salt = pair_salt(outgoing, incoming);
+    let recent = recent_techniques(salt);
+    let fresh = |depth: usize| -> Vec<(TransitionStyle, &str)> {
+        eligible
+            .iter()
+            .copied()
+            .filter(|(candidate, _)| !recent.iter().take(depth).any(|used| used == candidate))
+            .collect()
+    };
+    let choices = [fresh(2), fresh(1), eligible.clone()]
+        .into_iter()
+        .find(|list| !list.is_empty())
+        .unwrap_or_default();
+    let (style, why) = *choices.get(salt % choices.len().max(1))?;
+    note_technique(salt, style);
 
     // The effect sits on a real crossfade: the analysed blend supplies the
     // length, the end and the cue; the technique gets the last sub-window of
@@ -2471,7 +2575,6 @@ fn technique_plan(
     } else {
         blend_fade.max(AUTO_MIN_SECONDS)
     };
-    let end = blend_start + blend_fade;
     let technique_window = crate::mixer::technique_window_seconds(style, beat)?;
     let effect_seconds = if style == TransitionStyle::DropCut {
         (beat / 4.0).max(0.06)
@@ -2480,6 +2583,20 @@ fn technique_plan(
     }
     .min(blend_fade)
     .max(0.06);
+    // On a falling tail the effect is thrown where the record is still at
+    // full strength, as a DJ throws an echo on the last phrase rather than
+    // into a faded outro, and the effect carries it out over what is left
+    // of the fall. Without that the technique dressed a record already most
+    // of the way down. At most `MAX_THROW_DISCARD_SECONDS` of tail goes.
+    let natural_end = blend_start + blend_fade;
+    let end = match throw_at {
+        Some(throw) if throw + effect_seconds < natural_end
+            && natural_end - (throw + effect_seconds) <= MAX_THROW_DISCARD_SECONDS =>
+        {
+            throw + effect_seconds
+        }
+        _ => natural_end,
+    };
     let cue = if style == TransitionStyle::DropCut {
         let drop = incoming_handoff(incoming, 8.0 * beat);
         if drop > entry && drop < entry + 32.0 * beat {
@@ -2808,7 +2925,7 @@ fn respect_music_edges(outgoing: &Analysis, incoming: &Analysis, plan: &mut Tran
          ({fade:.1}s blend, {:.1}s hold)",
         plan.outgoing_hold_seconds
     );
-    plan.reason = if plan.reason.starts_with("crossfade:") {
+    plan.reason = if plan.reason.starts_with("crossfade:") || plan.reason.starts_with("filter fade:") {
         note
     } else {
         format!("{note}; {}", plan.reason)
@@ -2890,7 +3007,10 @@ fn bar_grid_usable(analysis: &Analysis) -> bool {
 /// is vocal-free. Nothing here is tuned to the corpus: the thresholds are the
 /// model's own floor and the 15 ms grid tolerance.
 fn bridge_unit(outgoing: &Analysis, plan: &TransitionPlan) -> Result<BridgeUnit, &'static str> {
-    if !(plan.reason.starts_with("crossfade:") || plan.reason.starts_with("cold ending:")) {
+    if !(plan.reason.starts_with("crossfade:")
+        || plan.reason.starts_with("filter fade:")
+        || plan.reason.starts_with("cold ending:"))
+    {
         return Err("not a clean crossfade");
     }
     if beat_seconds_of(outgoing) <= 0.0 || !bar_grid_usable(outgoing) {
@@ -2986,7 +3106,8 @@ fn bridge_unit(outgoing: &Analysis, plan: &TransitionPlan) -> Result<BridgeUnit,
 /// the unit; the blend start does not move, so the incoming enters where it did
 /// and the outgoing has one more unit of music to cross under it.
 fn apply_bridge(outgoing: &Analysis, plan: &mut TransitionPlan) {
-    if plan.style != TransitionStyle::EqualPower
+    // The clean crossfade is a filter fade now; the bridge extends either.
+    if !matches!(plan.style, TransitionStyle::EqualPower | TransitionStyle::DjFilter)
         || plan.effect_seconds > 0.0
         || plan.bass_swap
     {
@@ -3908,12 +4029,14 @@ mod tests {
 
     #[test]
     fn an_unmatched_pair_crosses_over_where_the_tail_falls() {
-        // 8 % apart, and the outgoing record's last 12 s fall away: a clean
-        // equal-power crossfade placed on the fall, at the record's own rate.
+        // 8 % apart, the outgoing record's last 12 s fall away, and the
+        // session's effect budget is spent: a clean equal-power crossfade
+        // placed on the fall, at the record's own rate.
         let (mut out, inc) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
         with_falling_tail(&mut out, 205.0, 12.0);
-        let plan = plan_from(&out, &inc, 8.0, true);
-        assert_eq!(plan.style, TransitionStyle::EqualPower);
+        let plan = plan_from(&out, &inc, 8.0, false);
+        assert_eq!(plan.style, TransitionStyle::DjFilter);
+        assert!(plan.filter_sweep > 0.0, "a filter fade, not a bare one");
         assert_eq!(plan.playback_rate, 1.0, "an unmatched pair is not stretched");
         assert!(plan.effect_seconds == 0.0);
         assert!(!plan.bass_swap, "no bass swap on a clean crossfade");
@@ -3924,6 +4047,43 @@ mod tests {
         );
         assert!((plan.transition_end_seconds - out.content_end).abs() < 1e-6);
         assert!(plan.reason.contains("falls away"), "{}", plan.reason);
+    }
+
+    #[test]
+    fn an_unmatched_pair_with_effect_budget_gets_its_technique() {
+        // The owner's call: the paced effect slot is taken on an unmatched
+        // pair even where the tail falls away, and a falling tail is never
+        // given a cut, which would hold the next record across a quiet gap.
+        let (mut out, inc) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
+        with_falling_tail(&mut out, 205.0, 12.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
+        assert!(plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
+        assert_ne!(plan.style, TransitionStyle::DropCut);
+        assert!(plan.effect_seconds > 0.0);
+        // Thrown where the record is still strong, not into the faded tail.
+        assert!(
+            plan.effect_start_seconds <= out.content_end - 3.0,
+            "thrown at {:.1}s of {:.1}s",
+            plan.effect_start_seconds,
+            out.content_end
+        );
+        assert!(
+            (plan.outgoing_hold_seconds - (plan.fade_seconds - plan.effect_seconds)).abs() < 1e-6,
+            "the outgoing holds until its effect"
+        );
+    }
+
+    #[test]
+    fn the_effect_memory_skips_its_own_pair_and_keeps_two_others() {
+        note_technique(1, TransitionStyle::ReverbWash);
+        note_technique(2, TransitionStyle::EchoOut);
+        // A re-plan of pair 2 sees only pair 1 behind it.
+        assert_eq!(recent_techniques(2), vec![TransitionStyle::ReverbWash]);
+        // A new pair sees both, newest first.
+        assert_eq!(recent_techniques(3), vec![TransitionStyle::EchoOut, TransitionStyle::ReverbWash]);
+        // A re-plan replaces its own entry rather than adding one.
+        note_technique(2, TransitionStyle::LoopRoll);
+        assert_eq!(recent_techniques(3), vec![TransitionStyle::LoopRoll, TransitionStyle::ReverbWash]);
     }
 
     #[test]

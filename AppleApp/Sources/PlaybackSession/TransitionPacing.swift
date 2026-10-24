@@ -24,12 +24,14 @@ struct TransitionPacing<Style> {
     /// Oldest first, at most four.
     private(set) var entries: [Entry] = []
 
-    /// No effect among the last three *other* transitions, so the fourth at
-    /// most may use one. The pair being planned is ignored: its entry is the
-    /// attempt being replaced, not a transition behind it.
+    /// Up to three transitions in four may use an effect (the owner's call,
+    /// 2026-10-25): only three effects in a row, among the last three *other*
+    /// transitions, hold the next one to a blend. The pair being planned is
+    /// ignored: its entry is the attempt being replaced, not a transition
+    /// behind it.
     func allowsEffect(for pair: TransitionPair, isEffect: (Style) -> Bool) -> Bool {
-        let others = entries.filter { $0.pair != pair }
-        return !others.suffix(3).contains(where: { isEffect($0.style) })
+        let last = entries.filter { $0.pair != pair }.suffix(3)
+        return !(last.count == 3 && last.allSatisfy { isEffect($0.style) })
     }
 
     /// A plan that was actually queued. A re-plan of the same pair replaces
