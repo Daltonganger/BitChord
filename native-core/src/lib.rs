@@ -15,6 +15,7 @@ use mixer::{Command, EngineEvents, TrackInfo, TrackSource, TransitionPlan, Trans
 
 uniffi::setup_scaffolding!();
 
+pub mod align;
 pub mod analyzer;
 pub mod decode;
 pub mod diagnostics;
@@ -3171,6 +3172,51 @@ pub struct AutomixAnalysisOverlayRec {
     pub mix_in_time: Option<f64>,
     /// `music_understanding` | `disk_cache` | …
     pub source: String,
+}
+
+/// One stretch of a version alignment: song time `t` in
+/// `[song_start, song_end)` sits at `t + offset` in the other upload.
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct AlignmentSegmentRec {
+    pub song_start: f64,
+    pub song_end: f64,
+    pub offset: f64,
+}
+
+/// Where a song's moments fall in another upload of the same recording (see
+/// `align`). `confident` is the gate for laying a picture by it.
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct VersionAlignmentRec {
+    pub segments: Vec<AlignmentSegmentRec>,
+    pub similarity: f64,
+    pub baseline: f64,
+    pub coverage: f64,
+    pub confident: bool,
+}
+
+/// Align two complete local files. Blocking and CPU-bound (a second or two for
+/// a pair of four-minute tracks): call it off the main thread.
+#[uniffi::export]
+pub fn align_versions(song_path: String, other_path: String) -> Option<VersionAlignmentRec> {
+    let alignment = align::align_files(&song_path, &other_path)?;
+    log::info!(
+        "version alignment: {} segment(s), similarity {:.2} vs baseline {:.2}, coverage {:.2}",
+        alignment.segments.len(),
+        alignment.similarity,
+        alignment.baseline,
+        alignment.coverage
+    );
+    Some(VersionAlignmentRec {
+        confident: alignment.is_confident(),
+        segments: alignment
+            .segments
+            .iter()
+            .map(|s| AlignmentSegmentRec { song_start: s.song_start, song_end: s.song_end, offset: s.offset })
+            .collect(),
+        similarity: alignment.similarity,
+        baseline: alignment.baseline,
+        coverage: alignment.coverage,
+    })
 }
 
 /// Seed an external analysis overlay (e.g. Music Understanding) for `path`.
