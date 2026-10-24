@@ -456,6 +456,34 @@ struct VideoSurface<Fallback: View>: View {
     }
 }
 
+/// Behind a playing picture, the player's backdrop is the picture itself,
+/// blurred and darkened. The sleeve's colours, and on iPhone the cover
+/// continued under the hero, fought the video for contrast; this one moves
+/// with it and the hero's dissolve lands on its own colours.
+struct VideoBackdrop: View {
+    @AppStorage("show_music_videos") private var showMusicVideos = false
+
+    var body: some View {
+        ZStack {
+            if showMusicVideos, VideoPlayback.shared.showsVideo {
+                ZStack {
+                    Color.black
+                    // A second layer on the same player: AVPlayer draws into
+                    // any number of them, so this costs no second decode.
+                    VideoLayerView(player: VideoPlayback.shared.player, gravity: .resizeAspectFill)
+                        .scaleEffect(1.3)
+                    Rectangle().fill(.regularMaterial)
+                    Color.black.opacity(0.3)
+                }
+                .environment(\.colorScheme, .dark)
+                .transition(.opacity)
+            }
+        }
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.4), value: VideoPlayback.shared.showsVideo)
+    }
+}
+
 #if os(iOS)
 private struct VideoLayerView: UIViewRepresentable {
     let player: AVPlayer
