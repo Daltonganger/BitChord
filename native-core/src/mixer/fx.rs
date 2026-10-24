@@ -179,6 +179,12 @@ impl DeckFx {
         self.elapsed >= self.land_frame
     }
 
+    /// Where the technique's own landing falls, in window frames (for the
+    /// render harness).
+    pub(crate) fn land_frame(&self) -> u64 {
+        self.land_frame
+    }
+
     /// Level of the incoming voice for the next sample: nothing before it
     /// lands, then a sine up over the overlap.
     #[allow(dead_code)]
