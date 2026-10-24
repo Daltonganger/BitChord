@@ -254,12 +254,12 @@ struct ShelfCardView: View {
 
     /// Which end of a card carrying *both* a video id and a browse id wins.
     ///
-    /// The two orders are not interchangeable, and upstream uses both. On Home
-    /// and a detail page the browse id wins: the card is a shelf of albums and
-    /// playlists, and a browse id is what the shelf meant. On a mood or genre
-    /// category the track wins — upstream branches on `videoId` first there, and
-    /// it is the more specific thing the listener aimed at, since the category
-    /// page is a list of things to *start*, not things to read.
+    /// The two orders are not interchangeable, and upstream uses both. On a
+    /// mood or genre category the browse id wins: the card is a shelf of
+    /// albums and playlists, and a browse id is what the shelf meant. On Home
+    /// the track wins — upstream branches on `videoId` first there
+    /// (MainActivity.kt:3092), and a Home shelf card is something to *start*,
+    /// not something to read about.
     var preferTrack: Bool = false
 
     /// Whether this card's collection is in `pinned_playlists`. Read live so a
@@ -415,6 +415,7 @@ struct FeedSkeleton: View {
 /// First Home shelf as a larger pager, matching upstream's hero row.
 struct HeroShelf: View {
     let shelf: FeedShelf
+    var preferTrack: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -423,7 +424,7 @@ struct HeroShelf: View {
             ShelfScroller {
                 LazyHStack(spacing: 16) {
                     ForEach(shelf.items) { card in
-                        ShelfCardView(card: card)
+                        ShelfCardView(card: card, preferTrack: preferTrack)
                     }
                 }
             }

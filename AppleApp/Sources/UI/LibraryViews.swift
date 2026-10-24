@@ -58,12 +58,12 @@ struct HomeView: View {
                                     if shelf.id == shelves.last?.id { Task { await feed.loadMore() } }
                                 }
                         } else if index == 0, shelf.items.count > 2 {
-                            HeroShelf(shelf: shelf)
+                            HeroShelf(shelf: shelf, preferTrack: true)
                                 .onAppear {
                                     if shelf.id == shelves.last?.id { Task { await feed.loadMore() } }
                                 }
                         } else {
-                            ShelfCarousel(shelf: shelf)
+                            ShelfCarousel(shelf: shelf, preferTrack: true)
                                 .onAppear {
                                     if shelf.id == shelves.last?.id {
                                         Task { await feed.loadMore() }
