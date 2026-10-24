@@ -2678,6 +2678,10 @@ struct UnifiedSongsView: View {
                     }
                 }
                 .listStyle(.plain)
+                // ↑/↓ walk the page's songs, cloud section first, exactly as it
+                // is drawn: the keyboard focus follows the selection and Return
+                // plays what the arrows landed on.
+                .rowKeyboardNavigation(ids: cloudEntries.map(\.id) + local.visibleTracks.map { QueueEntry.from($0).id })
             }
         }
         .navigationTitle(title)

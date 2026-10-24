@@ -1108,6 +1108,10 @@ struct DetailView: View {
                     }
                 }
                 #endif
+                // ↑/↓ walk this page's tracks, so a release can be read without
+                // reaching for the mouse: the keyboard focus follows the selection
+                // and Return plays whatever the arrows landed on.
+                .rowKeyboardNavigation(ids: songs.map { toEntry($0, fallbackArt: fallback).id })
             } else {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(songs.enumerated()), id: \.element.videoId) { index, song in
@@ -1133,6 +1137,7 @@ struct DetailView: View {
                         }
                     }
                 }
+                .rowKeyboardNavigation(ids: songs.map { toEntry($0, fallbackArt: fallback).id })
             }
     }
 

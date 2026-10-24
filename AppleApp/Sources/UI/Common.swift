@@ -598,8 +598,66 @@ struct ArtistCreditText: View {
 final class RowSelection {
     var id: String?
 
+    /// The rows of the page in view, in the order they are drawn.
+    ///
+    /// Registered by the page, because a row knows what it is but not who its
+    /// neighbours are, and the arrow keys are a question about neighbours. Pages
+    /// that never register anything keep today's behaviour: click to select, Tab
+    /// and Return to play, no arrows.
+    private(set) var order: [String] = []
+
     func select(_ id: String) {
         self.id = id
+    }
+
+    /// Hand the page's rows over.
+    func setOrder(_ ids: [String]) {
+        guard order != ids else { return }
+        order = ids
+        // A selection that is not on this page is not a selection: it would draw
+        // the highlight on a row the reader has left.
+        if let id, !ids.contains(id) { self.id = ids.first }
+    }
+
+    /// Forget a page's rows, but only if they are still the registered ones: the
+    /// next page's `onAppear` can run before this page's `onDisappear`, and a
+    /// blanket clear would empty the page the reader has just arrived at.
+    func clearOrder(ifMatching ids: [String]) {
+        guard order == ids else { return }
+        order = []
+    }
+
+    /// Walk the page's rows. Reports whether the selection moved, so a key that
+    /// has nowhere to go is left for whatever else would have handled it.
+    @discardableResult
+    func move(by offset: Int) -> Bool {
+        guard !order.isEmpty else { return false }
+        let target: String
+        if let id, let index = order.firstIndex(of: id) {
+            target = order[min(max(index + offset, 0), order.count - 1)]
+        } else {
+            target = offset > 0 ? order[0] : order[order.count - 1]
+        }
+        guard target != id else { return false }
+        select(target)
+        return true
+    }
+}
+
+/// The page's keyboard focus, keyed by row id.
+///
+/// A key press is delivered to the *focused* row, so arrow navigation needs the
+/// focus to move with the selection: a selection that moved on its own would walk
+/// once and then stop. The page owns the focus (it knows its rows' order); the
+/// row only joins it.
+private struct RowFocusKey: EnvironmentKey {
+    static let defaultValue: FocusState<String?>.Binding? = nil
+}
+
+extension EnvironmentValues {
+    var rowFocus: FocusState<String?>.Binding? {
+        get { self[RowFocusKey.self] }
+        set { self[RowFocusKey.self] = newValue }
     }
 }
 
@@ -662,17 +720,11 @@ struct SongRow: View {
         Group {
             #if os(macOS)
             rowContent
-                .contentShape(.rect)
-                // Double click first: SwiftUI resolves the more specific gesture,
-                // so a play does not also land as a selection click.
-                .onTapGesture(count: 2) { play() }
-                .onTapGesture { rowSelection?.select(entry.id) }
-                // A row that can only be clicked is not a Mac row: it is
-                // focusable, Return and Space play it, and VoiceOver's "press"
-                // does the same through the default action.
-                .focusable()
-                .onKeyPress(.return) { play(); return .handled }
-                .onKeyPress(.space) { play(); return .handled }
+                .modifier(MacRowInteraction(
+                    id: entry.id,
+                    play: play,
+                    selection: rowSelection
+                ))
             #else
             // A phone row is the play button itself: there is no pointer to
             // select with, and a double click would mean starting it twice.
@@ -1095,6 +1147,51 @@ actor ArtworkRequests {
     }
 }
 
+/// The Mac's row interaction: a click selects, a double click plays, and the
+/// keyboard can do both — Tab to the row, Return or Space to play it, and the
+/// arrows to walk the page's other rows (the page registers their order).
+///
+/// Its own modifier rather than nine links in the row's chain: the chain was long
+/// enough that the type checker gave up on it, and the row's body reads better
+/// when the Mac's interaction is named.
+private struct MacRowInteraction: ViewModifier {
+    let id: String
+    let play: () -> Void
+    let selection: RowSelection?
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(.rect)
+            // Double click first: SwiftUI resolves the more specific gesture, so
+            // a play does not also land as a selection click.
+            .onTapGesture(count: 2) { play() }
+            .onTapGesture { selection?.select(id) }
+            // A row that can only be clicked is not a Mac row: it is focusable,
+            // Return and Space play it, and VoiceOver's "press" does the same
+            // through the default action.
+            .focusable()
+            .focusedRow(id)
+            .onKeyPress(.return) { play(); return .handled }
+            .onKeyPress(.space) { play(); return .handled }
+            // Up and down walk the page's rows. Only the bare keys: ⌘↑ and ⌘↓ are
+            // the volume commands and must reach them. `move` answers whether it
+            // went anywhere, so at the ends of a list the key is left alone and can
+            // still scroll the page underneath.
+            .onKeyPress(.downArrow, phases: .down) { press in
+                MacRowInteraction.walk(press, by: 1, selection: selection)
+            }
+            .onKeyPress(.upArrow, phases: .down) { press in
+                MacRowInteraction.walk(press, by: -1, selection: selection)
+            }
+    }
+
+    private static func walk(_ press: KeyPress, by offset: Int, selection: RowSelection?) -> KeyPress.Result {
+        guard press.modifiers.isEmpty else { return .ignored }
+        let moved: Bool = selection?.move(by: offset) ?? false
+        return moved ? .handled : .ignored
+    }
+}
+
 /// Which lyric line the playhead is in.
 ///
 /// One implementation for the player's strip and the Mac's menu bar, because both
@@ -1106,5 +1203,55 @@ enum CurrentLyricLine {
         let ms = max(0, Int64(position * 1000) - Int64(offsetMs))
         guard let index = lines.lastIndex(where: { $0.timeMs <= ms }) else { return nil }
         return lines[index].text
+    }
+}
+
+/// The page half of keyboard navigation: it hands its rows over and lets the
+/// keyboard focus follow the selection.
+///
+/// One line per page, because the page is the only thing that knows the order of
+/// its own rows. Pages that do not ask for it keep today's behaviour, and a page
+/// whose rows are not `SongRow`s (cards, shelves) is unchanged too.
+extension View {
+    func rowKeyboardNavigation(ids: [String]) -> some View {
+        modifier(RowKeyboardNavigation(ids: ids))
+    }
+}
+
+private struct RowKeyboardNavigation: ViewModifier {
+    let ids: [String]
+    @Environment(\.rowSelection) private var rowSelection
+    @FocusState private var focusedRow: String?
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.rowFocus, $focusedRow)
+            .onAppear { rowSelection?.setOrder(ids) }
+            .onChange(of: ids) { _, new in rowSelection?.setOrder(new) }
+            .onDisappear { rowSelection?.clearOrder(ifMatching: ids) }
+            .onChange(of: rowSelection?.id) { _, new in
+                guard let new else { return }
+                focusedRow = new
+            }
+    }
+}
+
+/// The row half: join the page's focus when the page has one.
+private struct FocusedRowModifier: ViewModifier {
+    let id: String
+    @Environment(\.rowFocus) private var rowFocus
+
+    func body(content: Content) -> some View {
+        if let rowFocus {
+            content.focused(rowFocus, equals: id)
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    fileprivate func focusedRow(_ id: String) -> some View {
+        modifier(FocusedRowModifier(id: id))
     }
 }
