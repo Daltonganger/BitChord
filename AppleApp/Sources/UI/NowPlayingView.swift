@@ -39,6 +39,10 @@ struct NowPlayingView: View {
     @State private var showPipeline = false
     @State private var showLyricsOffset = false
     @State private var showLyricsSources = false
+    /// Lyric share-picking, driven from the lyrics header: upstream's header
+    /// three-dot becomes the way in (and the way out) of picking lines for a
+    /// share card while the lyrics pane is up.
+    @State private var sharePicking = false
     /// The offset, held here so a change re-renders the lyrics without the sheet
     /// being open. The notification is the signal; this is the value it carries.
     @State private var lyricsOffsetMs: Int32 = LyricsOffsetBridge.offsetMs()
@@ -751,6 +755,8 @@ struct NowPlayingView: View {
                 trackId: controller.current?.id ?? "",
                 offsetMs: lyricsOffsetMs,
                 sourceVisible: lyricsControlsOpen,
+                sharePicking: sharePicking,
+                onSharePicking: { sharePicking = $0 },
                 onChangeSource: { showLyricsSources = true },
                 onRevealControls: { revealLyricsControls() },
                 onFocusLyrics: { hideLyricsControls() },
@@ -862,7 +868,21 @@ struct NowPlayingView: View {
                     label: controller.isLiked ? "Remove Like" : "Like"
                 ) { controller.toggleLike() }
             }
-            moreMenu
+            if controller.displayedLyrics.isEmpty {
+                moreMenu
+            } else {
+                // Upstream 89912638/aa5ff748: with lyrics up the header's
+                // three-dot becomes the share entry, since a card quotes *this*
+                // lyric — and becomes the way out while lines are picked.
+                GlassCircleButton(
+                    system: sharePicking ? "xmark" : "square.and.arrow.up",
+                    label: sharePicking ? "Stop picking lyrics" : "Share lyrics"
+                ) {
+                    Haptics.play(.tap)
+                    sharePicking.toggle()
+                }
+                .help(sharePicking ? "Stop picking lyrics" : "Share lyrics")
+            }
         }
         .padding(.horizontal, 24)
         .padding(.top, 8)
@@ -2487,6 +2507,11 @@ struct LyricsPane: View {
     /// The listener's timing correction, in milliseconds. See [LyricsOffsetBridge].
     var offsetMs: Int32 = 0
     var sourceVisible: Bool = true
+    /// True while the header's share entry has picking armed. The pane shows
+    /// the quote bar for an empty pick so there is somewhere to aim, and
+    /// reports back so the header can stop being the way out.
+    var sharePicking: Bool = false
+    var onSharePicking: ((Bool) -> Void)? = nil
     var onChangeSource: (() -> Void)? = nil
     var onRevealControls: (() -> Void)? = nil
     var onFocusLyrics: (() -> Void)? = nil
@@ -2689,7 +2714,7 @@ struct LyricsPane: View {
                                 }
                         )
                     }
-                    if !selection.isEmpty {
+                    if !selection.isEmpty || sharePicking {
                         shareBar
                             .padding(.horizontal, 12)
                     }
@@ -2719,6 +2744,12 @@ struct LyricsPane: View {
         // preview under the new song's name.
         .onChange(of: trackId) { _, _ in clearShareSelection() }
         .onChange(of: lyricsSignature) { _, _ in clearShareSelection() }
+        // Leaving pick mode — from the header's close or the bar's Done —
+        // empties the pick with it. Arriving never has to: a fresh pick starts
+        // from the same empty state these clearings leave behind.
+        .onChange(of: sharePicking) { _, picking in
+            if !picking { clearShareSelection() }
+        }
     }
 
     /// What makes one lyric document different from another.
@@ -2764,12 +2795,19 @@ struct LyricsPane: View {
                         .font(.subheadline.weight(.semibold))
                 }
                 .foregroundStyle(.white)
+            } else if selection.isEmpty {
+                // An armed pick with nothing in it yet: say what to do rather
+                // than spin a card that does not exist.
+                Text("Pick lines to share")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.6))
             } else {
                 ProgressView().controlSize(.small).tint(.white)
             }
             Button("Done") {
                 selection.removeAll()
                 shareImage = nil
+                onSharePicking?(false)
             }
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(.white)
