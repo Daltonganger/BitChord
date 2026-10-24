@@ -70,7 +70,10 @@ struct NowPlayingView: View {
                 .environment(controller)
         }
         .sheet(isPresented: $showLyricsSources) {
-            LyricsSourcesSheet(onSearchAgain: { controller.refetchLyrics() })
+            // Upstream's status row opens the per-track provider picker
+            // (NowPlayingScreen.kt:1970): the picker is about THIS track's
+            // lyric, and the sources settings stay in Settings.
+            LyricsProviderSheet()
         }
         // The offset is adjusted *against the track playing*, so the effect has to
         // be visible while the sheet is still open — a control that only took
