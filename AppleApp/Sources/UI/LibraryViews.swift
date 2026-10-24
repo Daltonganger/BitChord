@@ -2239,9 +2239,27 @@ struct SavedPlaylistsView: View {
         .onAppear {
             local.restoreViewPreferences()
             rescanM3u()
+            // The Mac's File menu switches to this page and asks for an import; the
+            // request can already be pending when the page appears.
+            openPendingImport()
         }
+        .onChange(of: appModel.spotifyImportPresented) { _, _ in openPendingImport() }
+        .onChange(of: appModel.playlistFileImportPresented) { _, _ in openPendingImport() }
         .onReceive(NotificationCenter.default.publisher(for: .libraryPlaylistsChanged)) { _ in
             Task { await load(force: true) }
+        }
+    }
+
+    /// Opens whichever import the shell asked for (File ▸ Import), consuming the
+    /// request so it fires once.
+    private func openPendingImport() {
+        if appModel.spotifyImportPresented {
+            appModel.spotifyImportPresented = false
+            showSpotifyImport = true
+        }
+        if appModel.playlistFileImportPresented {
+            appModel.playlistFileImportPresented = false
+            showImportPicker = true
         }
     }
 
