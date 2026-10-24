@@ -56,6 +56,12 @@ struct DetailView: View {
     /// Narrows the track list in place, like upstream's search circle in the
     /// release header. Off until tapped, so a long list reads as a list first.
     @State private var searching = false
+    /// Library state of the promoted latest release, read lazily (upstream's
+    /// `releaseLibrary`) so its save circle reflects the truth without loading
+    /// the whole release page up front.
+    @State private var latestReleaseLibraryId: String?
+    @State private var latestReleaseSaved = false
+    @State private var savingLatestRelease = false
 
     /// Whether the window is wide enough for the roomier header controls.
     ///
@@ -157,6 +163,9 @@ struct DetailView: View {
                         latestReleaseCard(card)
                             .padding(.horizontal, 16)
                             .padding(.bottom, 10)
+                            .task(id: card.browseId) {
+                                await loadLatestReleaseLibrary(card)
+                            }
                     }
 
                     VStack(alignment: .leading, spacing: 0) {
@@ -944,6 +953,17 @@ struct DetailView: View {
                 }
             }
             Spacer(minLength: 8)
+            if auth.signedIn, latestReleaseLibraryId != nil {
+                CircleIconButton(
+                    icon: Image(systemName: latestReleaseSaved ? "checkmark" : "plus"),
+                    label: latestReleaseSaved ? "Remove from Library" : "Add to Library",
+                    size: 40,
+                    active: latestReleaseSaved,
+                    disabled: savingLatestRelease
+                ) {
+                    Task { await toggleLatestReleaseSave() }
+                }
+            }
             Image(.bchChevronRight)
                 .resizable()
                 .scaledToFit()
@@ -1222,6 +1242,35 @@ struct DetailView: View {
         guard generation == PageSession.generation(), !Task.isCancelled else { return }
         if let failure {
             saved = wasSaved
+            toast.show("Couldn’t update library: \(failure)", kind: .failure)
+        }
+    }
+
+    /// Reads the latest release's library id + saved state by fetching its page,
+    /// the same way upstream's `releaseLibraryState(browseId)` does. The full
+    /// page is cached, so this costs nothing extra if the release is opened.
+    private func loadLatestReleaseLibrary(_ card: ShelfCard) async {
+        guard let browseId = card.browseId, !browseId.isEmpty else { return }
+        let generation = PageSession.generation()
+        let request = pageRequestID
+        guard let result = try? await InnertubeDetail.shared.browse(browseId: browseId, force: false),
+              generation == PageSession.generation(), pageRequestID == request, !Task.isCancelled else { return }
+        latestReleaseLibraryId = result.libraryPlaylistId
+        latestReleaseSaved = result.librarySaved ?? false
+    }
+
+    private func toggleLatestReleaseSave() async {
+        guard let pid = latestReleaseLibraryId, !savingLatestRelease else { return }
+        let generation = PageSession.generation()
+        savingLatestRelease = true
+        defer { savingLatestRelease = false }
+        let wasSaved = latestReleaseSaved
+        let next = !wasSaved
+        latestReleaseSaved = next
+        let failure = await LibraryActions.ratePlaylist(playlistId: pid, saved: next)
+        guard generation == PageSession.generation(), !Task.isCancelled else { return }
+        if let failure {
+            latestReleaseSaved = wasSaved
             toast.show("Couldn’t update library: \(failure)", kind: .failure)
         }
     }
