@@ -68,13 +68,25 @@ final class PlaybackHandoff: NSObject, NSUserActivityDelegate {
     /// arrive on the main thread, so the assumption is stated here once rather
     /// than the payload being refreshed on a timer nobody asked for.
     nonisolated func userActivityWillSave(_ userActivity: NSUserActivity) {
-        MainActor.assumeIsolated {
-            guard userActivity === activity,
-                  let controller,
-                  let payload = payload(from: controller) else { return }
-            userActivity.userInfo = payload.userInfo
-            userActivity.title = payload.title
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { writePayload(to: userActivity) }
+        } else {
+            // The protocol promises nothing about the thread, and a Handoff that
+            // crashed the app would be worse than a stale position: hop first,
+            // and only assume the main actor once we are on it.
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated { writePayload(to: userActivity) }
+            }
         }
+    }
+
+    /// Writes what the player is doing into an activity that is about to be sent.
+    private func writePayload(to userActivity: NSUserActivity) {
+        guard userActivity === activity,
+              let controller,
+              let payload = payload(from: controller) else { return }
+        userActivity.userInfo = payload.userInfo
+        userActivity.title = payload.title
     }
 
     /// Carry on from a payload that arrived from another device.
