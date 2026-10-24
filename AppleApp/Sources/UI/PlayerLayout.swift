@@ -83,6 +83,31 @@ enum PlayerLayout {
         compact ? landscapeGutterCompact : landscapeGutter
     }
 
+    // ---- an open pane beside the stage -------------------------------------
+
+    /// Whether an open lyrics or queue pane sits *beside* the player rather
+    /// than over its stage, in a window that does not take the landscape shape.
+    ///
+    /// A tablet held upright is taller than it is wide, so it took the portrait
+    /// player — and the pane took the stage, shrinking the sleeve to a header
+    /// for as long as the words were up. But the shape argument above is about
+    /// a window that is *only* tall: a tablet has the width for two columns in
+    /// either orientation, and Apple Music keeps the sleeve and the pane side by
+    /// side on an iPad whichever way it is held. The pane is better off beside
+    /// the sleeve than over it: it gets the window's whole height to read or
+    /// scroll in, and the sleeve, the scrubber and the transport stay where the
+    /// hand left them.
+    ///
+    /// The caller supplies the size class rather than this asking for the
+    /// device: a split-view window on a tablet can be narrow enough for the
+    /// portrait player, and that is the same answer a phone gets.
+    ///
+    /// The floor is the landscape player's and for the same reason: below it,
+    /// half the window cannot hold a sleeve and a deck.
+    static func putsPaneBesideStage(width: CGFloat, regularWidth: Bool) -> Bool {
+        regularWidth && width >= landscapeMinWidth
+    }
+
     // ---- the portrait stage ------------------------------------------------
 
     /// The collapsed artwork's side, when a panel is up in the portrait player.
