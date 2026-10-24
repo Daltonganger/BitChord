@@ -105,22 +105,33 @@ final class VideoSideController {
         tearDownItem()
         self.side = side
         state = .loading
+        load(side, url: url, segmented: true)
+    }
 
+    /// One item for the side. `segmented`: through the rendition's segment
+    /// index as an HLS playlist, ready after its first fragment; otherwise
+    /// the whole MP4 in bounded ranges, which AVFoundation reads to the end
+    /// before it is ready (the fallback when the head has no index).
+    private func load(_ side: ResolvedVideoSide, url: URL, segmented: Bool) {
         // Bounded ranges, with the headers the resolving client sent: the
         // player's own open-ended requests are slowed to playback speed.
         let loader = ChunkedVideoLoader(source: url, headers: side.headers)
+        let options: [String: Any] = side.headers.isEmpty ? [:] : ["AVURLAssetHTTPHeaderFieldsKey": side.headers]
         let asset: AVURLAsset
-        if let chunked = loader.assetURL {
+        if segmented {
+            asset = AVURLAsset(url: ChunkedVideoLoader.playlistURL, options: options)
+        } else if let chunked = loader.assetURL {
             asset = AVURLAsset(url: chunked)
-            asset.resourceLoader.setDelegate(loader, queue: loader.queue)
-            self.loader = loader
         } else {
-            asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": side.headers])
+            asset = AVURLAsset(url: url, options: options)
         }
+        asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+        self.loader = loader
         let item = AVPlayerItem(asset: asset)
         let attachedAt = CACurrentMediaTime()
         PlaybackDebugLog.shared.record(
-            "video sync: loading \(side.width ?? 0)x\(side.height ?? 0) itag \(side.itag ?? 0) via \(side.clientName), "
+            "video sync: loading \(side.width ?? 0)x\(side.height ?? 0) itag \(side.itag ?? 0) via \(side.clientName) "
+                + "\(segmented ? "segmented" : "whole"), "
                 + "headers \(side.headers.keys.sorted().joined(separator: ",")), throttled=\(side.hasNParameter)"
         )
         // Install the observers before assigning the item: a cached item can be
@@ -140,7 +151,12 @@ final class VideoSideController {
                     PlaybackDebugLog.shared.record(
                         "video sync: the item failed: \(item.error.map { String(describing: $0) } ?? "no error")"
                     )
-                    self.fail()
+                    if segmented {
+                        self.tearDownItem()
+                        self.load(side, url: url, segmented: false)
+                    } else {
+                        self.fail()
+                    }
                 default:
                     break
                 }
