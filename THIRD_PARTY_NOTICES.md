@@ -12,6 +12,26 @@ identify the affected files and authors. The complete AGPLv3 text is in
 with AGPLv3 code and applies AGPL section 13's network-interaction terms to the combined
 work. The GPLv3 text is in [LICENSE](LICENSE).
 
+## Automix ONNX models
+
+Automix uses two neural graphs, both open-licensed:
+
+- **Beat + downbeat** is downloaded at first run from the app's release asset
+  `model-beat-this-final0-v1` (23,478,460 B, sha256 `9f10e5ef…f85cb`). It is a dynamic int8
+  quantization of CPJKU's Beat This! `final0` checkpoint, MIT licensed
+  (<https://github.com/CPJKU/beat_this>). The provenance is recorded in
+  `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`.
+- **Vocal detection** is bundled in the app at
+  `AppleApp/Resources/Models/vocals_umxhq_int8.onnx` (23,209,009 B, sha256
+  `7eba6bebce0cc2e2d3b5c0e490a8074e66ce27f64170c6802b245740dcaf21ef`). It is exported from
+  the official sigsep **open-unmix** `umxhq` vocals checkpoint (MIT; Stöter & Liutkus,
+  Inria/SigSep; Zenodo record 3370489, file `vocals-b62c91ce.pth`, sha256
+  `b62c91cedbc7a066f1778ead5b5cecb377aa3a46a31af1cce7c5c8769339d083`). The export uses
+  torch 2.8 and opset 17 with standard ONNX LSTM ops, then dynamic int8 quantization of
+  MatMul/Gemm only; the LSTMs stay float. The Rust front end in
+  `native-core/src/analyzer/vocal.rs` speaks its `[1, 2, 2049, 960]` magnitude-spectrogram
+  contract. The graph ships inside the app, not as a download.
+
 ## Native audio dependencies
 
 `native-core/Cargo.lock` pins the Rust dependency graph. A Cargo metadata scan on
