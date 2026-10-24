@@ -1,0 +1,197 @@
+import AVFoundation
+import Foundation
+import Observation
+import QuartzCore
+
+/// The clock the picture follows. The host supplies these from the audio player;
+/// they are closures rather than the controller itself so this file stays out
+/// of the engine and owns no audio state.
+struct VideoClock {
+    var position: @MainActor () -> Double
+    var isPlaying: @MainActor () -> Bool
+    /// 1.0 normally; the engine's pitch-preserving speed otherwise.
+    var rate: @MainActor () -> Double = { 1 }
+}
+
+/// One muted, video-only `AVPlayer` that follows the audio engine's clock.
+///
+/// The audio engine is the only clock; this player never owns sound and never
+/// tells the engine anything. Every 250 ms it compares the picture's position
+/// with the engine's and either lets it run, nudges its rate by at most ±0.1,
+/// seeks it when the drift is past 150 ms, or pauses it with the transport.
+/// Any video failure is contained here: the state becomes `.failed`, the layer
+/// disappears, and the artwork returns while the audio keeps playing.
+///
+/// A surface owns the `AVPlayerLayer`; this class only owns the player and the
+/// policy. Nothing is wired to the player UI yet: the O9 surfaces pass a
+/// `VideoClock` and call `attach`/`detach`.
+@MainActor
+@Observable
+final class VideoSideController {
+    enum State: Equatable {
+        case idle
+        case loading
+        case ready
+        /// The picture is not usable; the surface should show the artwork.
+        case failed
+    }
+
+    private(set) var state: State = .idle
+    /// The side currently attached, for the surface's aspect ratio and title.
+    private(set) var side: ResolvedVideoSide?
+
+    @ObservationIgnored let player = AVPlayer()
+    @ObservationIgnored private let clock: VideoClock
+    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var statusObservation: NSKeyValueObservation?
+    @ObservationIgnored private var failedObserver: NSObjectProtocol?
+    @ObservationIgnored private var isSeeking = false
+    @ObservationIgnored private var lastSeekAt: CFTimeInterval = 0
+
+    /// - Parameter clock: read on the main actor, once per tick.
+    init(clock: VideoClock) {
+        self.clock = clock
+        player.isMuted = true
+        player.volume = 0
+        player.preventsDisplaySleepDuringVideoPlayback = false
+        player.audiovisualBackgroundPlaybackPolicy = .pauses
+        player.actionAtItemEnd = .pause
+        // The picture is not the point of the track: do not wait for a large
+        // buffer before showing the frame the engine is already at.
+        player.automaticallyWaitsToMinimizeStalling = false
+    }
+
+    deinit {
+        timer?.invalidate()
+        if let failedObserver {
+            NotificationCenter.default.removeObserver(failedObserver)
+        }
+    }
+
+    /// Attach the side for the current track, or nil to go back to the artwork.
+    /// Attaching the same URL again is a no-op, so a view can call this on every
+    /// body pass.
+    func attach(_ side: ResolvedVideoSide?) {
+        guard let side, let url = side.url.flatMap(URL.init(string:)) else {
+            detach()
+            return
+        }
+        if self.side?.url == side.url, player.currentItem != nil {
+            // Keep the current item, including a failed one: a repeated body
+            // pass must not rebuild (and retry) a video that already refused.
+            self.side = side
+            return
+        }
+        tearDownItem()
+        self.side = side
+        state = .loading
+
+        let item = AVPlayerItem(url: url)
+        // Install the observers before assigning the item: a cached item can be
+        // ready immediately, and each callback checks item identity after hopping.
+        statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.player.currentItem === item else { return }
+                switch item.status {
+                case .readyToPlay:
+                    self.state = .ready
+                    self.lastSeekAt = 0
+                    self.tick()
+                case .failed:
+                    self.fail()
+                default:
+                    break
+                }
+            }
+        }
+        failedObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.player.currentItem === item else { return }
+                self.fail()
+            }
+        }
+        player.replaceCurrentItem(with: item)
+        startTimer()
+        tick()
+    }
+
+    /// Detach the picture: stop, tear the item down, go back to idle/artwork.
+    func detach() {
+        tearDownItem()
+        side = nil
+        state = .idle
+    }
+
+    /// One policy pass. Called by the timer; exposed so a surface can force a
+    /// pass after a transport change instead of waiting for the next 250 ms.
+    func tick() {
+        guard state == .ready, let item = player.currentItem, item.status == .readyToPlay, !isSeeking else {
+            return
+        }
+        let engine = clock.position()
+        let video = player.currentTime().seconds
+        guard engine.isFinite, video.isFinite else { return }
+        let now = CACurrentMediaTime()
+        let decision = VideoSyncPolicy.decide(
+            engineSeconds: engine,
+            videoSeconds: video,
+            enginePlaying: clock.isPlaying(),
+            engineRate: clock.rate(),
+            videoRate: player.rate,
+            secondsSinceSeek: now - lastSeekAt
+        )
+        switch decision {
+        case .none:
+            break
+        case .pause:
+            player.pause()
+        case .play(let rate):
+            if abs(player.rate - rate) > 0.005 || player.rate == 0 {
+                player.playImmediately(atRate: rate)
+            }
+        case .seek(let seconds):
+            isSeeking = true
+            lastSeekAt = now
+            let time = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
+            let tolerance = CMTime(seconds: 0.05, preferredTimescale: 600)
+            player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.isSeeking = false
+                    self.tick()
+                }
+            }
+        }
+    }
+
+    private func fail() {
+        state = .failed
+        player.pause()
+    }
+
+    private func startTimer() {
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.tick() }
+        }
+        // Common mode keeps the clock running while a list is being scrolled.
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    private func tearDownItem() {
+        statusObservation = nil
+        if let failedObserver {
+            NotificationCenter.default.removeObserver(failedObserver)
+        }
+        failedObserver = nil
+        timer?.invalidate()
+        timer = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        isSeeking = false
+        lastSeekAt = 0
+    }
+}
