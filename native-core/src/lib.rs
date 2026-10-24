@@ -3391,15 +3391,23 @@ mod tests {
         let beat = std::env::var("AUTOMIX_BEAT_MODEL")
             .map(PathBuf::from)
             .unwrap_or_else(|_| models.join("beat_this.onnx"));
+        // The vocals graph ships inside the app (AppleApp/Resources/Models), not
+        // in the model store: the store deletes the old 113 MB download. Looking
+        // for that file is how this scorecard ran with no models at all while
+        // the devices ran both.
         let vocals = std::env::var("AUTOMIX_VOCALS_MODEL")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| models.join("vocals_umxhq.onnx"));
-        if beat.exists() && vocals.exists() {
-            crate::analyzer::configure(
-                beat.to_str().unwrap_or_default(),
-                vocals.to_str().unwrap_or_default(),
-            );
-        }
+            .unwrap_or_else(|_| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../AppleApp/Resources/Models/vocals_umxhq_int8.onnx")
+            });
+        assert!(beat.exists(), "automix corpus: no beat model at {}", beat.display());
+        assert!(vocals.exists(), "automix corpus: no vocals model at {}", vocals.display());
+        println!("automix corpus: models beat={} vocals={}", beat.display(), vocals.display());
+        crate::analyzer::configure(
+            beat.to_str().unwrap_or_default(),
+            vocals.to_str().unwrap_or_default(),
+        );
         let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
             .map(|entries| {
                 entries
