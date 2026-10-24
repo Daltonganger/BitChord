@@ -17,10 +17,7 @@ final class VideoPlayback {
     private(set) var side: ResolvedVideoSide?
     let controller = VideoSideController(clock: VideoClock(position: { 0 }, isPlaying: { false }))
 
-    @ObservationIgnored private var enabled = false
-    @ObservationIgnored private var surfaces = 0
-    @ObservationIgnored private var active = true
-    @ObservationIgnored private var trackId: String?
+    @ObservationIgnored private var gate = VideoSurfaceState()
     @ObservationIgnored private var mountedId: String?
     @ObservationIgnored private var resolvedId: String?
     @ObservationIgnored private var retriedId: String?
@@ -40,30 +37,28 @@ final class VideoPlayback {
     }
 
     func setEnabled(_ on: Bool) {
-        guard enabled != on else { return }
-        enabled = on
+        guard gate.enabled != on else { return }
+        gate.setEnabled(on)
         reconcile()
     }
 
-    func setSurfaceVisible(_ visible: Bool, videoId: String?, active: Bool) {
+    func setSurfaceVisible(_ visible: Bool, videoId: String?) {
         if visible {
-            surfaces += 1
-            if let videoId { trackId = videoId }
+            gate.surfaceAppeared(videoId: videoId)
         } else {
-            surfaces = max(0, surfaces - 1)
+            gate.surfaceDisappeared()
         }
-        self.active = active
         reconcile()
     }
 
-    func setTrack(_ videoId: String?, active: Bool) {
-        trackId = videoId
-        self.active = active
+    func setTrack(_ videoId: String?) {
+        gate.setTrack(videoId)
         reconcile()
     }
 
+    /// Scene phase only. A surface leaving or arriving never writes this.
     func setActive(_ active: Bool) {
-        self.active = active
+        gate.setActive(active)
         reconcile()
     }
 
@@ -71,7 +66,7 @@ final class VideoPlayback {
     /// once. A nil side (an art track) or a failure is remembered for this
     /// track, so a body pass cannot turn into a request loop.
     private func reconcile() {
-        guard enabled, surfaces > 0, active, let id = trackId, !id.isEmpty else {
+        guard gate.canRequest, let id = gate.trackId else {
             stop()
             return
         }
@@ -93,8 +88,7 @@ final class VideoPlayback {
             guard let self else { return }
             do {
                 let side = try await InnertubeStreamResolver.shared.resolveVideo(videoId: id, forceRefresh: forceRefresh)
-                guard !Task.isCancelled, self.mountedId == id,
-                      self.enabled, self.surfaces > 0, self.active else { return }
+                guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
                 self.resolvedId = id
                 self.resolveTask = nil
                 // The audit's art-track guard: a square picture is the sleeve,
@@ -119,9 +113,8 @@ final class VideoPlayback {
     /// The picture failed (usually an expired signed URL): ask once more,
     /// bypassing the shared cache, then let the artwork stay.
     func videoFailed() {
-        guard enabled, surfaces > 0, active,
-              let id = trackId, mountedId == id, resolvedId == id,
-              retriedId != id else { return }
+        guard gate.canRequest, let id = gate.trackId,
+              mountedId == id, resolvedId == id, retriedId != id else { return }
         retriedId = id
         start(id, forceRefresh: true)
     }
@@ -173,19 +166,18 @@ struct VideoSurface<Fallback: View>: View {
                 isPlaying: { controller.isPlaying },
                 rate: { controller.effectivePlaybackRate }
             ))
+            VideoPlayback.shared.setActive(scenePhase == .active)
             VideoPlayback.shared.setEnabled(showMusicVideos)
-            VideoPlayback.shared.setSurfaceVisible(
-                true, videoId: controller.current?.videoId, active: scenePhase == .active
-            )
+            VideoPlayback.shared.setSurfaceVisible(true, videoId: controller.current?.videoId)
         }
         .onDisappear {
             guard registered else { return }
             registered = false
-            VideoPlayback.shared.setSurfaceVisible(false, videoId: nil, active: false)
+            VideoPlayback.shared.setSurfaceVisible(false, videoId: nil)
         }
         .onChange(of: controller.current?.videoId) { _, id in
             guard registered else { return }
-            VideoPlayback.shared.setTrack(id, active: scenePhase == .active)
+            VideoPlayback.shared.setTrack(id)
         }
         .onChange(of: scenePhase) { _, phase in
             guard registered else { return }
