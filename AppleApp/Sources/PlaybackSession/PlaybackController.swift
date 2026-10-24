@@ -3054,6 +3054,7 @@ final class PlaybackController {
                 let initialSafetyPlan: TransitionPlanRec? = automix ? TransitionPlanRec(
                     style: .equalPower, bassSwap: false, bassSwapFraction: 0.7,
                     filterSweep: 0, vocalOverlap: 0, fadeSeconds: safetyFade,
+                    outgoingHoldSeconds: 0,
                     transitionEndSeconds: 0, cueSeconds: 0, playbackRate: 1,
                     bedFraction: 0, bedGainDb: 0, dipDepth: 0, dipWidth: 0,
                     postGlideSeconds: 0, outgoingDurationSeconds: outgoingDuration
