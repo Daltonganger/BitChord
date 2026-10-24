@@ -617,6 +617,20 @@ extension EnvironmentValues {
 /// A queue row: artwork, title/artist, duration; hover highlight, context
 /// menu (macOS nuance from UI spec §5). Rows always show a sleeve — album
 /// tracks that omit per-song art inherit the page cover at the call site.
+/// Which lyric line the playhead is in.
+///
+/// One implementation for the player's strip and the Mac's menu bar, because both
+/// show the same line on the same adjusted clock: the offset shifts both, and two
+/// copies of "which line is current" would be two answers to one question.
+enum CurrentLyricLine {
+    static func line(in lines: [LyricLineDto], at position: Double, offsetMs: Int32) -> String? {
+        guard !lines.isEmpty else { return nil }
+        let ms = max(0, Int64(position * 1000) - Int64(offsetMs))
+        guard let index = lines.lastIndex(where: { $0.timeMs <= ms }) else { return nil }
+        return lines[index].text
+    }
+}
+
 struct SongRow: View {
     let entry: QueueEntry
     var isCurrent: Bool = false
