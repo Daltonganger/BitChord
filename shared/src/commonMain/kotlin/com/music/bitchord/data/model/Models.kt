@@ -302,6 +302,8 @@ data class SearchHit(
     val albumId: String? = null,
     val isVideo: Boolean = false,
     val setVideoId: String? = null,
+    /** The tier the source offered, for the search quality badge (upstream `sourceQualityBadge`). */
+    val sourceQuality: String? = null,
 )
 
 sealed interface UiState<out T> {

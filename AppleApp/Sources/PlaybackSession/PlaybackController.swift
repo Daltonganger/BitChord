@@ -2341,6 +2341,26 @@ final class PlaybackController {
             }
             throw InnertubeStreamResolver.StreamError(message: "JioSaavn had no stream")
         }
+        if entry.source.hasPrefix("src:") || entry.id.hasPrefix("src:") {
+            // An addon search row keeps its own `src:` key rather than a video
+            // id, so it resolves through the source resolver's own ordering —
+            // its source first, then any enabled source that has the recording.
+            let key = entry.source.hasPrefix("src:") ? entry.source : entry.id
+            if let stream = await SourceSearch.shared.stream(
+                key: key, title: entry.title, artist: entry.artist,
+                durationSec: Int(entry.durationSeconds.rounded())
+            ) {
+                return ResolveOutcome(
+                    source: ResolvedSource(
+                        source: stream.url, headers: stream.headers, kbps: stream.kbps ?? 0,
+                        lossless: stream.lossless, codec: stream.codec,
+                        durationSec: stream.durationSec, origin: .substitute
+                    ),
+                    leftover: nil
+                )
+            }
+            throw InnertubeStreamResolver.StreamError(message: "That source had no stream")
+        }
         #if DEBUG
         if entry.source.hasPrefix("dolby-test:") {
             return ResolveOutcome(source: ResolvedSource(source: String(entry.source.dropFirst(11)), headers: [:], kbps: 0, codec: "eac3-joc"), leftover: nil)
