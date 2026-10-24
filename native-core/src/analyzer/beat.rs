@@ -11,6 +11,8 @@ pub const CHUNK_FRAMES: usize = 1500;
 pub const BORDER_FRAMES: usize = 6;
 pub const WINDOW_SECONDS: f64 = (CHUNK_FRAMES - 2 * BORDER_FRAMES) as f64 / 50.0;
 const PEAK_WINDOW: i32 = 7;
+/// Frames two accepted peaks must be apart; see [`pick_peaks`].
+const PEAK_MIN_SPACING: i32 = 6;
 const MIN_BEATS: usize = 8;
 const MIN_TEMPO: f64 = 40.0;
 const MAX_TEMPO: f64 = 220.0;
@@ -27,7 +29,44 @@ pub struct Grid {
 }
 
 /// Track [pcm] already at any rate; resampled to the model's 22.05 kHz mono.
+///
+/// The whole buffer is tried first, because the end of the outgoing record is
+/// where a blend is decided and a head-only grid leaves it on the DSP
+/// estimator. When that pass yields nothing usable, the head window is tried
+/// before giving up: over a whole track the assembled beat set can go dense
+/// (one busy or spoken section is enough), and the model read the same audio
+/// as a single chunk of [`WINDOW_SECONDS`] just fine. Discarding that grid
+/// because the longer read failed is how nine of the thirteen cached tracks
+/// in the corpus ended up planned from a 0.3-confidence DSP tempo.
 pub fn track(pcm: &[f32], sample_rate: f64, offset_seconds: f64) -> Option<Grid> {
+    best_grid(
+        grid_from_pcm(pcm, sample_rate, offset_seconds),
+        || {
+            let head_samples = (WINDOW_SECONDS * sample_rate).round() as usize;
+            // Already the head window (or shorter): there is nothing to retry.
+            (head_samples > 0 && head_samples < pcm.len())
+                .then(|| grid_from_pcm(&pcm[..head_samples], sample_rate, offset_seconds))
+                .flatten()
+        },
+    )
+}
+
+/// The whole-track grid when it is usable, otherwise the head window's.
+fn best_grid(whole: Option<Grid>, head: impl FnOnce() -> Option<Grid>) -> Option<Grid> {
+    if whole.is_some() {
+        return whole;
+    }
+    let head = head();
+    if head.is_some() {
+        log::info!(
+            "automix analysis: the whole-track beat pass yielded no usable grid; \
+             the head window's grid is used instead"
+        );
+    }
+    head
+}
+
+fn grid_from_pcm(pcm: &[f32], sample_rate: f64, offset_seconds: f64) -> Option<Grid> {
     if pcm.is_empty() {
         return None;
     }
@@ -188,7 +227,25 @@ pub fn pick_peaks(logits: &[f32]) -> Vec<f64> {
         index += 1;
     }
 
-    deduped
+    // A busy section can make almost every frame a local maximum, which halves
+    // the median gap below and reads as an octave error or as a tempo out of
+    // range. Two beats of any tempo the planner accepts are 13 frames apart at
+    // the fastest (220 BPM), so anything closer than six frames is either one
+    // beat counted twice or a spurious maximum — keep the stronger of the pair.
+    let mut spaced: Vec<usize> = Vec::with_capacity(deduped.len());
+    for frame in deduped {
+        match spaced.last().copied() {
+            Some(previous) if (frame as i32 - previous as i32) < PEAK_MIN_SPACING => {
+                if logits[frame] > logits[previous] {
+                    spaced.pop();
+                    spaced.push(frame);
+                }
+            }
+            _ => spaced.push(frame),
+        }
+    }
+
+    spaced
         .into_iter()
         .map(|frame| {
             if frame == 0 || frame + 1 >= logits.len() {
@@ -270,5 +327,65 @@ mod tests {
         assert!((bpm - 120.0).abs() < 0.5, "bpm {bpm}");
         let conf = grid_confidence(&beats, &vec![2.0; beats.len()]);
         assert!(conf > 0.7, "conf {conf}");
+    }
+
+    fn grid_at(bpm: f64, beats: usize) -> Grid {
+        let interval = 60.0 / bpm;
+        Grid {
+            beats: (0..beats).map(|i| i as f64 * interval).collect(),
+            downbeats: (0..beats / 4).map(|i| i as f64 * interval * 4.0).collect(),
+            bpm,
+            beat_interval: interval,
+            first_beat: 0.0,
+            beat_confidence: 0.8,
+        }
+    }
+
+    #[test]
+    fn a_dense_beat_set_keeps_at_most_one_peak_per_six_frames() {
+        // Every frame positive is the pathological shape the whole-track pass
+        // produced on a busy section: without a spacing rule every frame is a
+        // "peak", the median gap collapses and the tempo reads far too fast.
+        let logits = vec![1.0f32; 300];
+        let peaks = pick_peaks(&logits);
+        assert!(peaks.len() <= 300 / 6 + 1, "{} peaks", peaks.len());
+        for pair in peaks.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= 6.0,
+                "peaks {} and {} are closer than the spacing rule allows",
+                pair[0],
+                pair[1]
+            );
+        }
+        let seconds: Vec<f64> = peaks.iter().map(|f| f / FRAME_RATE).collect();
+        assert_eq!(tempo_from_beats(&seconds), 0.0, "a dense set is not a tempo");
+    }
+
+    #[test]
+    fn a_clean_grid_keeps_every_beat() {
+        // 120 BPM is 25 frames apart at 50 fps, so the spacing rule must not
+        // touch a real grid.
+        let mut logits = vec![0.0f32; 400];
+        for index in (0..400).step_by(25) {
+            logits[index] = 2.0;
+        }
+        let peaks: Vec<f64> = pick_peaks(&logits).iter().map(|f| f / FRAME_RATE).collect();
+        assert_eq!(peaks.len(), 16);
+        assert!((tempo_from_beats(&peaks) - 120.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn an_unusable_whole_grid_falls_back_to_the_head_window() {
+        let head = grid_at(128.0, 8);
+        let chosen = best_grid(None, || Some(head.clone()));
+        assert!(chosen.is_some(), "the head grid must be kept");
+        assert!((chosen.unwrap().bpm - 128.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_usable_whole_grid_is_not_second_guessed() {
+        let whole = grid_at(93.4, 16);
+        let chosen = best_grid(Some(whole), || panic!("the head must not be consulted"));
+        assert!((chosen.unwrap().bpm - 93.4).abs() < 1e-9);
     }
 }
