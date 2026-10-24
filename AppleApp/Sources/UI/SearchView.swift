@@ -1271,6 +1271,7 @@ struct SearchView: View {
                 searchContinuationToken = page.continuation
             } catch {
                 guard !Task.isCancelled else { return }
+                AuthController.reportIfSessionExpired(error)
                 searchError = "Couldn't reach the music service. Check your connection and try again."
                 hits = []
                 searchContinuationToken = nil

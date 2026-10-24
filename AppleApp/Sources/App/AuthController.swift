@@ -17,6 +17,8 @@ final class AuthController {
         didSet { PageSession.reset(); LikeStore.shared.clear() }
     }
 
+    private var sessionExpiredObserver: NSObjectProtocol?
+
     init() {
         // AccountStore reads its encrypted blob during restore. Install the
         // Keychain bridge before the first view (and its feed task) exists.
@@ -24,6 +26,13 @@ final class AuthController {
         // Apply the Keychain cookie before the first Home `.task` so the
         // signed-in browse is not raced by a guest fetch.
         restore()
+        // A screen whose request came back refused tells us through this
+        // notification; the store has already tried its own scope refresh.
+        sessionExpiredObserver = NotificationCenter.default.addObserver(
+            forName: .sessionExpired, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.noteSessionExpired() }
+        }
     }
 
     /// Why the session could not be read even though one is stored, if so.
@@ -201,6 +210,39 @@ final class AuthController {
             _ = AuthBridge.shared.applyCookie(cookieHeader: cookie)
             AuthBridge.shared.clearChannelOverride()
         }
+    }
+
+    /// Whether a bridge's failure message is the store's "session is gone"
+    /// refusal (`Innertube.AuthenticationException`), as opposed to a screen
+    /// that merely failed to load.
+    static func isSessionExpired(_ message: String?) -> Bool {
+        guard let message else { return false }
+        return message.localizedCaseInsensitiveContains("session has expired")
+    }
+
+    /// Posts `.sessionExpired` when [error] is the store's session-gone refusal,
+    /// so a screen only has to say "this failed" and the auth state follows.
+    @discardableResult
+    static func reportIfSessionExpired(_ error: Error, message: String? = nil) -> Bool {
+        let text = message ?? error.localizedDescription
+        guard isSessionExpired(text) else { return false }
+        NotificationCenter.default.post(name: .sessionExpired, object: nil)
+        return true
+    }
+
+    /// A signed-in request was refused because the session itself is over.
+    ///
+    /// The store has already tried to refresh its scope once on the 401 (see
+    /// `Innertube.postMusic`), so this is the terminal answer: report it and go
+    /// signed-out, which makes every screen offer a sign-in instead of an error
+    /// a retry cannot fix. The stored cookie is kept — it is the only evidence
+    /// that the account was ever signed in, and the next launch retries it.
+    func noteSessionExpired() {
+        guard signedIn else { return }
+        _ = AuthBridge.shared.applyCookie(cookieHeader: nil)
+        signedIn = false
+        sessionUnavailableReason = "Your session has expired. Sign in again to continue."
+        sessionEpoch += 1
     }
 
     func signOut() {

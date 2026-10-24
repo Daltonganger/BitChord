@@ -1286,6 +1286,7 @@ struct DetailView: View {
             suggested = page?.suggestedSongs ?? []
         } catch {
             guard generation == PageSession.generation(), pageRequestID == request, !Task.isCancelled else { return }
+            AuthController.reportIfSessionExpired(error)
             if page == nil { self.error = error.localizedDescription }
         }
         guard generation == PageSession.generation(), pageRequestID == request, !Task.isCancelled else { return }
