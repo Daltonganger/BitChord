@@ -239,8 +239,18 @@ struct RecentShelf: View {
     @State private var viewType: String = PlatformSettings.shared.getString(
         key: "home_recents_view_type", default: "LIST"
     )
+    /// The grid row's own width, measured — the hero tile's height hangs off
+    /// it, and a GeometryReader cannot supply that: its ideal height is ten
+    /// points, and the heroes drew straight through the shelf below.
+    @State private var gridWidth: CGFloat = 0
 
     private var isList: Bool { viewType.uppercased() != "GRID" }
+
+    /// Upstream's hero width: 70% of the row, capped at 320.
+    private var heroSide: CGFloat {
+        guard gridWidth > 0 else { return 240 }
+        return min(gridWidth * 0.70, 320)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -291,18 +301,18 @@ struct RecentShelf: View {
             } else {
                 // Upstream's Recents GRID mode is the hero treatment: the
                 // same 0.92-ratio scrim-caption tiles as Home's first shelf.
-                GeometryReader { geometry in
-                    let heroSide = min(geometry.size.width * 0.70, 320)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHStack(alignment: .top, spacing: 14) {
-                            ForEach(shelf.items) { card in
-                                HeroCard(card: card, preferTrack: true, side: heroSide)
-                            }
+                // The row's height is the tile's height, nothing extra — the
+                // caption is inside the tile.
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(alignment: .top, spacing: 14) {
+                        ForEach(shelf.items) { card in
+                            HeroCard(card: card, preferTrack: true, side: heroSide)
                         }
-                        .padding(.vertical, 2)
                     }
-                    .frame(height: heroSide * 0.92 + 8, alignment: .top)
+                    .padding(.vertical, 2)
                 }
+                .frame(height: heroSide * 0.92 + 4)
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { gridWidth = $0 }
             }
         }
     }
