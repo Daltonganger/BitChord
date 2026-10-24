@@ -2460,6 +2460,9 @@ struct OnDeviceView: View {
     var title = "On Device"
     @State private var downloadStore = DownloadStore.shared
     @State private var local = LocalLibrary.shared
+    /// Settings ▸ Storage gates this browser, as upstream gates its cache
+    /// folder: the stream cache is a storage detail, not a music library.
+    @AppStorage("show_cached_songs_in_library") private var showCachedSongs = false
 
     var body: some View {
         List {
@@ -2477,12 +2480,14 @@ struct OnDeviceView: View {
                     subtitle: local.scanned ? "\(local.tracks.count) song\(local.tracks.count == 1 ? "" : "s")" : "Choose a folder to scan"
                 )
             }
-            NavigationLink(destination: CachedSongsView()) {
-                deviceRow(
-                    systemImage: "internaldrive.fill", tint: .orange,
-                    title: "Cached Songs",
-                    subtitle: "Songs kept on disk for instant and offline playback"
-                )
+            if showCachedSongs {
+                NavigationLink(destination: CachedSongsView()) {
+                    deviceRow(
+                        systemImage: "internaldrive.fill", tint: .orange,
+                        title: "Cached Songs",
+                        subtitle: "Songs kept on disk for instant and offline playback"
+                    )
+                }
             }
             NavigationLink(destination: WebDavLibraryView()) {
                 deviceRow(
