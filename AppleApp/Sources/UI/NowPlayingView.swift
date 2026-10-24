@@ -2563,6 +2563,10 @@ struct LyricsPane: View {
     var onChangeSource: (() -> Void)? = nil
     var onRevealControls: (() -> Void)? = nil
     var onFocusLyrics: (() -> Void)? = nil
+    /// Whether lines are being picked for a share card: armed from the header,
+    /// or merely because something is already picked. While it holds, a line
+    /// tap toggles the pick instead of seeking.
+    var picking: Bool { sharePicking || !selection.isEmpty }
     /// What the share card names. The pane draws lines; the card has to say
     /// whose song they are, and only the caller knows.
     var trackTitle: String = ""
@@ -2690,6 +2694,8 @@ struct LyricsPane: View {
                                         onTap: {
                                             if !sourceVisible {
                                                 onRevealControls?()
+                                            } else if picking {
+                                                toggleShareSelection(index)
                                             } else {
                                                 onSeek?(seekTarget(for: line))
                                             }
@@ -2708,6 +2714,16 @@ struct LyricsPane: View {
                                             toggleShareSelection(index)
                                         }
                                     }
+                                    // While picking, the line is its own
+                                    // toggle: a tap adds or removes it rather
+                                    // than seeking, which is what the bar's
+                                    // hint promises (upstream L14). With the
+                                    // controls hidden and nothing being
+                                    // picked, the tap still belongs to
+                                    // revealing them.
+                                    .accessibilityElement(children: .combine)
+                                    .accessibilityAddTraits(picking && selection.contains(index) ? [.isSelected] : [])
+                                    .accessibilityHint(picking ? "Double-tap to add to the share card" : "")
                                     .id(index)
                                 }
                             }
@@ -2789,9 +2805,16 @@ struct LyricsPane: View {
         // A share card belongs to the song and the lyric it quoted. A new track,
         // or a different lyric source for the same one, makes the old card
         // describe something else — and it would still be sitting in the share
-        // preview under the new song's name.
-        .onChange(of: trackId) { _, _ in clearShareSelection() }
-        .onChange(of: lyricsSignature) { _, _ in clearShareSelection() }
+        // preview under the new song's name. The armed pick ends with them:
+        // an armed bar that follows you into the next song is a trap.
+        .onChange(of: trackId) { _, _ in
+            clearShareSelection()
+            onSharePicking?(false)
+        }
+        .onChange(of: lyricsSignature) { _, _ in
+            clearShareSelection()
+            onSharePicking?(false)
+        }
         // Leaving pick mode — from the header's close or the bar's Done —
         // empties the pick with it. Arriving never has to: a fresh pick starts
         // from the same empty state these clearings leave behind.
