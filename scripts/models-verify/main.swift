@@ -126,17 +126,58 @@ do {
     let directory = temporaryDirectory("stale")
     let newSpec = spec(.beat, path: "good.bin", name: "beat.fixture", sha: fixture.goodSHA, size: fixture.size)
     let store = AutomixModelStore(directory: directory, specs: [newSpec])
-    // The previous small graph: the same file name, a different length. The
-    // size/hash check must treat it as absent, not as the new model.
+    // The previous small graph: the same file name, a different length, and no
+    // record that it was ever verified. It is not usable; remove it.
     let stale = directory.appendingPathComponent("beat.fixture")
     try Data(repeating: 0xAB, count: 1024).write(to: stale)
     store.refresh()
-    check("stale graph is not installed", store.status(of: .beat) == .notInstalled, "\(store.status(of: .beat))")
-    check("stale graph is removed", !FileManager.default.fileExists(atPath: stale.path))
+    check("unverified stale graph is not installed", store.status(of: .beat) == .notInstalled, "\(store.status(of: .beat))")
+    check("unverified stale graph is removed", !FileManager.default.fileExists(atPath: stale.path))
     await store.download(.beat, allowMetered: true)
     check("the new graph installs under the old name", store.status(of: .beat).isInstalled, "\(store.status(of: .beat))")
     if let path = store.installedPath(.beat) {
         check("the installed graph is the new one", sha256(of: URL(fileURLWithPath: path)) == fixture.goodSHA)
+    }
+}
+
+// MARK: - 1c. A graph this store verified under the previous manifest stays in use
+
+print("\nprevious graph stays in use")
+do {
+    let directory = temporaryDirectory("previous")
+    let name = "beat.fixture"
+    let oldFile = directory.appendingPathComponent(name)
+    try Data(repeating: 0x5A, count: 2048).write(to: oldFile)
+    let oldSha = sha256(of: oldFile)
+    // The previous manifest's record: the same name, an older size and digest.
+    let record = "{\"sha256\":\"\(oldSha)\",\"bytes\":2048,\"installedAt\":0}"
+    try Data("{\"\(name)\":\(record)}".utf8)
+        .write(to: directory.appendingPathComponent("installed.json"))
+    let newSpec = spec(.beat, path: "good.bin", name: name, sha: fixture.goodSHA, size: fixture.size)
+    let store = AutomixModelStore(directory: directory, specs: [newSpec])
+    store.refresh()
+    let previous = directory.appendingPathComponent(name + ".prev")
+    check("old graph is kept as the fallback", FileManager.default.fileExists(atPath: previous.path))
+    check("the new graph is not installed", store.status(of: .beat) == .notInstalled)
+    check(
+        "the analyser still points at the old graph",
+        store.analyzerPaths.beat == previous.path,
+        store.analyzerPaths.beat
+    )
+    // A failed replacement download must not take the working graph away.
+    let failing = AutomixModelStore(
+        directory: directory,
+        specs: [spec(.beat, path: "corrupt.bin", name: name, sha: fixture.goodSHA, size: fixture.size)]
+    )
+    await failing.download(.beat, allowMetered: true)
+    check("a failed download keeps the fallback", FileManager.default.fileExists(atPath: previous.path))
+    check("the analyser still has the old graph", failing.analyzerPaths.beat == previous.path)
+    // A verified replacement swaps atomically and drops the fallback.
+    await store.download(.beat, allowMetered: true)
+    check("the replacement installs", store.status(of: .beat).isInstalled, "\(store.status(of: .beat))")
+    check("the fallback is removed once the replacement verifies", !FileManager.default.fileExists(atPath: previous.path))
+    if let path = store.installedPath(.beat) {
+        check("the analyser points at the new graph", store.analyzerPaths.beat == path)
     }
 }
 
