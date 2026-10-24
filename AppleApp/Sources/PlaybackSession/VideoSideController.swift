@@ -104,7 +104,17 @@ final class VideoSideController {
         self.side = side
         state = .loading
 
-        let item = AVPlayerItem(url: url)
+        // The CDN expects the headers its resolving client sent (its user
+        // agent above all); without them a picture can sit in "loading".
+        let asset = side.headers.isEmpty
+            ? AVURLAsset(url: url)
+            : AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": side.headers])
+        let item = AVPlayerItem(asset: asset)
+        let attachedAt = CACurrentMediaTime()
+        PlaybackDebugLog.shared.record(
+            "video sync: loading \(side.width ?? 0)x\(side.height ?? 0) itag \(side.itag ?? 0) via \(side.clientName), "
+                + "headers \(side.headers.keys.sorted().joined(separator: ",")), throttled=\(side.hasNParameter)"
+        )
         // Install the observers before assigning the item: a cached item can be
         // ready immediately, and each callback checks item identity after hopping.
         statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
@@ -112,10 +122,16 @@ final class VideoSideController {
                 guard let self, self.player.currentItem === item else { return }
                 switch item.status {
                 case .readyToPlay:
+                    PlaybackDebugLog.shared.record(String(
+                        format: "video sync: ready in %.1fs", CACurrentMediaTime() - attachedAt
+                    ))
                     self.state = .ready
                     self.lastSeekAt = 0
                     self.tick()
                 case .failed:
+                    PlaybackDebugLog.shared.record(
+                        "video sync: the item failed: \(item.error.map { String(describing: $0) } ?? "no error")"
+                    )
                     self.fail()
                 default:
                     break

@@ -16,6 +16,9 @@ final class VideoPlayback {
     static let shared = VideoPlayback()
 
     private(set) var side: ResolvedVideoSide?
+    /// A music video is being found, fetched or lined up: the surface says so
+    /// instead of leaving the toggle looking dead.
+    private(set) var preparing = false
     let controller = VideoSideController(clock: VideoClock(position: { 0 }, isPlaying: { false }))
 
     @ObservationIgnored private var gate = VideoSurfaceState()
@@ -108,6 +111,7 @@ final class VideoPlayback {
         mountedId = id
         resolvedId = nil
         side = nil
+        preparing = true
         controller.detach()
 
         PlaybackDebugLog.shared.record("video: resolving (forceRefresh=\(forceRefresh))", about: id)
@@ -122,6 +126,7 @@ final class VideoPlayback {
                 // posted as one): same file, same timeline.
                 if side.url != nil, side.looksLikeMusicVideo, !side.isStillImage {
                     PlaybackDebugLog.shared.record("video: attaching the picture", about: id)
+                    self.preparing = false
                     self.side = side
                     self.controller.attach(side)
                     return
@@ -129,7 +134,7 @@ final class VideoPlayback {
                 // An art track (or a still picture): the music video is another
                 // upload, with its own cut. Find it, check it is moving
                 // picture, and map the song onto it.
-                guard let track = self.hooks?.track() else { return }
+                guard let track = self.hooks?.track() else { self.preparing = false; return }
                 let candidates = await Self.findVideoVersions(videoId: id, track: track)
                 guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
                 var fallback: VideoVersion?
@@ -147,17 +152,24 @@ final class VideoPlayback {
                         "video: aligning the song with \(candidate.videoId) (\(candidate.type ?? "untyped"), \(candidate.durationText ?? "?"))",
                         about: id
                     )
+                    // The picture loads while the two recordings are lined up,
+                    // hidden (`side` stays nil), so it is ready the moment the
+                    // map is.
+                    self.controller.attach(videoSide)
                     let map = await VideoVersionAlignment.shared.map(songId: id, videoId: candidate.videoId)
                     guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
                     if let map, map.confident {
                         PlaybackDebugLog.shared.record(
                             "video: picture of \(candidate.videoId) over the song, aligned: \(map.summary)", about: id
                         )
+                        self.preparing = false
                         self.side = videoSide
                         self.controller.attach(videoSide, timeMap: map)
                         return
                     }
+                    self.controller.detach()
                 }
+                self.preparing = false
                 guard let fallback else {
                     PlaybackDebugLog.shared.record("video: no music video for this song", about: id)
                     self.side = nil
@@ -175,6 +187,7 @@ final class VideoPlayback {
             } catch {
                 PlaybackDebugLog.shared.record("video: resolve failed: \(error)", about: id)
                 guard !Task.isCancelled, self.mountedId == id else { return }
+                self.preparing = false
                 self.resolvedId = id
                 self.resolveTask = nil
                 self.side = nil
@@ -199,6 +212,7 @@ final class VideoPlayback {
         mountedId = nil
         resolvedId = nil
         side = nil
+        preparing = false
         controller.detach()
     }
 
@@ -243,6 +257,9 @@ struct VideoSurface<Fallback: View>: View {
     /// Fill the surface's box with black behind a 16:9 picture. False for a
     /// full-bleed hero, where the artwork must stay visible around the picture.
     var fillSlot = true
+    /// Say "Loading music video" while one is being prepared. Only the large
+    /// surfaces do: a thumbnail has no room for it.
+    var announcesLoading = false
     @ViewBuilder var fallback: () -> Fallback
 
     @Environment(PlaybackController.self) private var controller
@@ -260,9 +277,26 @@ struct VideoSurface<Fallback: View>: View {
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .allowsHitTesting(false)
                     .transition(.opacity)
+            } else if announcesLoading, showMusicVideos, VideoPlayback.shared.preparing {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading music video")
+                            .font(.caption.weight(.medium))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(10)
+                }
+                .allowsHitTesting(false)
+                .transition(.opacity)
+                .accessibilityIdentifier("player.musicVideoLoading")
             }
         }
         .animation(.easeInOut(duration: 0.25), value: VideoPlayback.shared.showsVideo)
+        .animation(.easeInOut(duration: 0.25), value: VideoPlayback.shared.preparing)
         .onAppear {
             guard !registered else { return }
             registered = true

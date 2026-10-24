@@ -58,23 +58,33 @@ actor VideoVersionAlignment {
         }
         if let running = inFlight[key] { return await running.value }
         let task = Task<Map?, Never> { [directory] in
-            guard let songPath = await Self.completedSongFile(songId) else {
-                PlaybackDebugLog.shared.record("video align: the song's file never completed", about: songId)
-                return nil
-            }
+            // Both recordings are fetched here, side by side and at full
+            // speed: waiting for playback to finish downloading the song kept
+            // the picture off screen for most of the track.
+            let songAudio = directory.appendingPathComponent("\(songId).song.audio")
             let videoAudio = directory.appendingPathComponent("\(videoId).audio")
+            defer {
+                // The recordings are only inputs: the map is what is kept.
+                try? FileManager.default.removeItem(at: songAudio)
+                try? FileManager.default.removeItem(at: videoAudio)
+            }
+            let fetchStarted = Date()
             do {
-                try await Self.download(videoId: videoId, to: videoAudio)
+                async let song: Void = Self.download(videoId: songId, to: songAudio)
+                async let video: Void = Self.download(videoId: videoId, to: videoAudio)
+                _ = try await (song, video)
             } catch {
-                PlaybackDebugLog.shared.record("video align: \(videoId)'s audio failed: \(error)", about: songId)
+                PlaybackDebugLog.shared.record("video align: the audio for \(videoId) failed: \(error)", about: songId)
                 return nil
             }
+            let songPath = songAudio.path
+            PlaybackDebugLog.shared.record(String(
+                format: "video align: both recordings fetched in %.1fs", Date().timeIntervalSince(fetchStarted)
+            ), about: songId)
             let started = Date()
             let rec = await Task.detached(priority: .utility) {
                 alignVersions(songPath: songPath, otherPath: videoAudio.path)
             }.value
-            // The video's audio is only an input: the map is what is kept.
-            try? FileManager.default.removeItem(at: videoAudio)
             guard let rec else {
                 PlaybackDebugLog.shared.record("video align: \(videoId) could not be decoded", about: songId)
                 return nil
@@ -96,17 +106,6 @@ actor VideoVersionAlignment {
         inFlight[key] = nil
         if let map { maps[key] = map }
         return map
-    }
-
-    /// The playing song's cached file once its download is complete — the
-    /// aligner reads the whole recording. Waits up to three minutes.
-    private static func completedSongFile(_ videoId: String) async -> String? {
-        for _ in 0..<90 {
-            if Task.isCancelled { return nil }
-            if let path = await StreamFileCache.shared.path(for: videoId) { return path }
-            try? await Task.sleep(for: .seconds(2))
-        }
-        return nil
     }
 
     private static func download(videoId: String, to destination: URL) async throws {
