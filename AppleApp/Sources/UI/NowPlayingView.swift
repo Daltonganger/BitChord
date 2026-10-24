@@ -137,7 +137,7 @@ struct NowPlayingView: View {
                 if PlayerLayout.takesLandscapeShape(
                     width: geo.size.width, height: geo.size.height
                 ) {
-                    landscapePlayer(size: geo.size)
+                    twoColumnPlayer(size: geo.size)
                 } else {
                     portraitPlayer
                 }
@@ -251,7 +251,7 @@ struct NowPlayingView: View {
         #endif
     }
 
-    // ---- The player's two shapes -------------------------------------------
+    // ---- The player's arrangements -----------------------------------------
     //
     // Upstream's portrait player is two things, and the port had them the wrong
     // way up. A *pinned bottom deck* — credits, scrubber, transport, toggles —
@@ -266,17 +266,23 @@ struct NowPlayingView: View {
     // in the same place on every screen, and all that is left above it is the
     // stage.
     //
+    // There are three arrangements, and they are one set of slots arranged
+    // differently: the portrait player, the compact two-column player (a short
+    // landscape window), and the wide two-column player (the sleeve and the deck
+    // beside an open pane — a landscape window, or a regular-width tablet held
+    // upright, which is N1).
+    //
     // Everything below this comment is shared by both platforms. Only the two
     // bodies and the two toolbars are platform-specific, and they are the
     // arrangement — which is the only thing that should differ.
     #if os(iOS)
     private var iOSBody: some View {
         NavigationStack {
-            // The arrangement is the only thing that differs between the two
+            // The arrangement is the only thing that differs between the
             // shapes, so the arrangement is the only thing decided here. Every
             // slot below — the sleeve, the panes, the deck — is built once and
-            // used by both, which is upstream's arrangement and the reason
-            // rotating mid-song carries the open pane, the scrub and the
+            // used by all of them, which is upstream's arrangement and the
+            // reason rotating mid-song carries the open pane, the scrub and the
             // translation mode across instead of resetting them.
             GeometryReader { geo in
                 ZStack {
@@ -292,13 +298,19 @@ struct NowPlayingView: View {
                             .transition(.opacity)
                     }
 
-                    if PlayerLayout.takesLandscapeShape(
-                        width: geo.size.width, height: geo.size.height
-                    ) {
-                        landscapePlayer(size: geo.size)
-                    } else {
-                        portraitPlayer
+                    // One decision, then one of two arrangements. The
+                    // cross-fade is bound to `pane` rather than to the shape,
+                    // so rotating still hard-cuts the way it always has.
+                    ZStack {
+                        if showsTwoColumns(size: geo.size) {
+                            twoColumnPlayer(size: geo.size)
+                                .transition(.opacity)
+                        } else {
+                            portraitPlayer
+                                .transition(.opacity)
+                        }
                     }
+                    .animation(isIPad ? .easeInOut(duration: 0.22) : nil, value: pane)
                 }
             }
             // Full-screen covers have no swipe-to-dismiss of their own, so the
@@ -341,6 +353,26 @@ struct NowPlayingView: View {
     /// The shape test lives in [PlayerLayout] with the rest of the window rules,
     /// so the thresholds have one definition and can be checked without a window.
 
+    /// Whether the player is arranged as two columns: always in a landscape
+    /// window, and in a regular-width window while the lyrics or the queue are
+    /// open, where the pane sits beside the sleeve rather than over its stage
+    /// (`PlayerLayout.putsPaneBesideStage`, N1).
+    ///
+    /// The main pane is deliberately not two columns on a tablet held upright:
+    /// with neither pane open there is nothing to put in the second column, and
+    /// an empty one is dead space beside a sleeve that could have used it. That
+    /// leaves the portrait player's main pane — the large sleeve and the pinned
+    /// deck — exactly as it is.
+    private func showsTwoColumns(size: CGSize) -> Bool {
+        if PlayerLayout.takesLandscapeShape(width: size.width, height: size.height) {
+            return true
+        }
+        return pane != .main && PlayerLayout.putsPaneBesideStage(
+            width: size.width,
+            regularWidth: isIPad
+        )
+    }
+
     /// The portrait player: stage above, pinned deck below.
     private var portraitPlayer: some View {
         VStack(spacing: 0) {
@@ -353,18 +385,23 @@ struct NowPlayingView: View {
         .animation(.easeInOut(duration: 0.22), value: lyricsControlsOpen)
     }
 
-    /// The landscape player: two columns.
-    /// On phones: compact two-column player.
-    /// On iPad & macOS: Apple Music standard two-column player with permanent transport on the left
-    /// and dedicated Lyrics / Up Next panel on the right.
-    private func landscapePlayer(size: CGSize) -> some View {
+    /// The two-column player: the sleeve and the deck on the left, the open pane
+    /// on the right.
+    ///
+    /// A short landscape window takes the compact variant, where the pane's
+    /// contents share the right column with the credits and the transport.
+    /// Everything else — a landscape iPad or Mac window, and a regular-width iPad
+    /// held upright with the lyrics or Up Next open — takes the wide variant:
+    /// Apple Music's two-column player, transport always on the left and the pane
+    /// on the right.
+    private func twoColumnPlayer(size: CGSize) -> some View {
         let compact = PlayerLayout.isCompactLandscape(width: size.width, height: size.height)
         let gutter = PlayerLayout.gutter(compact: compact)
         return Group {
             if compact {
                 compactLandscapePlayer(size: size, gutter: gutter)
             } else {
-                desktopLandscapePlayer(size: size, gutter: gutter)
+                wideTwoColumnPlayer(size: size, gutter: gutter)
             }
         }
     }
@@ -405,7 +442,7 @@ struct NowPlayingView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func desktopLandscapePlayer(size: CGSize, gutter: CGFloat) -> some View {
+    private func wideTwoColumnPlayer(size: CGSize, gutter: CGFloat) -> some View {
 #if os(macOS)
         let maximumWidth = PlayerLayout.macLandscapeMaxWidth
         let artworkMaximum: CGFloat = 460
