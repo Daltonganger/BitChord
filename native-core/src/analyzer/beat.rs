@@ -92,7 +92,7 @@ fn grid_from_pcm(pcm: &[f32], sample_rate: f64, offset_seconds: f64) -> Option<G
     if bpm <= 0.0 {
         return None;
     }
-    let downbeats: Vec<f64> = pick_peaks(&downbeat_logits)
+    let mut downbeats: Vec<f64> = pick_peaks(&downbeat_logits)
         .into_iter()
         .map(|f| f / FRAME_RATE + offset_seconds)
         .map(|time| {
@@ -103,9 +103,37 @@ fn grid_from_pcm(pcm: &[f32], sample_rate: f64, offset_seconds: f64) -> Option<G
                 .unwrap_or(beats[0])
         })
         .collect();
-    let mut downbeats = downbeats;
     downbeats.sort_by(|a, b| a.total_cmp(b));
     downbeats.dedup_by(|a, b| (*a - *b).abs() < 1e-4);
+
+    // F-2: the Beat This! downbeat head is conservative — 23 bars over a
+    // 188 s track at 93 BPM is about a third of the bars that exist — so the
+    // missing bars are derived from the **measured beats**: each trusted model
+    // downbeat anchors a chain that walks four beats at a time (each step
+    // within 15 ms of the grid) and stops at the first gap it cannot measure.
+    // That is measured bar counting, not bpm × 4: the bar times come from the
+    // beat timestamps. Over-dense model heads are left alone.
+    let interval = 60.0 / bpm;
+    let span_bars = if beats.len() >= 5 && interval > 0.0 {
+        ((beats[beats.len() - 1] - beats[0]) / (4.0 * interval)).round() as usize + 1
+    } else {
+        0
+    };
+    let model_bars = downbeats.len();
+    if span_bars >= 4 && model_bars * 4 < span_bars * 3 {
+        let derived = derive_bars(&beats, interval, &downbeats);
+        let mut merged: Vec<f64> = downbeats.iter().copied().chain(derived).collect();
+        merged.sort_by(|a, b| a.total_cmp(b));
+        merged.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+        log::debug!(
+            "downbeat grid: beats={} model bars={} derived bars={} of ~{} expected",
+            beats.len(),
+            model_bars,
+            merged.len().saturating_sub(model_bars),
+            span_bars
+        );
+        downbeats = merged;
+    }
 
     let peak_logits: Vec<f64> = beat_frames
         .iter()
@@ -307,6 +335,53 @@ pub fn grid_confidence(beats: &[f64], peak_logits: &[f64]) -> f64 {
     (0.35 + 0.4 * regular + 0.25 * strength).clamp(0.0, 0.95)
 }
 
+/// F-2's missing-bar derivation.
+///
+/// Each trusted model downbeat anchors a chain: four measured beats later is
+/// the next bar, and so on. A step is only accepted when all four gaps in the
+/// group are within 15 ms of the grid (the model's own beat interval), so a
+/// missing or smeared beat stops the chain instead of inventing a bar; the
+/// next trusted model downbeat starts a new one. Both directions are walked so
+/// the bars before an anchor are filled too.
+fn derive_bars(beats: &[f64], interval: f64, trusted: &[f64]) -> Vec<f64> {
+    if beats.len() < 5 || interval <= 0.0 {
+        return Vec::new();
+    }
+    let regular = |start: usize| -> bool {
+        if start + 4 >= beats.len() {
+            return false;
+        }
+        (0..4).all(|k| ((beats[start + k + 1] - beats[start + k]) - interval).abs() <= 0.015)
+    };
+    let nearest = |time: f64| -> Option<usize> {
+        beats
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| (*a - time).abs().total_cmp(&(*b - time).abs()))
+            .and_then(|(index, beat)| ((beat - time).abs() <= 0.03).then_some(index))
+    };
+    let mut bars = Vec::new();
+    for &anchor in trusted {
+        let Some(anchor_index) = nearest(anchor) else {
+            continue;
+        };
+        bars.push(beats[anchor_index]);
+        let mut forward = anchor_index;
+        while regular(forward) {
+            forward += 4;
+            bars.push(beats[forward]);
+        }
+        let mut back = anchor_index;
+        while back >= 4 && regular(back - 4) {
+            back -= 4;
+            bars.push(beats[back]);
+        }
+    }
+    bars.sort_by(|a, b| a.total_cmp(b));
+    bars.dedup_by(|a, b| (*a - *b).abs() < 0.05);
+    bars
+}
+
 fn median(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -319,6 +394,41 @@ fn median(values: &[f64]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_model_downbeats_are_filled_from_measured_beats() {
+        // 120 BPM, a beat every 0.5 s for 40 bars; the model found only two
+        // bars (0 s and 16 s). The chain should fill every 2 s bar.
+        let beats: Vec<f64> = (0..161).map(|i| i as f64 * 0.5).collect();
+        let trusted = vec![0.0, 16.0];
+        let bars = derive_bars(&beats, 0.5, &trusted);
+        assert!(bars.len() >= 40, "derived {} bars", bars.len());
+        assert!((bars[20] - 40.0).abs() < 1e-6, "bar 20 at {}", bars[20]);
+        assert!(bars.windows(2).all(|w| (w[1] - w[0] - 2.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_missing_beat_stops_the_chain() {
+        let mut beats: Vec<f64> = (0..81).map(|i| i as f64 * 0.5).collect();
+        // Remove the beat at 10.0 s: the bars around it cannot be measured.
+        beats.retain(|b| (*b - 10.0).abs() > 1e-6);
+        let bars = derive_bars(&beats, 0.5, &[0.0]);
+        assert!(bars.iter().all(|b| *b < 9.0 || *b > 11.0), "{bars:?}");
+        assert!(bars.len() < 40, "the chain should stop at the gap");
+    }
+
+    #[test]
+    fn a_drifting_beat_stops_the_chain() {
+        let mut beats: Vec<f64> = (0..81).map(|i| i as f64 * 0.5).collect();
+        // A 30 ms displacement at 20 s breaks the 15 ms step check.
+        for beat in beats.iter_mut() {
+            if *beat >= 20.0 {
+                *beat += 0.03;
+            }
+        }
+        let bars = derive_bars(&beats, 0.5, &[0.0, 40.0]);
+        assert!(bars.iter().all(|b| (*b - 20.0).abs() > 1e-6), "{bars:?}");
+    }
 
     #[test]
     fn tempo_from_regular_120_bpm_grid() {
