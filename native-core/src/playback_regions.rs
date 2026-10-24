@@ -106,7 +106,9 @@ struct WindowLevel {
 /// a quiet musical passage can have a low RMS and still peaks above this.
 const EDGE_PEAK_CEILING: f32 = 0.031_622_8;
 /// How far under the recording's own level a window must sit to be an edge.
-const EDGE_BELOW_REFERENCE_DB: f64 = 30.0;
+/// 35 dB, not 30: a quiet coda or a soft intro more than 30 dB under the
+/// record's own level is still music; a near-silent fade tail is 40+ dB under.
+const EDGE_BELOW_REFERENCE_DB: f64 = 35.0;
 /// A shorter run is a breath, not an edge to trim.
 const MIN_EDGE_SECONDS: f64 = 1.0;
 
@@ -373,7 +375,7 @@ mod tests {
             let value = if t >= head && t < head + music {
                 amplitude * (t * 200.0 * std::f32::consts::PI).sin()
             } else {
-                0.00003
+                0.000003
             };
             bytes.extend(value.to_le_bytes());
             bytes.extend(if stereo {
@@ -423,7 +425,7 @@ mod tests {
     #[test]
     fn a_noise_lead_in_and_fade_tail_are_trimmed() {
         let path = float_wav("edges", 6.0, |t| {
-            let noise = ((t * 7919.0).sin() * 0.5 + (t * 127.1).sin() * 0.5) * 0.004;
+            let noise = ((t * 7919.0).sin() * 0.5 + (t * 127.1).sin() * 0.5) * 0.002;
             if t < 1.5 || t >= 4.5 {
                 (noise, -noise)
             } else {
@@ -453,17 +455,42 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// Claude's tuning: a coda 32 dB under the recording survives, a fade tail
+    /// 40 dB under it is trimmed.
+    #[test]
+    fn a_thirty_two_db_coda_survives_and_a_forty_db_tail_is_trimmed() {
+        let coda = float_wav("coda", 6.0, |t| {
+            let level = if t < 4.0 { 0.2 } else { 0.2 * 10f32.powf(-32.0 / 20.0) };
+            let music = (t * 300.0 * std::f32::consts::PI).sin() * level;
+            (music, music)
+        });
+        let r = detect(coda.to_str().unwrap(), true).unwrap();
+        assert_eq!(r.audible_start_seconds, 0.0, "{r:?}");
+        assert_eq!(r.audible_end_seconds, None, "{r:?}");
+        std::fs::remove_file(coda).unwrap();
+
+        let tail = float_wav("fade-tail", 5.5, |t| {
+            let level = if t < 4.0 { 0.2 } else { 0.2 * 10f32.powf(-40.0 / 20.0) };
+            let music = (t * 300.0 * std::f32::consts::PI).sin() * level;
+            (music, music)
+        });
+        let r = detect(tail.to_str().unwrap(), true).unwrap();
+        let end = r.audible_end_seconds.expect("a −40 dB tail must be trimmed");
+        assert!((end - 4.1).abs() < 0.06, "{r:?}");
+        std::fs::remove_file(tail).unwrap();
+    }
+
     /// The RMS rule alone would call a quiet passage silence; the peak ceiling
     /// is what keeps a transient-heavy quiet section audible.
     #[test]
     fn a_quiet_window_still_needs_a_low_peak() {
         let reference = 0.5;
         assert!(window_is_quiet(
-            &WindowLevel { rms: 0.01, peak: 0.03 },
+            &WindowLevel { rms: 0.005, peak: 0.03 },
             reference
         ));
         assert!(!window_is_quiet(
-            &WindowLevel { rms: 0.01, peak: 0.1 },
+            &WindowLevel { rms: 0.005, peak: 0.1 },
             reference
         ));
         assert!(!window_is_quiet(
