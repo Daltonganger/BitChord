@@ -48,7 +48,12 @@ final class SourceSearch: Sendable {
         }
     }
 
-    struct AddonSearchError: Error { let message: String }
+    /// A bridge failure. `LocalizedError` so `localizedDescription` carries the
+    /// bridge's message rather than the generic "couldn't be completed" text.
+    struct AddonSearchError: Error, LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
 }
 
 private final class AddonRowsAdapter: SourceBridgeRowCallback {
