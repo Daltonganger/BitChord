@@ -31,7 +31,7 @@ use crate::transition_filter::TransitionFilter;
 mod fx;
 
 /// How long a technique's window is at `beat_seconds`, for the planner.
-pub(crate) fn technique_window_seconds(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
+pub fn technique_window_seconds(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
     fx::window_seconds(style, beat_seconds)
 }
 
@@ -2011,6 +2011,11 @@ struct TransitionState {
     /// the blend start. Before it the outgoing plays dry on the blend's own
     /// fall; after it the effect dresses that fall.
     effect_start_frame: u64,
+    /// The outgoing's level when its effect began, held for the rest of the
+    /// window: the technique ramps its own dry out and rings its own tail,
+    /// so feeding it the blend's still-falling gain fed an echo or a loop
+    /// almost nothing, and the effect was 20–40 dB under the mix.
+    effect_input_gain: Option<f32>,
 }
 
 struct RetiringVoice {
@@ -2396,6 +2401,7 @@ impl MixerState {
             swap: true,
             fx: None,
             effect_start_frame: 0,
+            effect_input_gain: None,
         });
         // Same track, same instant: the timeline does not move, so this only
         // re-points the playhead at the replacement voice.
@@ -2671,6 +2677,7 @@ impl MixerState {
                     swap: false,
                     fx: None,
                     effect_start_frame: 0,
+                    effect_input_gain: None,
                 });
             }
             Err(e) => {
@@ -4008,18 +4015,21 @@ fn render_available(state: &mut MixerState, ring: &mut Producer<f32>) {
                         .transition
                         .as_mut()
                         .filter(|t| t.phase == Phase::Fading)
-                        .and_then(|t| t.fx.as_mut())
+                        .and_then(|t| {
+                            let gain = *t.effect_input_gain.get_or_insert(voice.gain);
+                            t.fx.as_mut().map(|fx| (fx, gain))
+                        })
                 } else {
                     None
                 };
-                if let Some(effect) = effect {
+                if let Some((effect, input_gain)) = effect {
                     // The outgoing deck runs through its effect, and keeps
                     // running after its file ends: the tail is the point.
                     let mut dry = vec![0.0f32; frames.len()];
                     voice.mix_into(
                         &frames,
                         &mut dry,
-                        voice.gain,
+                        input_gain,
                         state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
                     );
                     effect.render(&dry, &mut scratch, CHUNK_FRAMES);
@@ -6471,6 +6481,7 @@ mod tests {
                 swap: false,
                 fx: None,
                 effect_start_frame: 0,
+                effect_input_gain: None,
             }),
             retiring: Vec::new(),
             playing: true,
