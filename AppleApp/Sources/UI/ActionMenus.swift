@@ -355,38 +355,106 @@ struct BrowseActionButtons: View {
             Button("Add to Queue") { controller.addToQueue(entry) }
         }
         if let browseId = card.browseId, !browseId.isEmpty {
-            Button("Open") {
-                appModel.pendingDetail = .detail(browseId: browseId, title: card.title)
+            if browseId.hasPrefix("UC") {
+                // Upstream leaves artists out of the browse menu entirely
+                // (MainActivity.kt:1851) — there is nothing to download, pin,
+                // rename or save about a channel from a card. Ours keeps the
+                // one action a card can honestly offer, because a context
+                // menu with no rows is worse than a short one.
+                Button("Open") {
+                    appModel.pendingDetail = .detail(browseId: browseId, title: card.title)
+                }
+            } else {
+                browseRows(browseId)
             }
-            Button("Play") {
-                Task { await playCollection(browseId, shuffle: false) }
+        }
+    }
+
+    @ViewBuilder
+    private func browseRows(_ browseId: String) -> some View {
+        Button("Open") {
+            appModel.pendingDetail = .detail(browseId: browseId, title: card.title)
+        }
+        Button("Play") {
+            Task { await playCollection(browseId, shuffle: false) }
+        }
+        Button("Shuffle") {
+            Task { await playCollection(browseId, shuffle: true) }
+        }
+        // Pinning is a local list of ids, not an account write — upstream
+        // offers it signed out too, and only for playlists
+        // (MainActivity.kt:4672).
+        if isPlaylist(browseId) {
+            let pinned = PlatformSettings.shared.getString(key: "pinned_playlists", default: "")
+                .split(separator: ",").map(String.init)
+            Button(pinned.contains(browseId) ? "Unpin" : "Pin") {
+                if !PlaylistPinning.toggle(browseId: browseId) {
+                    appModel.pinLimitAlert = true
+                }
             }
-            Button("Shuffle") {
-                Task { await playCollection(browseId, shuffle: true) }
+        }
+        if auth.signedIn {
+            if browseId.hasPrefix("VL") || browseId.hasPrefix("PL") {
+                Button("Rename Playlist…") {
+                    appModel.playlistRename = PlaylistRenameRequest(browseId: browseId, title: card.title)
+                }
             }
-            if auth.signedIn {
-                let pinned = PlatformSettings.shared.getString(key: "pinned_playlists", default: "")
-                    .split(separator: ",").map(String.init)
-                Button(pinned.contains(browseId) ? "Unpin" : "Pin") {
-                    if !PlaylistPinning.toggle(browseId: browseId) {
-                        appModel.pinLimitAlert = true
+            if browseId.hasPrefix("VL") || browseId.hasPrefix("MPRE") || browseId.hasPrefix("OLAK") {
+                Button("Save to Library") {
+                    Task {
+                        let pid = browseId.hasPrefix("VL") ? String(browseId.dropFirst(2)) : browseId
+                        _ = await LibraryActions.ratePlaylist(playlistId: pid, saved: true)
                     }
                 }
-                if browseId.hasPrefix("VL") || browseId.hasPrefix("PL") {
-                    Button("Rename Playlist…") {
-                        appModel.playlistRename = PlaylistRenameRequest(browseId: browseId, title: card.title)
-                    }
-                }
-                if browseId.hasPrefix("VL") || browseId.hasPrefix("MPRE") || browseId.hasPrefix("OLAK") {
-                    Button("Save to Library") {
-                        Task {
-                            let pid = browseId.hasPrefix("VL") ? String(browseId.dropFirst(2)) : browseId
-                            _ = await LibraryActions.ratePlaylist(playlistId: pid, saved: true)
-                        }
-                    }
-                }
             }
-            Button("Download") {
+        }
+        downloadRow(browseId)
+        // Album and playlist only, like upstream's share gate
+        // (MainActivity.kt:4747): a channel link is not a thing to pass
+        // around, and the other browse kinds have no page of their own.
+        if isPlaylist(browseId) {
+            ShareLink(item: URL(string: "https://music.youtube.com/playlist?list=\(browseId.hasPrefix("VL") ? String(browseId.dropFirst(2)) : browseId)")!) {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
+        } else if browseId.hasPrefix("MPRE") || browseId.hasPrefix("OLAK") {
+            ShareLink(item: URL(string: "https://music.youtube.com/browse/\(browseId)")!) {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
+        }
+    }
+
+    private func isPlaylist(_ browseId: String) -> Bool {
+        browseId.hasPrefix("VL") || browseId.hasPrefix("PL")
+    }
+
+    /// Upstream's download-all row carries the collection's state in its
+    /// label (BrowseActionsSheet.kt:259), and a downloaded collection offers
+    /// its delete (:309). The label is read when the menu opens; downloading
+    /// again over an existing collection is a re-sync, which the store
+    /// dedupes.
+    @ViewBuilder
+    private func downloadRow(_ browseId: String) -> some View {
+        let store = DownloadStore.shared
+        let owner = store.collections.first { $0.browseId == browseId }
+        let downloading = owner.map { downloadOwner in
+            store.jobs.contains { downloadOwner.requests.contains($0.id) && ($0.status == .queued || $0.status == .running) }
+        } ?? false
+        if let owner, !downloading, owner.requests.allSatisfy({ request in
+            store.jobs.first { $0.id == request }?.status != .failed
+        }) {
+            Button("Delete Download", role: .destructive) {
+                let title = card.title
+                toast.requestConfirmation(ConfirmationRequest(
+                    title: "Delete the download?",
+                    message: "“\(title)” will be removed from this device. It will download again when played.",
+                    confirm: "Delete Download"
+                ) {
+                    DownloadStore.shared.removeOwner(owner.id)
+                    toast.show("Deleted \(title)")
+                })
+            }
+        } else {
+            Button(downloading ? "Downloading…" : "Download") {
                 Task {
                     let result = await DownloadStore.shared.downloadCollection(browseId: browseId)
                     switch result {
