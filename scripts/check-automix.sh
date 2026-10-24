@@ -17,7 +17,7 @@ cargo test --lib analyzer::plan::tests::a_true_beatmatch_still_blends || exit 1
 cargo test --lib analyzer::plan::tests::mismatched_tempos_get_a_dj_technique_not_a_fade || exit 1
 
 if [ -n "${AUTOMIX_CORPUS:-}" ]; then
-  echo "automix: corpus at $AUTOMIX_CORPUS — scorecard harness is A′3 (needs beat/vocal models)"
+  AUTOMIX_CORPUS="$AUTOMIX_CORPUS" cargo test --lib automix_corpus_scorecard -- --ignored --nocapture || exit 1
 else
-  echo "automix: plan-order checks passed; no AUTOMIX_CORPUS (need ≥ 12 real pairs)"
+  echo "automix: plan-order checks passed; set AUTOMIX_CORPUS to run the real-pair scorecard"
 fi

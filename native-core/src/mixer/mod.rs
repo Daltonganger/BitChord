@@ -35,12 +35,6 @@ pub(crate) fn technique_window_seconds(style: TransitionStyle, beat_seconds: f64
     fx::window_seconds(style, beat_seconds)
 }
 
-/// Where in its window a technique lands the incoming record, 0…1. Needs the
-/// beat because LoopRoll/Cut windows grow by the overlap.
-pub(crate) fn technique_landing_fraction(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
-    fx::landing_fraction(style, beat_seconds)
-}
-
 /// Callback surface — the UniFFI-generated Swift side implements this.
 pub trait EngineEvents: Send + Sync {
     fn state_changed(&self, state: crate::PlaybackState);
@@ -138,6 +132,13 @@ pub struct TransitionPlan {
     pub vocal_overlap: f64,
     /// Explicit fade length for this pair; 0 = engine's crossfade window.
     pub fade_seconds: f64,
+    /// The effect's own window inside the blend, in seconds (0 = no effect).
+    /// The technique only processes the outgoing deck over this last part;
+    /// the incoming rises across the whole `fade_seconds` crossfade.
+    pub effect_seconds: f64,
+    /// Where the effect window starts, as a position in the outgoing track's
+    /// own timeline (0 = no effect).
+    pub effect_start_seconds: f64,
     /// Where the blend *ends*, as a position in the outgoing track's own
     /// timeline; 0 means "at the file end".
     ///
@@ -191,6 +192,8 @@ impl Default for TransitionPlan {
             filter_sweep: 0.0,
             vocal_overlap: 0.0,
             fade_seconds: 0.0,
+            effect_seconds: 0.0,
+            effect_start_seconds: 0.0,
             transition_end_seconds: 0.0,
             cue_seconds: 0.0,
             playback_rate: 1.0,
@@ -1662,6 +1665,9 @@ struct TransitionState {
     /// The outgoing deck's effect, for the techniques that finish a record
     /// with one. Created when the window opens.
     fx: Option<fx::DeckFx>,
+    /// When inside the transition the effect sub-window starts, in frames from
+    /// the blend start. Before it the outgoing plays dry at unity.
+    effect_start_frame: u64,
 }
 
 struct RetiringVoice {
@@ -2045,6 +2051,7 @@ impl MixerState {
             arm_deadline: Instant::now(),
             swap: true,
             fx: None,
+            effect_start_frame: 0,
         });
         // Same track, same instant: the timeline does not move, so this only
         // re-points the playhead at the replacement voice.
@@ -2307,6 +2314,7 @@ impl MixerState {
                     arm_deadline: Instant::now() + Duration::from_millis(ARM_TIMEOUT_MS),
                     swap: false,
                     fx: None,
+                    effect_start_frame: 0,
                 });
             }
             Err(e) => {
@@ -2340,8 +2348,16 @@ impl MixerState {
     /// The window a plan needs: a technique's own length, in beats, or the
     /// floored blend length for a crossfade.
     fn plan_seconds(&self, plan: &TransitionPlan, track_seconds: f64) -> f64 {
-        fx::window_seconds(plan.style, plan.beat_seconds)
-            .unwrap_or_else(|| self.blend_seconds(plan.fade_seconds, track_seconds))
+        if plan.style.is_effect() {
+            // The effect rides a real crossfade: its length is the planner's
+            // blend, and the technique only fills the last sub-window.
+            if plan.fade_seconds > 0.0 {
+                return plan.fade_seconds;
+            }
+            return fx::window_seconds(plan.style, plan.beat_seconds)
+                .unwrap_or_else(|| self.blend_seconds(plan.fade_seconds, track_seconds));
+        }
+        self.blend_seconds(plan.fade_seconds, track_seconds)
     }
 
     fn blend_seconds(&self, plan_fade: f64, track_seconds: f64) -> f64 {
@@ -2440,6 +2456,12 @@ impl MixerState {
             t.phase = Phase::Fading;
             t.handed_off = true;
             t.fx = fx::DeckFx::new(t.plan.style, device_rate, t.plan.beat_seconds);
+            let transition_start = (t.plan.transition_end_seconds
+                - t.fade_frames as f64 / device_rate as f64)
+                .max(0.0);
+            t.effect_start_frame = ((t.plan.effect_start_seconds - transition_start)
+                * device_rate as f64)
+                .max(0.0) as u64;
             if t.fx.is_some() {
                 log::info!(
                     "transition technique {:?} ({:.2}s beat): {}",
@@ -2469,11 +2491,17 @@ impl MixerState {
         {
             return false;
         }
-        if let Some(fx) = self.transition.as_ref().and_then(|t| t.fx.as_ref()) {
-            // The effect sets the outgoing level itself; the voice gain stays
-            // at unity so the effect hears the record, not a fade of it.
-            let rise = fx.incoming_gain();
-            let done = fx.finished();
+        if let Some(t) = self.transition.as_ref().filter(|t| t.fx.is_some()) {
+            // The effect rides the blend: the incoming rises across the whole
+            // crossfade, and the outgoing stays at unity until the effect's
+            // own sub-window starts (the render loop switches it then).
+            let fade = t.fade_frames.max(1);
+            let played = self
+                .incoming
+                .as_ref()
+                .map(|voice| voice.emitted_dev_frames)
+                .unwrap_or(0);
+            let rise = rise_gain((played as f64 / fade as f64).clamp(0.0, 1.0));
             if let Some(current) = &mut self.current {
                 current.gain = 1.0;
                 current.filter.open();
@@ -2482,7 +2510,7 @@ impl MixerState {
                 incoming.gain = rise;
                 incoming.filter.open();
             }
-            return done;
+            return played >= fade;
         }
         let Some(incoming) = &self.incoming else {
             return false;
@@ -3561,11 +3589,23 @@ fn render_available(state: &mut MixerState, ring: &mut Producer<f32>) {
                 voice.drive_tempo_glide(rate, speed);
                 let frames = voice.pull(CHUNK_FRAMES, rate);
                 voice.note_glide_frames((frames.len() / 2) as u64);
-                let effect = state
-                    .transition
-                    .as_mut()
-                    .filter(|t| t.phase == Phase::Fading)
-                    .and_then(|t| t.fx.as_mut());
+                let effect_active = state.transition.as_ref().is_some_and(|t| {
+                    t.phase == Phase::Fading
+                        && t.fx.is_some()
+                        && state
+                            .incoming
+                            .as_ref()
+                            .is_some_and(|voice| voice.emitted_dev_frames >= t.effect_start_frame)
+                });
+                let effect = if effect_active {
+                    state
+                        .transition
+                        .as_mut()
+                        .filter(|t| t.phase == Phase::Fading)
+                        .and_then(|t| t.fx.as_mut())
+                } else {
+                    None
+                };
                 if let Some(effect) = effect {
                     // The outgoing deck runs through its effect, and keeps
                     // running after its file ends: the tail is the point.
@@ -3603,12 +3643,12 @@ fn render_available(state: &mut MixerState, ring: &mut Producer<f32>) {
             state.publish_audible_position();
         }
 
-        // An effect transition holds the incoming record until it lands, so
-        // it starts exactly on its cue.
-        let incoming_renders = state.transition.as_ref().is_some_and(|t| {
-            t.phase == Phase::Fading
-                && t.fx.as_ref().map_or(true, |fx| fx.incoming_live())
-        });
+        // The incoming rises across the whole blend (the effect only dresses
+        // the outgoing), so it is pulled from the first frame.
+        let incoming_renders = state
+            .transition
+            .as_ref()
+            .is_some_and(|t| t.phase == Phase::Fading);
         if let Some(voice) = &mut state.incoming {
             if state.playing && incoming_renders {
                 let frames = voice.pull(CHUNK_FRAMES, state.device_rate);
@@ -4578,6 +4618,8 @@ mod tests {
                 start_seconds: 0.0,
                 plan: TransitionPlan {
                     fade_seconds: 1.0,
+                    effect_seconds: 0.0,
+                    effect_start_seconds: 0.0,
                     ..TransitionPlan::default()
                 },
                 headers: std::collections::HashMap::new(),
@@ -4963,6 +5005,8 @@ mod tests {
                     style: TransitionStyle::DjBlend,
                     bass_swap: false,
                     fade_seconds: fade,
+                    effect_seconds: 0.0,
+                    effect_start_seconds: 0.0,
                     transition_end_seconds: 6.0,
                     ..TransitionPlan::default()
                 },
@@ -5062,6 +5106,8 @@ mod tests {
                     bass_swap: true,
                     bass_swap_fraction: 0.6,
                     fade_seconds: fade,
+                    effect_seconds: 0.0,
+                    effect_start_seconds: 0.0,
                     transition_end_seconds: end,
                     playback_rate: 120.0 / 116.0,
                     bed_fraction: 0.45,
@@ -5233,6 +5279,8 @@ mod tests {
                 transition_end_seconds: 8.0,
                 outgoing_duration_seconds: 10.0,
                 fade_seconds: 1.0,
+                effect_seconds: 0.0,
+                effect_start_seconds: 0.0,
                 ..TransitionPlan::default()
             },
             headers: std::collections::HashMap::new(),
@@ -5334,6 +5382,7 @@ mod tests {
                 arm_deadline: Instant::now(),
                 swap: false,
                 fx: None,
+                effect_start_frame: 0,
             }),
             retiring: Vec::new(),
             playing: true,
@@ -5628,6 +5677,8 @@ mod tests {
                 "B",
                 TransitionPlan {
                     fade_seconds: 1.0,
+                    effect_seconds: 0.0,
+                    effect_start_seconds: 0.0,
                     transition_end_seconds: 3.0,
                     ..TransitionPlan::default()
                 },
@@ -5760,6 +5811,8 @@ mod tests {
             dip_depth: 0.5,
             dip_width: 0.08,
             fade_seconds: 12.0,
+            effect_seconds: 0.0,
+            effect_start_seconds: 0.0,
             ..TransitionPlan::default()
         };
         let bed = 10.0_f64.powf(-14.0 / 20.0) as f32;

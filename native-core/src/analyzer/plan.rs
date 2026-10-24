@@ -626,6 +626,8 @@ pub fn plan_pair(
                 filter_sweep: 0.0,
                 vocal_overlap: 0.0,
                 fade_seconds: GAPLESS_FADE_SECONDS,
+                effect_seconds: 0.0,
+                effect_start_seconds: 0.0,
                 transition_end_seconds: 0.0,
                 cue_seconds: 0.0,
                 playback_rate: 1.0,
@@ -732,6 +734,8 @@ fn plain_fallback(fade: f64, outgoing: &Analysis) -> TransitionPlan {
         filter_sweep: 0.0,
         vocal_overlap: 0.0,
         fade_seconds: fade,
+        effect_seconds: 0.0,
+        effect_start_seconds: 0.0,
         transition_end_seconds: end,
         cue_seconds: 0.0,
         playback_rate: 1.0,
@@ -1460,7 +1464,7 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
         return plan;
     }
     if matches!(tier, Tier::Plain) {
-        if let Some(plan) = technique_plan(outgoing, incoming, tier, entry) {
+        if let Some(plan) = technique_plan(outgoing, incoming, tier, entry, None) {
             return plan;
         }
         let mut plan = plain_fallback(fade, outgoing);
@@ -1650,11 +1654,14 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
     // could not shorten below the clash threshold. Only then may an effect
     // replace the blend; the v0.1.3 blend remains the default.
     let tempo_gap = (1.0 - ratio).abs();
-    let stretch_fix = transparent_playback_rate(out_bpm, in_bpm, MAX_BEATMATCH_STRETCH).is_some();
-    let key_clash = key_distance.is_some_and(|distance| distance > 3) && !stretch_fix;
-    let vocal_clash = vocal_conflict && vocal_overlap > 0.15;
+    // A stretch does not change key; a wide key distance is a real clash on
+    // its own. The corpus firing rates will decide whether that should earn an
+    // effect or a shorter filtered blend.
+    let key_clash = key_distance.is_some_and(|distance| distance > 3);
     if effect_earned(key_clash, tempo_gap, vocal_conflict, vocal_overlap) {
-        if let Some(plan) = technique_plan(outgoing, incoming, tier, entry) {
+        if let Some(plan) =
+            technique_plan(outgoing, incoming, tier, entry, Some((transition_start, fade_seconds, cue)))
+        {
             return plan;
         }
     }
@@ -1668,6 +1675,8 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
         filter_sweep: if same_beat { 0.0 } else { FILTER_SWEEP },
         vocal_overlap,
         fade_seconds,
+        effect_seconds: 0.0,
+        effect_start_seconds: 0.0,
         transition_end_seconds: transition_start + fade_seconds,
         cue_seconds: cue,
         playback_rate,
@@ -1786,6 +1795,7 @@ fn technique_plan(
     incoming: &Analysis,
     tier: Tier,
     entry: f64,
+    blend: Option<(f64, f64, f64)>,
 ) -> Option<TransitionPlan> {
     let out_bpm = outgoing.bpm;
     let in_bpm = incoming.bpm;
@@ -1811,6 +1821,7 @@ fn technique_plan(
     }
     let beat = if has_tempo { beat_seconds_of(outgoing).max(0.25) } else { 0.5 };
     let grid = has_tempo && outgoing.beat_confidence >= MIN_DJ_CONFIDENCE;
+    let incoming_grid = has_tempo && incoming.beat_confidence >= MIN_DJ_CONFIDENCE;
 
     let (anchor, _) = resolve_mix_out_anchor(outgoing);
     let mix_end = anchor.min(duration).max(0.0);
@@ -1830,7 +1841,7 @@ fn technique_plan(
     if grid && outgoing.beat_confidence >= 0.45 && !slow && out_vocal < 0.5 {
         eligible.push((TransitionStyle::LoopRoll, "loop roll: a strong grid and an instrumental ending"));
     }
-    if grid && energetic_in {
+    if grid && incoming_grid && energetic_in {
         eligible.push((TransitionStyle::DropCut, "cut on the one: the next record comes in hot"));
     }
     if slow || key_clash || !grid || tempo_gap > 0.12 {
@@ -1852,26 +1863,37 @@ fn technique_plan(
     }
     let (style, why) = *eligible.get(pair_salt(outgoing, incoming) % eligible.len().max(1))?;
 
-    let window = crate::mixer::technique_window_seconds(style, beat)?;
-    let land_fraction = crate::mixer::technique_landing_fraction(style, beat)?;
-    // The landing — the dry cut, the drop — goes on a downbeat (a phrase
-    // start when one is near) at the mix-out anchor.
-    let lead = land_fraction * window;
-    let tail = window - lead;
-    let latest_land = (duration - tail).max(lead);
-    let target = (mix_end).min(latest_land);
-    let land = if grid {
-        aligned_transition_start(outgoing, target, latest_land, true, lead)
-    } else {
-        target
+    // The effect sits on a real crossfade: the analysed blend supplies the
+    // length, the end and the cue; the technique gets the last sub-window of
+    // it. A plain pair (no blend) still gets an 8 s crossfade under the effect.
+    let (blend_start, blend_fade, blend_cue) = match blend {
+        Some((start, fade, cue)) => (start, fade, cue),
+        None => ((mix_end - AUTO_FALLBACK_SECONDS).max(0.0), AUTO_FALLBACK_SECONDS, entry),
     };
-    let land = land.clamp(lead.min(latest_land), latest_land);
-    // The cut lands on the next record's drop when it has one close by.
+    let blend_fade = if style == TransitionStyle::DropCut {
+        // A deliberate short swap, at most one bar.
+        blend_fade.clamp(0.5, 4.0 * beat)
+    } else {
+        blend_fade.max(AUTO_MIN_SECONDS)
+    };
+    let end = blend_start + blend_fade;
+    let technique_window = crate::mixer::technique_window_seconds(style, beat)?;
+    let effect_seconds = if style == TransitionStyle::DropCut {
+        (beat / 4.0).max(0.06)
+    } else {
+        technique_window
+    }
+    .min(blend_fade)
+    .max(0.06);
     let cue = if style == TransitionStyle::DropCut {
         let drop = incoming_handoff(incoming, 8.0 * beat);
-        if drop > entry && drop < entry + 32.0 * beat { drop } else { entry }
+        if drop > entry && drop < entry + 32.0 * beat {
+            drop
+        } else {
+            entry
+        }
     } else {
-        entry
+        blend_cue
     };
     Some(TransitionPlan {
         style,
@@ -1879,8 +1901,10 @@ fn technique_plan(
         bass_swap_fraction: DEFAULT_BASS_SWAP_FRACTION,
         filter_sweep: 0.0,
         vocal_overlap: 0.0,
-        fade_seconds: window,
-        transition_end_seconds: land + tail,
+        fade_seconds: blend_fade,
+        effect_seconds,
+        effect_start_seconds: (end - effect_seconds).max(0.0),
+        transition_end_seconds: end,
         cue_seconds: cue,
         playback_rate: 1.0,
         bed_fraction: 0.0,
@@ -1891,7 +1915,7 @@ fn technique_plan(
         outgoing_duration_seconds: outgoing.duration,
         beat_seconds: beat,
         reason: format!(
-            "{why} (tempo {out_bpm:.0}→{in_bpm:.0} BPM, grid {:.2})",
+            "{why} (clash; {blend_fade:.1}s blend, {effect_seconds:.1}s effect; tempo {out_bpm:.0}→{in_bpm:.0} BPM, grid {:.2})",
             outgoing.beat_confidence
         ),
     })
@@ -2589,6 +2613,8 @@ fn plan_wsola_transition(outgoing: &Analysis, incoming: &Analysis) -> Option<Tra
         filter_sweep: 0.0,
         vocal_overlap,
         fade_seconds,
+        effect_seconds: 0.0,
+        effect_start_seconds: 0.0,
         transition_end_seconds: transition_end,
         cue_seconds: incoming_cue_time,
         playback_rate,
@@ -2600,7 +2626,7 @@ fn plan_wsola_transition(outgoing: &Analysis, incoming: &Analysis) -> Option<Tra
         outgoing_duration_seconds: outgoing.duration,
         beat_seconds: 0.0,
         reason: String::new(),
-    })
+})
 }
 
 /// The most ambitious move: run the incoming intro under the outgoing and close
@@ -2702,6 +2728,21 @@ mod tests {
         assert!(plan.transition_end_seconds <= 205.0 + 1e-6);
         assert!((plan.beat_seconds - 60.0 / 124.0).abs() < 1e-6);
         assert_eq!(plan.playback_rate, 1.0, "a technique never stretches");
+        // A′2: the effect rides the analysed crossfade, not its own short window.
+        assert!(
+            plan.fade_seconds >= AUTO_MIN_SECONDS - 1e-6,
+            "effect blend {:.2}s under the 4s floor",
+            plan.fade_seconds
+        );
+        assert!(plan.effect_seconds > 0.0 && plan.effect_seconds <= plan.fade_seconds + 1e-6);
+        assert!(
+            (plan.effect_start_seconds + plan.effect_seconds - plan.transition_end_seconds).abs()
+                < 1e-6,
+            "effect window {}..{} does not end at the blend end {}",
+            plan.effect_start_seconds,
+            plan.effect_start_seconds + plan.effect_seconds,
+            plan.transition_end_seconds
+        );
     }
 
     #[test]
