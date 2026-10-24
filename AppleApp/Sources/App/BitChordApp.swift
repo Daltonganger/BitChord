@@ -4,9 +4,15 @@ import BitChordShared
 
 @main
 struct BitChordApp: App {
-    @State private var controller = PlaybackController()
-    @State private var appModel = AppModel()
-    @State private var auth = AuthController()
+    // The player, the navigation model and the session come from `AppServices`
+    // rather than being built here: App Intents (Siri, Shortcuts, Spotlight) run
+    // in this process with no scene to read an environment from, and they have to
+    // reach these same instances. A second controller would open a second output
+    // stream and fight this one for the system's media slot (see the `partySync`
+    // note below), so the holder is the only place they are made.
+    @State private var controller = AppServices.shared.controller
+    @State private var appModel = AppServices.shared.appModel
+    @State private var auth = AppServices.shared.auth
     @State private var toast = ToastCenter()
     @State private var party = PartyStore.shared
     /// The one binding between a party and this device's player.
