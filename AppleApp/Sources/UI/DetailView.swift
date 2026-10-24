@@ -1465,6 +1465,13 @@ private struct CircleMenuButton<Content: View>: View {
         }
         .buttonStyle(.plain)
         .menuStyle(.borderlessButton)
+        #if os(macOS)
+        // AppKit's borderless menu sizes itself to its own title, which this
+        // label does not have, and squashes the circle to a sliver; the
+        // indicator would sit beside it as a second control.
+        .menuIndicator(.hidden)
+        .fixedSize()
+        #endif
         .accessibilityLabel(label)
         .help(label)
     }
