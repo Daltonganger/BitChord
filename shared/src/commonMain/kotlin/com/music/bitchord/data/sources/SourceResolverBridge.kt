@@ -359,10 +359,11 @@ object SourceResolverBridge {
         SourceKind.entries.firstOrNull { it.name == kind }?.rank ?: Int.MAX_VALUE
 
     /**
-     * How many addons are enabled. YouTube is always active and is not an addon,
-     * so a search screen can say "no addons yet" before a query fails.
+     * How many addons are enabled. Counted the same way [SourceBridge.searchAddons]
+     * asks them — `AddonSource` only — so a tab that says "no addons yet" and a
+     * search that finds none can never disagree.
      */
-    fun addonCount(): Int = SourceRegistry.active().count { it.kind != SourceKind.YOUTUBE }
+    fun addonCount(): Int = SourceRegistry.active().count { it is AddonSource }
 
     fun setEnabled(configId: String, enabled: Boolean, callback: ActionCallback) {
         SourceRegistry.setEnabled(configId, enabled)

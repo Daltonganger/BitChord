@@ -180,6 +180,7 @@ struct SearchView: View {
     /// How many addons are enabled, so the Addons tab can say "no addons yet"
     /// before a query has to fail to prove it.
     @State private var addonCount = 0
+    @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
@@ -352,6 +353,14 @@ struct SearchView: View {
                 youtubeResultsColumn
             }
         }
+        .onChange(of: scenePhase) { _, _ in refreshAddonCount() }
+        #if os(macOS)
+        // Settings is its own window here, so the tab is not told when the
+        // sources screen closes; the window coming back is the next best signal.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            refreshAddonCount()
+        }
+        #endif
     }
 
     /// The field's catalogue picker, YouTube Music or the addons the listener
@@ -368,9 +377,18 @@ struct SearchView: View {
         // still right for VoiceOver, so it is hidden rather than removed.
         .labelsHidden()
         .onChange(of: searchSource) { _, _ in
+            refreshAddonCount()
             guard !term.isEmpty else { return }
             Task { await performSearch() }
         }
+    }
+
+    /// Re-reads how many addons are enabled. Cheap (an in-memory registry walk),
+    /// and refreshed from every place the registry can have changed while this
+    /// screen stayed up — Settings is a separate window on the Mac, so a tab
+    /// left open would otherwise keep saying "No addons yet" after one was added.
+    private func refreshAddonCount() {
+        addonCount = Int(SourceResolverBridge.shared.addonCount())
     }
 
     private var youtubeResultsColumn: some View {
@@ -572,7 +590,7 @@ struct SearchView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear {
-            addonCount = Int(SourceResolverBridge.shared.addonCount())
+            refreshAddonCount()
         }
     }
 
