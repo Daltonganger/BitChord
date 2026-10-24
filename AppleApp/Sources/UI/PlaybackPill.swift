@@ -315,7 +315,9 @@ struct PlaybackPill: View {
         if upcoming.isEmpty {
             Button("Nothing Queued") {}.disabled(true)
         } else {
-            ForEach(upcoming, id: \.entry.id) { item in
+            // Keyed by position, not by track id: the same song may sit in the
+            // queue twice, and two rows sharing an id would collapse into one.
+            ForEach(upcoming, id: \.offset) { item in
                 Button {
                     Haptics.play(.tap)
                     controller.playQueueItem(at: start + item.offset)
@@ -325,7 +327,7 @@ struct PlaybackPill: View {
                          : "\(item.entry.title) — \(item.entry.artist)")
                 }
             }
-            Button("Clear Up Next") {
+            Button("Clear Up Next", role: .destructive) {
                 Haptics.play(.tap)
                 controller.clearUpcoming()
             }
