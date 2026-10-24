@@ -653,10 +653,9 @@ struct SongRow: View {
     }
     private var buffering: Bool { controller.current?.id == entry.id && controller.isBuffering }
 
-    /// Whether this song's audio already sits in the download store. Read in
-    /// the body, so a download finishing re-renders the rows it touched.
+    /// Rows observe only the presence index, without scanning or validating assets.
     private var isDownloaded: Bool {
-        !entry.isLocal && DownloadStore.shared.asset(for: entry) != nil
+        !entry.isLocal && DownloadStore.shared.isDownloaded(entry)
     }
 
     var body: some View {
