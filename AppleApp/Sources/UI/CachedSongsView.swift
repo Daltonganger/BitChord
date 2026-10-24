@@ -27,6 +27,7 @@ struct CachedSongsView: View {
                     }
                 }
                 .listStyle(.plain)
+                .accessibilityLabel("Loading")
             } else if entries.isEmpty {
                 EmptyStateView(
                     icon: Image(.bchMusicNote),

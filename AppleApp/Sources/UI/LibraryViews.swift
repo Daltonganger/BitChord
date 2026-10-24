@@ -2367,10 +2367,9 @@ struct UnifiedSongsView: View {
                     if auth.signedIn {
                         Section("Your Songs") {
                             if songsLoading {
-                                ForEach(0..<6, id: \.self) { _ in
-                                    SkeletonSongRow()
-                                        .listRowSeparator(.hidden)
-                                }
+                                SkeletonRows(count: 6)
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(Color.clear)
                             } else if let songsError, songs.isEmpty {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text(songsError)
@@ -3019,6 +3018,7 @@ struct HistoryView: View {
                     }
                 }
                 .listStyle(.plain)
+                .accessibilityLabel("Loading")
             } else if let error, songs.isEmpty {
                 EmptyStateView(
                     icon: Image(.bchClock),

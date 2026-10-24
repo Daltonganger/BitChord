@@ -362,7 +362,9 @@ struct SkeletonSongRow: View {
 
 /// A loading list: enough placeholder rows to fill a screen, so the page is
 /// already the shape it will be when the content lands. Upstream never shows
-/// a bare full-screen spinner where list content is coming.
+/// a bare full-screen spinner where list content is coming. One element for
+/// VoiceOver — every block inside is hidden, so unmerged they would leave a
+/// loading page saying nothing at all.
 struct SkeletonRows: View {
     var count = 8
     var showArt = true
@@ -373,6 +375,8 @@ struct SkeletonRows: View {
                 SkeletonSongRow(showArt: showArt)
             }
         }
+        .accessibilityElement()
+        .accessibilityLabel("Loading")
     }
 }
 
