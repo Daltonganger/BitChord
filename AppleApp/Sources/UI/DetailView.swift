@@ -1213,6 +1213,7 @@ struct DetailView: View {
         guard !saving else { return }
         let generation = PageSession.generation()
         saving = true
+        defer { saving = false }
         let wasSaved = saved
         let next = !wasSaved
         // Optimistic, like the subscribe button beside it: flip now so the
@@ -1225,13 +1226,13 @@ struct DetailView: View {
             saved = wasSaved
             toast.show("Couldn’t update library: \(failure)", kind: .failure)
         }
-        saving = false
     }
 
     private func toggleSubscription(_ subscription: ArtistSubscriptionPayload, artistName: String) async {
         guard !subscribing else { return }
         let generation = PageSession.generation()
         subscribing = true
+        defer { subscribing = false }
         let wasSubscribed = subscriptionOverride ?? subscription.subscribed
         let next = !wasSubscribed
         subscriptionOverride = next
@@ -1243,7 +1244,6 @@ struct DetailView: View {
         } else {
             toast.show(next ? "Subscribed to \(artistName)" : "Unsubscribed from \(artistName)")
         }
-        subscribing = false
     }
 
     private func setPrivacy(_ value: String) async {
