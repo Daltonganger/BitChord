@@ -106,30 +106,28 @@ final class PlaybackController {
     /// A′3's session pacing: at most one transition in four may use an effect
     /// technique, so a set sounds mixed rather than gimmicky. The planner still
     /// *would* choose a technique for the pair; it blends instead and says
-    /// "pacing" in its reason.
+    /// "pacing" in its reason. The pair-keyed value lives in `TransitionPacing`
+    /// and is checked on its own.
     ///
     /// Lock-protected rather than main-actor state on purpose: the planning
     /// runs off the main actor, inside the queue-submission gate, and both the
     /// read and the record happen there.
-    private final class TransitionPacing: @unchecked Sendable {
+    private final class TransitionPacingStore: @unchecked Sendable {
         private let lock = NSLock()
-        private var styles: [TransitionStyleRec] = []
+        private var pacing = TransitionPacing<TransitionStyleRec>()
 
-        /// No effect among the last three planned transitions, so the fourth at
-        /// most may use one.
-        var allowsEffect: Bool {
+        func allowsEffect(for pair: TransitionPair) -> Bool {
             lock.lock()
             defer { lock.unlock() }
-            return !styles.suffix(3).contains(where: TransitionPacing.isEffect)
+            return pacing.allowsEffect(for: pair, isEffect: Self.isEffect)
         }
 
         /// A plan that was actually queued. A plan attempt the download
         /// invalidated must not spend the budget.
-        func note(_ style: TransitionStyleRec) {
+        func note(_ style: TransitionStyleRec, for pair: TransitionPair) {
             lock.lock()
             defer { lock.unlock() }
-            styles.append(style)
-            if styles.count > 4 { styles.removeFirst(styles.count - 4) }
+            pacing.note(style, for: pair)
         }
 
         private static func isEffect(_ style: TransitionStyleRec) -> Bool {
@@ -140,7 +138,7 @@ final class PlaybackController {
         }
     }
 
-    @ObservationIgnored nonisolated private let pacing = TransitionPacing()
+    @ObservationIgnored nonisolated private let pacing = TransitionPacingStore()
 
     /// Where the volume slider sits, 0…1 — a position, not an amplitude. See
     /// `outputGain(forVolume:)` for what the output is multiplied by.
@@ -2978,6 +2976,9 @@ final class PlaybackController {
         let nextId = next.id
         let outgoingId = current?.id
         let selfMix = repeatMode == .one || nextId == outgoingId
+        // The pacing window is keyed by the transition, not the plan: this loop
+        // re-plans the same pair up to twelve times as the files grow.
+        let transitionPair = TransitionPair(outgoing: outgoingId ?? "", incoming: nextId)
         let engine = self.engine
         let automix = automixEnabled
         // The *file* the engine opened, not `current.source` — which for a
@@ -3122,11 +3123,11 @@ final class PlaybackController {
                         incomingDurationSeconds: incomingDuration,
                         outgoingHeaders: currentSourceHeaders,
                         incomingHeaders: resolved.headers,
-                        allowEffects: self.pacing.allowsEffect
+                        allowEffects: self.pacing.allowsEffect(for: transitionPair)
                     )
                     let plan = constrainAutomixPlanForSources(plan: rawPlan, outgoingSource: currentSource, incomingSource: resolved.source, outgoingDuration: outgoingDuration, incomingDuration: incomingDuration)
                     guard try gate.performIfCurrent(generation: generation, revision: revision, {
-                        self.pacing.note(plan.style)
+                        self.pacing.note(plan.style, for: transitionPair)
                         return try engine.queueNextIfCurrent(request: LoadRequest(
                             source: resolved.source,
                             title: next.title,
@@ -4353,19 +4354,20 @@ final class PlaybackController {
             log.record("upgrade audition failed", about: mediaId)
             return
         }
-        let context = await MainActor.run { () -> (String, String, String, Bool, Double, [String: String])? in
+        let context = await MainActor.run { () -> (String, String, String, String, Bool, Double, [String: String])? in
             guard self.playGeneration == generation, self.nextEntry?.id == mediaId else { return nil }
             let outgoing = self.loadedSourcePath ?? ""
             guard !outgoing.isEmpty else { return nil }
+            let outgoingId = self.current?.id ?? ""
             let album = !self.shuffleEnabled && (self.current?.sameAlbum(as: entry) ?? false)
             let outgoingDuration = self.duration > 0
                 ? self.duration : (self.current?.durationSeconds ?? 0)
             return (
-                outgoing, self.current?.itemText ?? "", entry.itemText, album,
+                outgoing, outgoingId, self.current?.itemText ?? "", entry.itemText, album,
                 outgoingDuration, self.loadedSourceHeaders
             )
         }
-        guard let (outgoing, outgoingText, incomingText, album, outgoingDuration, outgoingHeaders) = context else {
+        guard let (outgoing, outgoingId, outgoingText, incomingText, album, outgoingDuration, outgoingHeaders) = context else {
             let nowPlaying = await MainActor.run {
                 self.playGeneration == generation && self.current?.id == mediaId
             }
@@ -4398,7 +4400,7 @@ final class PlaybackController {
             outgoingHeaders: outgoingHeaders,
             // The queued replacement is a local file by this point.
             incomingHeaders: [:],
-            allowEffects: self.pacing.allowsEffect
+            allowEffects: self.pacing.allowsEffect(for: TransitionPair(outgoing: outgoingId, incoming: mediaId))
         )
         let target = await MainActor.run { () -> (PlaybackLoadSubmissionGate, UInt64)? in
             guard self.playGeneration == generation, self.nextEntry?.id == mediaId,
@@ -4411,7 +4413,7 @@ final class PlaybackController {
         guard let (gate, revision) = target else { return }
         do {
             guard try gate.performIfCurrent(generation: generation, revision: revision, {
-                self.pacing.note(plan.style)
+                self.pacing.note(plan.style, for: TransitionPair(outgoing: outgoingId, incoming: mediaId))
                 return try engine.queueNextIfCurrent(request: LoadRequest(
                     source: path,
                     title: entry.title,
