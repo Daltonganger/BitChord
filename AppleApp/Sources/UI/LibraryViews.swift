@@ -1044,6 +1044,22 @@ struct LibraryLandingView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 14) {
+                    // Upstream's On-Device shelf leads with the playlists and
+                    // albums downloaded whole, as artwork cards, before the
+                    // folder destinations — they are the things a listener is
+                    // actually going offline to play.
+                    ForEach(downloadStore.collections) { collection in
+                        if let browseId = collection.browseId {
+                            OnDeviceCard(
+                                title: collection.title,
+                                subtitle: "\(collection.requests.count) saved",
+                                systemImage: "square.and.arrow.down.fill",
+                                tintColor: .green,
+                                destination: DetailView(browseId: browseId, initialTitle: collection.title)
+                            )
+                        }
+                    }
+
                     OnDeviceCard(
                         title: "Downloads",
                         subtitle: "\(downloadStore.items.count) downloaded song\(downloadStore.items.count == 1 ? "" : "s")",
