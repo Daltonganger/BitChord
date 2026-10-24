@@ -714,7 +714,7 @@ struct SettingsView: View {
                 glyph: .automix,
                 title: "Automix [Beta]",
                 subtitle: automix
-                    ? (AutomixModelStore.shared.beatInstalled
+                    ? (AutomixModelStore.shared.beatAvailable
                         ? "Blends every transition, timed automatically from each track. Turn off if facing overheating or lag."
                         : "Blends every transition automatically. The beat model is not installed, so timing comes from tempo analysis — install it below for transitions that land on the beat.")
                     : "Times and blends transitions automatically, no slider needed.",
@@ -888,6 +888,11 @@ struct SettingsView: View {
     /// is a settings row pretending to be a button.
     private static var automixModelsSubtitle: String {
         let store = AutomixModelStore.shared
+        // A verified previous graph is still a working model: say so, and say that
+        // an update is waiting, rather than calling the pair "not installed".
+        if store.isUsingPreviousGraph(.beat) || store.isUsingPreviousGraph(.vocals) {
+            return "Update available. Using the previous version — \(AutomixModelStore.bytes(store.totalBytesOnDisk)) on disk"
+        }
         let beat = store.status(of: .beat).isInstalled
         let vocals = store.status(of: .vocals).isInstalled
         switch (beat, vocals) {
