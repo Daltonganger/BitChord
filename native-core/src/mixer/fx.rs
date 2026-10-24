@@ -103,6 +103,7 @@ pub(crate) fn window_seconds(style: TransitionStyle, beat_seconds: f64) -> Optio
 }
 
 /// Where the incoming lands, as a fraction of [`window_seconds`].
+#[allow(dead_code)]
 pub(crate) fn landing_fraction(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
     let technique = Technique::of(style)?;
     let beat = sane_beat(beat_seconds);
@@ -170,24 +171,17 @@ impl DeckFx {
         })
     }
 
-    pub(crate) fn window_frames(&self) -> u64 {
-        self.window_frames
-    }
-
-    /// Progress through the window, 0…1.
-    pub(crate) fn progress(&self) -> f64 {
-        (self.elapsed as f64 / self.window_frames as f64).clamp(0.0, 1.0)
-    }
-
     /// Whether the incoming voice should be decoding yet. It is held until
     /// the first chunk at or after its landing frame, so its first rendered
     /// sample is its cue — never a chunk decoded at zero gain and lost.
+    #[allow(dead_code)]
     pub(crate) fn incoming_live(&self) -> bool {
         self.elapsed >= self.land_frame
     }
 
     /// Level of the incoming voice for the next sample: nothing before it
     /// lands, then a sine up over the overlap.
+    #[allow(dead_code)]
     pub(crate) fn incoming_gain(&self) -> f32 {
         if !self.incoming_live() {
             return 0.0;
@@ -218,6 +212,8 @@ impl DeckFx {
         }
     }
 
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     pub(crate) fn finished(&self) -> bool {
         self.elapsed >= self.window_frames
     }

@@ -124,6 +124,12 @@ pub struct TransitionPlanRec {
     pub vocal_overlap: f64,
     /// Explicit fade length for this pair; 0 = engine's crossfade window.
     pub fade_seconds: f64,
+    /// The effect's own window inside the blend; 0 = no effect.
+    #[uniffi(default = 0.0)]
+    pub effect_seconds: f64,
+    /// Where the effect window starts on the outgoing timeline; 0 = no effect.
+    #[uniffi(default = 0.0)]
+    pub effect_start_seconds: f64,
     /// Where the blend ends, as a position in the outgoing track's timeline;
     /// 0 = the file end. The planner picks it (the ranked mix-out anchor) and
     /// derives the bass swap and vocal overlap from the window it defines, so
@@ -174,6 +180,8 @@ impl From<TransitionPlanRec> for TransitionPlan {
             filter_sweep: rec.filter_sweep,
             vocal_overlap: rec.vocal_overlap,
             fade_seconds: rec.fade_seconds,
+            effect_seconds: rec.effect_seconds,
+            effect_start_seconds: rec.effect_start_seconds,
             transition_end_seconds: rec.transition_end_seconds,
             cue_seconds: rec.cue_seconds,
             playback_rate: rec.playback_rate,
@@ -207,6 +215,8 @@ impl From<TransitionPlan> for TransitionPlanRec {
             filter_sweep: plan.filter_sweep,
             vocal_overlap: plan.vocal_overlap,
             fade_seconds: plan.fade_seconds,
+            effect_seconds: plan.effect_seconds,
+            effect_start_seconds: plan.effect_start_seconds,
             transition_end_seconds: plan.transition_end_seconds,
             cue_seconds: plan.cue_seconds,
             playback_rate: plan.playback_rate,
@@ -3277,6 +3287,118 @@ mod tests {
         exact_f32_to_i16, exact_f32_to_i24, is_lossless_pcm_codec, select_supported_format,
         OutputFormat, OutputRange,
     };
+
+    /// The real-pair scorecard. Ignored by default because it reads the owner's
+    /// stream cache; `scripts/check-automix.sh` runs it with `--ignored`.
+    #[test]
+    #[ignore = "reads the owner's cached audio pairs"]
+    fn automix_corpus_scorecard() {
+        use super::{plan_automix_impl_with_tier, AutomixTier};
+        use std::path::PathBuf;
+
+        let root = std::env::var("AUTOMIX_CORPUS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join("Library/Caches/BitChord/audio")
+            });
+        let models = PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join("Library/Application Support/BitChord/Models");
+        let beat = models.join("beat_this.onnx");
+        let vocals = models.join("vocals_umxhq.onnx");
+        if beat.exists() && vocals.exists() {
+            crate::analyzer::configure(
+                beat.to_str().unwrap_or_default(),
+                vocals.to_str().unwrap_or_default(),
+            );
+        }
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "m4a"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        if files.len() < 3 {
+            println!("automix corpus: {} audio files under {} — need >= 3 for pairs", files.len(), root.display());
+            return;
+        }
+        let title = |path: &PathBuf| {
+            crate::metadata::read_track_metadata(&path.display().to_string())
+                .map(|meta| meta.title)
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .map(|stem| stem.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                })
+        };
+        let headers = std::collections::HashMap::new();
+        let pairs = files.len().saturating_sub(1).min(12);
+        let mut fades = Vec::new();
+        let mut effects = 0usize;
+        let mut unusable = 0usize;
+        println!("automix corpus: {pairs} pairs from {} files", files.len());
+        for index in 0..pairs {
+            let outgoing = &files[index];
+            let incoming = &files[index + 1];
+            let plan = plan_automix_impl_with_tier(
+                &outgoing.display().to_string(),
+                &incoming.display().to_string(),
+                &title(outgoing),
+                &title(incoming),
+                false,
+                0.0,
+                0.0,
+                0.0,
+                &headers,
+                &headers,
+                AutomixTier::Balanced,
+            );
+            let style = crate::mixer::TransitionPlan::from(plan.clone());
+            if plan.fade_seconds <= 0.0 {
+                unusable += 1;
+            }
+            if style.style.is_effect() {
+                effects += 1;
+            }
+            if plan.fade_seconds > 0.0 {
+                fades.push(plan.fade_seconds);
+            }
+            println!(
+                "{:>2}. {:?} fade={:.2}s effect={:.2}s end={:.2}s beat={:.3}s rate={:.4} | {} → {} | {}",
+                index + 1,
+                plan.style,
+                plan.fade_seconds,
+                plan.effect_seconds,
+                plan.transition_end_seconds,
+                plan.beat_seconds,
+                plan.playback_rate,
+                title(outgoing),
+                title(incoming),
+                plan.reason
+            );
+        }
+        let mut sorted = fades.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0.0);
+        println!(
+            "automix scorecard: usable {}/{}, median fade {:.2}s, effects {}/{}, min fade {:.2}s",
+            fades.len(),
+            pairs,
+            median,
+            effects,
+            pairs,
+            sorted.first().copied().unwrap_or(0.0)
+        );
+        // A′3 turns these into gates; A′2 reports them. The cached files are
+        // Opus-in-MP4 and the Rust analyser does not decode every one, so an
+        // unusable pair is reported, not asserted.
+        println!("automix scorecard: {unusable} pair(s) without a usable analysis");
+    }
 
     fn range(min_rate: u32, max_rate: u32, channels: usize, pcm16: bool) -> OutputRange {
         OutputRange {
