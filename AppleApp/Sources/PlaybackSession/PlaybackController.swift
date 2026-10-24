@@ -217,6 +217,10 @@ final class PlaybackController {
     private(set) var attemptedLyrics = false
     /// True while local audio analysis is filling in word timings.
     private(set) var lyricsAligning = false
+    /// True when the playing lyric's word timings were added by this app's
+    /// on-device alignment rather than arriving from the provider. Cleared on
+    /// every new fetch; see `alignFetchedLyricsIfNeeded`.
+    private(set) var lyricsAlignedLocally = false
     /// Re-run a lookup that began before the decoder reported the real duration.
     @ObservationIgnored private var lyricsNeedsDurationRefresh = false
     /// A newer retry for the same track must win over an older provider race.
@@ -3343,6 +3347,7 @@ final class PlaybackController {
         lyricsAlignmentTask?.cancel()
         lyricsAlignmentTask = nil
         lyricsAligning = false
+        lyricsAlignedLocally = false
         lyricsRequestGeneration &+= 1
         let requestGeneration = lyricsRequestGeneration
         lyricsNeedsDurationRefresh = false
@@ -3520,6 +3525,10 @@ final class PlaybackController {
                   self.lyricsRequestGeneration == requestGeneration
             else { return }
             self.lyricsAligning = false
+            // The mark is the honest one: it says the word timings came from
+            // this app's ears, not the provider's, so a listener who finds a
+            // badly-synced line knows whom to tell.
+            self.lyricsAlignedLocally = aligned
             self.lyricsAlignmentTask = nil
             NSLog("[BitChord] local lyric alignment %@ for %@",
                   aligned ? "added word timings" : "found no confident word matches",
