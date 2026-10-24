@@ -141,6 +141,11 @@ struct Analysis {
     /// Whole-track DSP vocal heuristic (`AnalyzeKeyAndTimbre`), not the model
     /// mask mean.
     vocal_probability: f64,
+    /// F-3: the beat length measured from the chosen **bar** grid (median bar
+    /// / 4), when the bars come from the PLL because the model's were
+    /// incomplete or an octave out. 0 means "use `beat_interval`". The tempo
+    /// and tier still use the model's bpm; only the phrase length follows this.
+    bar_beat_seconds: f64,
     /// Where the strongest analysis for this track came from.
     /// `music_understanding` | `beat_this` | `dsp` | `disk_cache`.
     analysis_source: String,
@@ -944,9 +949,17 @@ fn analyze(
     };
     match model_grid {
         Some(grid) => {
+            let model_bars = grid.downbeats.len();
+            let model_bpm = grid.bpm;
+            let (grid, bar_beat, bar_source) = reconcile_grid(&analysis, grid);
             log::info!(
-                "automix analysis {path}: beat model grid {:.1} bpm, {} downbeats, confidence {:.2}, \
-                 beats {} span {:.1}..{:.1} of {:.1}s",
+                "automix analysis {path}: bar grid from {} — model {:.1} bpm/{} bars, DSP {:.1} bpm/{} \
+                 bars; final {:.1} bpm, {} bars, model confidence {:.2}, beats {} span {:.1}..{:.1} of {:.1}s",
+                bar_source,
+                model_bpm,
+                model_bars,
+                analysis.bpm,
+                analysis.downbeats.len(),
                 grid.bpm,
                 grid.downbeats.len(),
                 grid.beat_confidence,
@@ -956,6 +969,7 @@ fn analyze(
                 duration,
             );
             fill_grid(&mut analysis, grid);
+            analysis.bar_beat_seconds = bar_beat;
         }
         None => {
             log::info!(
@@ -1069,6 +1083,96 @@ fn ingest_vocals(
         analysis.vocal_times.push(offset + index as f64 * hop);
         analysis.vocal_mask.push(value);
     }
+}
+
+/// F-3: the bar grid a plan is phrased on.
+///
+/// The Beat This! head is conservative and its tempo can be an octave out
+/// (196 On a 98 BPM record), while the DSP PLL grid runs continuously through
+/// the whole track and its downbeats matched 90-100% of the musical bars on
+/// the corpus. So the model keeps the grid when it is complete and in the
+/// same octave as the PLL; otherwise the PLL supplies the bars, phase-locked
+/// to the model's downbeats where the model has them, and the beat length is
+/// **measured from the bars** (median bar / 4) rather than from a possibly
+/// doubled tempo. The model keeps its beats, confidence and first beat, so
+/// the tier and the tempo-gap decision are unchanged.
+fn reconcile_grid(analysis: &Analysis, model: Grid) -> (Grid, f64, &'static str) {
+    let dsp_bars = &analysis.downbeats;
+    let usable_dsp = dsp_bars.len() >= 4
+        && analysis.beat_interval > 0.0
+        && dsp_bars.windows(2).all(|w| w[1] > w[0]);
+    let model_bars = model.downbeats.len();
+    let same_octave = analysis.bpm > 0.0
+        && (model.bpm / analysis.bpm).log2().fract().abs() < 0.15;
+    // A model grid that fires twice as often as the PLL is not "complete":
+    // it is over-dense, and its bars are not the musical bar.
+    let bar_ratio = model_bars as f64 / dsp_bars.len() as f64;
+    let model_complete = usable_dsp && (0.75..=1.25).contains(&bar_ratio) && same_octave;
+    if !usable_dsp || model_complete {
+        let source = if usable_dsp { "model (complete)" } else { "model (no PLL grid)" };
+        return (model, 0.0, source);
+    }
+    // The PLL is the backbone. Its phase is chosen by the model's downbeats:
+    // keep it when at least half of them sit on a PLL bar, otherwise try the
+    // four beat phases and take the best match.
+    let beat = analysis.beat_interval.max(1e-3);
+    let matches = |shift: f64| -> usize {
+        model
+            .downbeats
+            .iter()
+            .filter(|d| {
+                dsp_bars
+                    .iter()
+                    .any(|bar| (bar + shift - *d).abs() <= 0.04)
+            })
+            .count()
+    };
+    let mut best_shift = 0.0;
+    let mut best = matches(0.0);
+    for step in 1..4 {
+        let shift = step as f64 * beat;
+        let count = matches(shift);
+        if count > best {
+            best = count;
+            best_shift = shift;
+        }
+    }
+    let phase_ok = !model.downbeats.is_empty() && best * 2 >= model.downbeats.len();
+    if !phase_ok {
+        best_shift = 0.0;
+    }
+    let mut downbeats: Vec<f64> = dsp_bars
+        .iter()
+        .map(|bar| bar + best_shift)
+        .filter(|bar| bar.is_finite() && *bar >= 0.0)
+        .collect();
+    downbeats.sort_by(|a, b| a.total_cmp(b));
+    if downbeats.len() < 4 {
+        return (model, 0.0, "model (PLL too short)");
+    }
+    // The measured bar sets the beat, so a double-time model cannot halve the
+    // phrase. The model's beats/confidence/first beat stay.
+    let mut gaps: Vec<f64> = downbeats
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|g| g.is_finite() && *g > 0.0)
+        .collect();
+    gaps.sort_by(|a, b| a.total_cmp(b));
+    let bar_seconds = gaps.get(gaps.len() / 2).copied().unwrap_or(0.0);
+    if bar_seconds <= 0.4 {
+        return (model, 0.0, "model (PLL bars unusable)");
+    }
+    // The model keeps its tempo, beats and confidence — the tier and the
+    // tempo-gap decision are unchanged — and only the bars move to the PLL.
+    // The phrase length is measured from those bars (median / 4).
+    let mut grid = model;
+    grid.downbeats = downbeats;
+    let source = if best_shift.abs() < 1e-6 {
+        "PLL (phase kept)"
+    } else {
+        "PLL (phase shifted to the model)"
+    };
+    (grid, bar_seconds / 4.0, source)
 }
 
 fn fill_grid(analysis: &mut Analysis, grid: Grid) {
@@ -2562,6 +2666,29 @@ fn vocal_peak_between(analysis: &Analysis, start: f64, end: f64) -> Option<f64> 
 const BRIDGE_VOCAL_MEAN_MAX: f64 = 0.35;
 const BRIDGE_VOCAL_PEAK_MAX: f64 = 0.55;
 
+/// F-3: the chosen bar grid only has to be *usable*: enough bars, a median
+/// spacing in a musical range. The 15 ms test the instruction names is per
+/// **unit** — the loop's own steps are measured against the grid in
+/// [`bridge_unit`] — because the PLL's bars drift by 50-90 ms over a whole
+/// track while staying locally regular, which is exactly what a two-bar loop
+/// can use.
+fn bar_grid_usable(analysis: &Analysis) -> bool {
+    let bars = &analysis.downbeats;
+    if bars.len() < 5 {
+        return false;
+    }
+    let mut gaps: Vec<f64> = bars
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|g| g.is_finite() && *g > 0.0)
+        .collect();
+    if gaps.len() < 4 {
+        return false;
+    }
+    gaps.sort_by(|a, b| a.total_cmp(b));
+    (0.4..=8.0).contains(&gaps[gaps.len() / 2])
+}
+
 /// F: the unit to loop, or why there is none.
 ///
 /// Only a clean crossfade is eligible. The unit is a whole number of bars
@@ -2574,8 +2701,8 @@ fn bridge_unit(outgoing: &Analysis, plan: &TransitionPlan) -> Result<BridgeUnit,
     if !(plan.reason.starts_with("crossfade:") || plan.reason.starts_with("cold ending:")) {
         return Err("not a clean crossfade");
     }
-    if outgoing.beat_confidence < 0.55 || beat_seconds_of(outgoing) <= 0.0 {
-        return Err("no confident downbeat grid");
+    if beat_seconds_of(outgoing) <= 0.0 || !bar_grid_usable(outgoing) {
+        return Err("no regular bar grid");
     }
     let start = plan.transition_end_seconds - plan.fade_seconds;
     let chord = final_chord_attack(outgoing);
@@ -2810,6 +2937,9 @@ fn incoming_cue(analysis: &Analysis) -> f64 {
 /// the analyser's own range means the read failed, and a failed read must not
 /// become a 32-beat cue.
 fn beat_seconds_of(analysis: &Analysis) -> f64 {
+    if analysis.bar_beat_seconds.is_finite() && analysis.bar_beat_seconds > 0.0 {
+        return analysis.bar_beat_seconds;
+    }
     if !(MIN_BPM..=MAX_BPM).contains(&analysis.bpm) {
         return 0.0;
     }
@@ -4584,6 +4714,82 @@ mod tests {
         );
     }
 
+    fn test_grid(bpm: f64, bars: Vec<f64>, beats: Vec<f64>) -> crate::analyzer::beat::Grid {
+        crate::analyzer::beat::Grid {
+            beats,
+            downbeats: bars,
+            bpm,
+            beat_interval: 60.0 / bpm,
+            first_beat: 0.0,
+            beat_confidence: 0.8,
+        }
+    }
+
+    #[test]
+    fn a_complete_model_grid_keeps_its_bars() {
+        let bars: Vec<f64> = (0..=20).map(|i| i as f64 * 2.0).collect();
+        let mut out = analysis(0.0, 40.0, bars.clone());
+        out.bpm = 120.0;
+        out.beat_interval = 0.5;
+        let grid = test_grid(120.0, bars.clone(), (0..=80).map(|i| i as f64 * 0.5).collect());
+        let (chosen, phrase_beat, source) = reconcile_grid(&out, grid);
+        assert!(source.starts_with("model"), "{source}");
+        assert_eq!(phrase_beat, 0.0);
+        assert_eq!(chosen.downbeats, bars);
+    }
+
+    #[test]
+    fn a_sparse_model_grid_takes_the_pll_bars() {
+        let mut out = analysis(0.0, 40.0, (0..=20).map(|i| i as f64 * 2.0).collect());
+        out.bpm = 120.0;
+        out.beat_interval = 0.5;
+        let model = test_grid(
+            120.0,
+            vec![0.0, 10.0, 20.0],
+            (0..=80).map(|i| i as f64 * 0.5).collect(),
+        );
+        let (chosen, phrase_beat, source) = reconcile_grid(&out, model);
+        assert!(source.starts_with("PLL"), "{source}");
+        assert_eq!(chosen.downbeats.len(), 21);
+        assert!((phrase_beat - 0.5).abs() < 1e-6);
+        // The model's tempo and confidence survive for the tier.
+        assert_eq!(chosen.bpm, 120.0);
+        assert_eq!(chosen.beat_confidence, 0.8);
+    }
+
+    #[test]
+    fn an_off_phase_model_shifts_the_pll_bars_by_a_beat() {
+        let mut out = analysis(0.0, 40.0, (0..=20).map(|i| i as f64 * 2.0).collect());
+        out.bpm = 120.0;
+        out.beat_interval = 0.5;
+        let model = test_grid(
+            120.0,
+            vec![0.5, 10.5, 20.5],
+            (0..=80).map(|i| i as f64 * 0.5 + 0.5).collect(),
+        );
+        let (chosen, _, source) = reconcile_grid(&out, model);
+        assert!(source.contains("shifted"), "{source}");
+        assert!((chosen.downbeats[0] - 0.5).abs() < 1e-6, "{:?}", chosen.downbeats);
+    }
+
+    #[test]
+    fn a_double_time_model_keeps_its_tempo_but_not_its_half_bars() {
+        let mut out = analysis(0.0, 100.0, (0..=40).map(|i| i as f64 * 2.45).collect());
+        out.bpm = 98.0;
+        out.beat_interval = 0.612;
+        let model = test_grid(
+            196.0,
+            (0..=60).map(|i| i as f64 * 1.225).collect(),
+            (0..=200).map(|i| i as f64 * 0.306).collect(),
+        );
+        let (chosen, phrase_beat, source) = reconcile_grid(&out, model);
+        assert!(source.starts_with("PLL"), "{source}");
+        assert_eq!(chosen.bpm, 196.0, "the tier tempo must not change");
+        assert!((phrase_beat - 2.45 / 4.0).abs() < 1e-6, "{phrase_beat}");
+        // The phrase is now a musical 8 beats, not half of one.
+        assert!((8.0 * phrase_beat - 4.9).abs() < 0.1);
+    }
+
     /// F: a vocal-free, phrase-aligned unit after the blend start is replayed
     /// once, and the record's end moves by exactly that unit.
     #[test]
@@ -4691,17 +4897,30 @@ mod tests {
     }
 
     #[test]
-    fn a_low_confidence_grid_gets_no_bridge() {
+    fn an_irregular_bar_grid_gets_no_bridge() {
         let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
-        out.beat_confidence = 0.3;
+        out.beat_confidence = 0.8;
         out.content_end = 100.0;
-        with_energy(&mut out, 100.0, |_| 0.8);
+        // The model's confidence is no longer the gate: its bars are.
+        for (index, bar) in out.downbeats.iter_mut().enumerate() {
+            *bar += (index % 3) as f64 * 0.2;
+        }
+        with_energy(&mut out, 100.0, |time| {
+            if time < 80.0 {
+                0.8
+            } else {
+                0.8 * (1.0 - (time - 80.0) / 20.0).max(0.02)
+            }
+        });
+        for value in out.vocal_activity_mask.iter_mut() {
+            *value = 0.1;
+        }
         let mut plan = edge_plan(100.0, 8.0, 0.0);
         plan.reason = "crossfade: test".into();
         apply_bridge(&out, &mut plan);
         assert_eq!(plan.bridge_repeats, 0);
         assert!(
-            plan.reason.contains("bridge: none (no confident downbeat grid)"),
+            plan.reason.contains("bridge: none"),
             "{}",
             plan.reason
         );
