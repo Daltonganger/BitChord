@@ -565,6 +565,7 @@ struct NowPlayingView: View {
                 sourceLabel: controller.lyricsSourceLabel,
                 alignmentInProgress: controller.lyricsAligning,
                 alignedLocally: controller.lyricsAlignedLocally,
+                onChooseSource: { showLyricsSources = true },
                 onSeek: { controller.seek(to: $0) },
                 translator: controller.lyricsTranslator,
                 trackId: controller.current?.id ?? "",
@@ -757,6 +758,7 @@ struct NowPlayingView: View {
                 sourceLabel: controller.lyricsSourceLabel,
                 alignmentInProgress: controller.lyricsAligning,
                 alignedLocally: controller.lyricsAlignedLocally,
+                onChooseSource: { showLyricsSources = true },
                 onSeek: { controller.seek(to: $0) },
                 translator: controller.lyricsTranslator,
                 trackId: controller.current?.id ?? "",
@@ -2554,6 +2556,9 @@ struct LyricsPane: View {
     /// The word timings were added by this app's on-device alignment, not
     /// supplied by the provider — the attribution says so.
     var alignedLocally: Bool = false
+    /// Opens the per-track provider picker — shown with the no-lyrics state,
+    /// where it is most needed and previously unreachable.
+    var onChooseSource: (() -> Void)? = nil
     var onSeek: ((Double) -> Void)? = nil
     /// Absent where the caller has no track to translate, which is the case that
     /// matters: an empty lyric has nothing to translate and offering the control
@@ -2673,9 +2678,19 @@ struct LyricsPane: View {
                     .controlSize(.regular)
                     .tint(.white)
             } else if lines.isEmpty {
-                Text("No lyrics for this track.")
-                    .font(.title3)
-                    .foregroundStyle(.white.opacity(0.6))
+                VStack(spacing: 14) {
+                    Text("No lyrics for this track.")
+                        .font(.title3)
+                        .foregroundStyle(.white.opacity(0.6))
+                    if let onChooseSource {
+                        // Upstream's status row stays tappable when a track has
+                        // no lyric: the sources that lost the race are still
+                        // there, and "search again" can still answer.
+                        Button("Choose a Source…") { onChooseSource() }
+                            .buttonStyle(.bordered)
+                            .tint(.white)
+                    }
+                }
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     if let translator {

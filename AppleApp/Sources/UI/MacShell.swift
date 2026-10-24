@@ -305,6 +305,7 @@ struct MacInspectorPane: View {
 private struct MacLyricsInspector: View {
     @Environment(PlaybackController.self) private var controller
     @State private var offsetMs = LyricsOffsetBridge.offsetMs()
+    @State private var showProviderPicker = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
@@ -316,6 +317,8 @@ private struct MacLyricsInspector: View {
                 hasTrack: controller.current != nil,
                 sourceLabel: controller.lyricsSourceLabel,
                 alignmentInProgress: controller.lyricsAligning,
+                alignedLocally: controller.lyricsAlignedLocally,
+                onChooseSource: { showProviderPicker = true },
                 onSeek: { controller.seek(to: $0) },
                 translator: controller.lyricsTranslator,
                 trackId: controller.current?.id ?? "",
@@ -328,6 +331,9 @@ private struct MacLyricsInspector: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .lyricsOffsetChanged)) { _ in
             offsetMs = LyricsOffsetBridge.offsetMs()
+        }
+        .sheet(isPresented: $showProviderPicker) {
+            LyricsProviderSheet()
         }
     }
 }
