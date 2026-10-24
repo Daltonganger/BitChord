@@ -4,7 +4,7 @@ import BitChordShared
 /// One shelf of the signed-out Home/Explore feeds, decoded from the shared
 /// module's serialized `HomeFeed` (the bridge crosses FFI as JSON, same
 /// contract as search).
-struct FeedShelf: Codable, Identifiable {
+struct FeedShelf: Codable, Identifiable, Hashable {
     let title: String
     let items: [ShelfCard]
     let subtitle: String?
