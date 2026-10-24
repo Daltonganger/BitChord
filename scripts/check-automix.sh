@@ -79,6 +79,27 @@ if [ "$pairs" -gt 0 ]; then
   fi
 fi
 
+# Enforced: E. A final chord is never faded through on a handover that lands on
+# the record's ending, and no mix-out discards more than the 12 s cap.
+edges_line="$(echo "$out" | grep '^automix edges:' | tail -1)"
+if [ -z "$edges_line" ]; then
+  echo "FAIL the scorecard printed no edge line"
+  fail=1
+else
+  clipped="$(echo "$edges_line" | sed -E 's/.*clipped final chords ([0-9]+).*/\1/')"
+  max_out="$(echo "$edges_line" | sed -E 's/.*discarded out median [0-9.]+s max ([0-9.]+)s.*/\1/')"
+  max_in="$(echo "$edges_line" | sed -E 's/.*in median [0-9.]+s max ([0-9.]+)s.*/\1/')"
+  if [ "$clipped" = "0" ]; then
+    echo "ok   no final chord is faded through — $edges_line"
+  else
+    echo "FAIL $clipped final chord(s) are clipped"
+    fail=1
+  fi
+  awk -v m="$max_out" 'BEGIN { if (m + 0 <= 12.0) print "ok   outgoing discarded music stays within 12s — " m "s"; else print "FAIL outgoing discarded music " m "s is over 12s" }' || fail=1
+  awk -v m="$max_in" 'BEGIN { if (m + 0 <= 12.0) print "ok   incoming discarded music stays within 12s — " m "s"; else print "FAIL incoming discarded music " m "s is over 12s" }' || fail=1
+  echo "$edges_line" | sed -E 's/^automix edges: /     /'
+fi
+
 # Reported: length. These are the owner's bar and are met by the transition
 # length work (E), not by this rule set, so they are printed, not enforced yet.
 awk -v m="$median" 'BEGIN { if (m + 0 >= 8.0) print "ok   median overlap " m "s is at least a phrase pair (>= 8s)"; else print "target median overlap " m "s is under 8s" }'

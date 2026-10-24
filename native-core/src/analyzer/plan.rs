@@ -649,8 +649,10 @@ pub fn plan_pair(
 
     // The most ambitious move: a beat-matched, harmonically-compatible pair gets
     // a WSOLA phrase-switch before the adaptive overlap (upstream `phraseSwitch`).
-    let plan = phrase_switch(&out, &inc)
+    let mut plan = phrase_switch(&out, &inc)
         .unwrap_or_else(|| plan_from(&out, &inc, fade, allow_effects));
+    respect_music_edges(&out, &inc, &mut plan);
+    record_transition_edges(&out, &inc, &plan);
     log_plan(&out, &inc, &plan, tier_label);
     plan
 }
@@ -2318,6 +2320,186 @@ fn tempo_summary(out_bpm: f64, in_bpm: f64) -> String {
     }
     summary.push_str(&format!(", gap {:.0}%", (1.0 - ratio).abs() * 100.0));
     summary
+}
+
+/// Where a record's audible content ends (trailing silence removed).
+fn content_end_of(analysis: &Analysis) -> f64 {
+    if analysis.content_end > 0.0 {
+        analysis.content_end
+    } else {
+        analysis.duration
+    }
+}
+
+/// The last point the record is still at its loud level: the final chord's
+/// attack, or the last beat before the fade begins, depending on the ending.
+fn last_full_energy(analysis: &Analysis) -> Option<f64> {
+    let reference = loud_reference(analysis)?;
+    let end = content_end_of(analysis);
+    analysis
+        .energy_curve
+        .iter()
+        .filter(|point| point.time.is_finite() && point.time <= end + 1e-3)
+        .filter(|point| point.energy >= reference * 0.707)
+        .map(|point| point.time)
+        .next_back()
+}
+
+/// The attack of a final chord, if the record ends on one rather than fading.
+///
+/// Two shapes qualify: an abrupt end (the last loud point is within two
+/// seconds of the content end), and a final chord whose attack is a clear rise
+/// in the last twelve seconds. A fade-out is monotone and has no such rise, so
+/// it is left to the normal blend. The heuristic is deliberately conservative:
+/// it is better to miss a chord (the blend is merely longer) than to move every
+/// ending.
+fn final_chord_attack(analysis: &Analysis) -> Option<f64> {
+    let reference = loud_reference(analysis)?;
+    let end = content_end_of(analysis);
+    if end <= 0.0 {
+        return None;
+    }
+    let last_loud = last_full_energy(analysis)?;
+    if end - last_loud <= 2.0 {
+        return Some(last_loud);
+    }
+    let earliest = (end - 12.0).max(0.0);
+    let mut time = end - 0.5;
+    while time > earliest {
+        if let (Some(after), Some(before)) = (
+            energy_between(analysis, time, time + 0.25),
+            energy_between(analysis, time - 0.5, time - 0.05),
+        ) {
+            if after >= reference * 0.4 && after > before * 1.6 {
+                return Some(time);
+            }
+        }
+        time -= 0.1;
+    }
+    None
+}
+
+/// The first sustained vocal entry at or after `from`, in the mask's own
+/// resolution. Two active frames are required so one model blip cannot drag a
+/// cue back.
+fn first_vocal_onset(analysis: &Analysis, from: f64) -> Option<f64> {
+    let mask = &analysis.vocal_activity_mask;
+    if mask.is_empty() || mask.len() != analysis.energy_curve.len() {
+        return None;
+    }
+    let mut run = 0usize;
+    let mut run_start = 0.0;
+    for (index, value) in mask.iter().enumerate() {
+        let time = analysis.energy_curve[index].time;
+        if !time.is_finite() || time < from {
+            run = 0;
+            continue;
+        }
+        if value.is_finite() && *value >= VOCAL_ACTIVE_THRESHOLD {
+            if run == 0 {
+                run_start = time;
+            }
+            run += 1;
+            if run >= 2 {
+                return Some(run_start);
+            }
+        } else {
+            run = 0;
+        }
+    }
+    None
+}
+
+/// E: respect the music at both ends of the handover.
+///
+/// On the outgoing side a final chord keeps its attack at unity: the blend may
+/// not begin before it, and its natural decay carries the incoming rise. On the
+/// incoming side a vocal entry or hook is never skipped: a cue past the first
+/// sustained vocal is pulled back to it. A gapless album join is untouched.
+fn respect_music_edges(outgoing: &Analysis, incoming: &Analysis, plan: &mut TransitionPlan) {
+    if plan.style == TransitionStyle::Gapless {
+        return;
+    }
+    let entry = incoming_entry(incoming);
+    if let Some(onset) = first_vocal_onset(incoming, entry) {
+        if plan.cue_seconds > onset + 0.05 {
+            plan.cue_seconds = onset.max(entry);
+        }
+    }
+    let end = content_end_of(outgoing);
+    // Only the record's actual ending is protected. A plan that mixes out at
+    // an interior cliff is deliberately leaving before the ending, so moving
+    // it to the file's last chord would undo the analysis the plan is based on.
+    if (plan.transition_end_seconds - end).abs() > 1.5 {
+        return;
+    }
+    let Some(chord) = final_chord_attack(outgoing) else {
+        return;
+    };
+    if plan.transition_end_seconds < end {
+        plan.transition_end_seconds = end;
+    }
+    let start = plan.transition_end_seconds - plan.fade_seconds;
+    if start + 0.15 < chord {
+        plan.fade_seconds = (plan.transition_end_seconds - chord).max(0.1);
+        if plan.effect_seconds > plan.fade_seconds {
+            plan.effect_seconds = plan.fade_seconds;
+            plan.effect_start_seconds = (plan.transition_end_seconds - plan.effect_seconds).max(0.0);
+        }
+    }
+}
+
+/// The E scorecard numbers for the most recently planned transition.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TransitionEdges {
+    pub outgoing_discarded_seconds: f64,
+    pub incoming_discarded_seconds: f64,
+    pub cold_ending: bool,
+    pub blend_start_seconds: f64,
+    pub final_chord_seconds: Option<f64>,
+    pub clipped_final_chord: bool,
+}
+
+pub fn last_transition_edges() -> TransitionEdges {
+    transition_edges::get()
+}
+
+mod transition_edges {
+    use super::TransitionEdges;
+    use std::sync::{Mutex, OnceLock};
+
+    fn stored() -> &'static Mutex<TransitionEdges> {
+        static EDGES: OnceLock<Mutex<TransitionEdges>> = OnceLock::new();
+        EDGES.get_or_init(|| Mutex::new(TransitionEdges::default()))
+    }
+
+    pub(super) fn set(edges: TransitionEdges) {
+        *stored().lock().unwrap_or_else(|p| p.into_inner()) = edges;
+    }
+
+    pub(super) fn get() -> TransitionEdges {
+        *stored().lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+fn record_transition_edges(outgoing: &Analysis, incoming: &Analysis, plan: &TransitionPlan) {
+    let end = content_end_of(outgoing);
+    let start = plan.transition_end_seconds - plan.fade_seconds;
+    let chord = final_chord_attack(outgoing);
+    // A chord is only *clipped* when this plan hands over at the record's own
+    // ending and begins before the chord. An interior mix-out leaves the
+    // ending unplayed on purpose; that is the discarded-music figure, not a
+    // fade cutting the chord.
+    let ending_handover = (plan.transition_end_seconds - end).abs() <= 1.5;
+    transition_edges::set(TransitionEdges {
+        outgoing_discarded_seconds: (end - plan.transition_end_seconds).max(0.0),
+        incoming_discarded_seconds: (plan.cue_seconds - incoming.audible_start_time.max(0.0))
+            .max(0.0),
+        cold_ending: chord.is_some(),
+        blend_start_seconds: start,
+        final_chord_seconds: chord,
+        clipped_final_chord: ending_handover && chord.is_some_and(|attack| start + 0.15 < attack),
+    });
 }
 
 /// Where playback of the incoming track starts: the earliest point it makes
@@ -4011,4 +4193,96 @@ mod tests {
         ];
         assert_eq!(find_next_energy_dip(&flat_curve, 0.0), None);
     }
+    /// A 100 ms energy curve, the resolution the E heuristics read.
+    fn with_energy(a: &mut Analysis, seconds: f64, energy: impl Fn(f64) -> f64) {
+        let points = (0..((seconds / 0.1) as usize))
+            .map(|index| {
+                let time = index as f64 * 0.1;
+                super::audio_analysis::EnergyPoint {
+                    time,
+                    energy: energy(time),
+                }
+            })
+            .collect::<Vec<_>>();
+        a.vocal_activity_mask = vec![0.0; points.len()];
+        a.energy_curve = points;
+    }
+
+    fn edge_plan(end: f64, fade: f64, cue: f64) -> TransitionPlan {
+        TransitionPlan {
+            style: TransitionStyle::EqualPower,
+            fade_seconds: fade,
+            transition_end_seconds: end,
+            cue_seconds: cue,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_final_chord_keeps_its_attack_before_the_blend() {
+        let mut out = analysis(0.0, 60.0, vec![0.0, 2.0, 4.0]);
+        out.content_end = 60.0;
+        // A quiet break, then the final chord at 57 s.
+        with_energy(&mut out, 60.0, |time| if time < 57.0 { 0.08 } else { 0.8 });
+        let mut inc = analysis(0.0, 40.0, vec![0.0, 2.0, 4.0]);
+        with_energy(&mut inc, 40.0, |_| 0.8);
+        let mut plan = edge_plan(60.0, 8.0, 0.0);
+        respect_music_edges(&out, &inc, &mut plan);
+        let start = plan.transition_end_seconds - plan.fade_seconds;
+        assert!(start + 0.15 >= 57.0, "blend starts at {start:.2}s, before the chord");
+        assert!((plan.transition_end_seconds - 60.0).abs() < 1e-6);
+        record_transition_edges(&out, &inc, &plan);
+        let edges = last_transition_edges();
+        assert!(edges.cold_ending, "{edges:?}");
+        assert!(!edges.clipped_final_chord, "{edges:?}");
+    }
+
+    #[test]
+    fn a_fade_out_is_not_treated_as_a_final_chord() {
+        let mut out = analysis(0.0, 60.0, vec![0.0, 2.0, 4.0]);
+        out.content_end = 60.0;
+        with_energy(&mut out, 60.0, |time| {
+            if time < 50.0 {
+                0.8
+            } else {
+                0.8 * (1.0 - (time - 50.0) / 10.0).max(0.02)
+            }
+        });
+        assert!(final_chord_attack(&out).is_none());
+    }
+
+    #[test]
+    fn a_cue_past_a_vocal_entry_is_pulled_back() {
+        let mut out = analysis(0.0, 60.0, vec![0.0, 2.0, 4.0]);
+        with_energy(&mut out, 60.0, |_| 0.8);
+        let mut inc = analysis(0.0, 40.0, vec![0.0, 2.0, 4.0]);
+        with_energy(&mut inc, 40.0, |_| 0.8);
+        for (index, point) in inc.energy_curve.iter().enumerate() {
+            if point.time >= 4.0 {
+                inc.vocal_activity_mask[index] = 0.8;
+            }
+        }
+        let mut plan = edge_plan(60.0, 8.0, 6.0);
+        respect_music_edges(&out, &inc, &mut plan);
+        assert!(
+            (plan.cue_seconds - 4.0).abs() < 0.05,
+            "cue {} did not move to the entry",
+            plan.cue_seconds
+        );
+    }
+
+    #[test]
+    fn a_cold_ending_ringing_past_the_plan_end_is_kept() {
+        let mut out = analysis(0.0, 60.0, vec![0.0, 2.0, 4.0]);
+        out.content_end = 50.0;
+        with_energy(&mut out, 50.0, |time| if time < 44.0 { 0.08 } else { 0.8 });
+        let mut inc = analysis(0.0, 40.0, vec![0.0, 2.0, 4.0]);
+        with_energy(&mut inc, 40.0, |_| 0.8);
+        let mut plan = edge_plan(49.0, 6.0, 0.0);
+        respect_music_edges(&out, &inc, &mut plan);
+        assert!((plan.transition_end_seconds - 50.0).abs() < 1e-6);
+        let start = plan.transition_end_seconds - plan.fade_seconds;
+        assert!(start + 0.15 >= 44.0, "start {start:.2}s clips the chord");
+    }
+
 }

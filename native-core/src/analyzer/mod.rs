@@ -23,7 +23,8 @@ mod vocal;
 pub use beat::Grid;
 pub use models::analyzer_ready;
 pub use plan::{
-    last_analysis_sources, next_energy_dip, plan_pair, seed_analysis_overlay, AnalysisOverlay,
+    last_analysis_sources, last_transition_edges, next_energy_dip, plan_pair,
+    seed_analysis_overlay, AnalysisOverlay, TransitionEdges,
 };
 pub use sequencer::{rank_candidate_indices, rank_candidates, CandidateScore};
 pub use smoothness::{score_plan, SmoothnessReport};
