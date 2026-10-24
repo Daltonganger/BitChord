@@ -94,6 +94,66 @@ object PlayerBridge {
         StreamResolver.onPlaybackRefused(url, responseCode)
     }
 
+    /**
+     * Ask what the video side of a track would be, without touching the
+     * playback path's request shape (O9's spike, audit §O9 item 8).
+     *
+     * Deliberately not cancellable: it is a developer probe that runs for a
+     * handful of ids, and a caller that walks away can ignore the answer.
+     */
+    fun probeVideo(videoId: String, callback: ProbeCallback) {
+        val generation = Innertube.sessionGeneration
+        bridgeScope.launch {
+            try {
+                Innertube.checkSession(generation)
+                val probe = UpstreamPlaybackExtractor.probeVideo(videoId)
+                    ?: throw IllegalStateException("No video stream for $videoId")
+                Innertube.checkSession(generation)
+                callback.onResult(json.encodeToString(VideoProbePayload.serializer(), probe.toPayload()), null)
+            } catch (e: Throwable) {
+                DebugLog.e("video probe failed for $videoId", e)
+                callback.onResult(null, e.message ?: e.toString())
+            }
+        }
+    }
+
+    fun interface ProbeCallback {
+        fun onResult(json: String?, message: String?)
+    }
+
+    @Serializable
+    data class VideoProbePayload(
+        val videoUrl: String? = null,
+        val videoWidth: Int? = null,
+        val videoHeight: Int? = null,
+        val videoItag: Int? = null,
+        val videoMimeType: String? = null,
+        val videoCodecs: String? = null,
+        val videoBitrate: Int? = null,
+        val availableVideoHeights: List<Int> = emptyList(),
+        val videoUrlHasNParameter: Boolean = false,
+        val clientName: String,
+        val profileId: String,
+        val musicVideoType: String? = null,
+        val selection: String,
+    )
+
+    private fun VideoProbe.toPayload() = VideoProbePayload(
+        videoUrl = videoUrl,
+        videoWidth = width,
+        videoHeight = height,
+        videoItag = itag,
+        videoMimeType = mimeType,
+        videoCodecs = codecs,
+        videoBitrate = bitrate,
+        availableVideoHeights = availableVideoHeights,
+        videoUrlHasNParameter = hasNParameter,
+        clientName = clientName,
+        profileId = profileId,
+        musicVideoType = musicVideoType,
+        selection = selection,
+    )
+
     @Serializable
     data class StreamPayload(
         val url: String,
