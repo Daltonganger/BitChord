@@ -99,6 +99,9 @@ struct MoodGenre: Codable, Identifiable, Hashable {
     /// afterwards, one section at a time, so the first covers to arrive are on
     /// screen while the rest are still being asked for.
     var thumbnailUrl: String?
+    /// YouTube Music's own stripe colour for the button, as ARGB; nil when the
+    /// button carries none and the tile falls back to its muted palette.
+    let stripeColor: Int64?
     var id: String { "\(browseId)?\(params ?? "")" }
 }
 
