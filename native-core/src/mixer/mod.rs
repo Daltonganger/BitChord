@@ -489,12 +489,15 @@ fn automix_gains(progress: f64, plan: &TransitionPlan, hold: f64) -> (f32, f32) 
 }
 
 /// The incoming's level under the held outgoing during a cold ending's phrase,
-/// as a linear gain (−12 dB). The next record has to be audible under the final
-/// chord, but an equal-power rise across the whole blend would have it at 0.7
-/// by the time the chord is struck — a +2 dB lift exactly where the listener is
-/// paying attention to the ending. Rising to an underlay first keeps that below
-/// a decibel and still lets the incoming take over across the decay.
-const COLD_END_UNDERLAY: f64 = 0.25;
+/// in dB **relative to its own matched level**: the same scale into which
+/// `mix_into` folds the transition match and the incoming's normalization. It
+/// is never an absolute level, so a quiet record and a loud one both sit 12 dB
+/// under the chord. The next record has to be audible under the final chord,
+/// but an equal-power rise across the whole blend would have it at 0.7 by the
+/// time the chord is struck — a +2 dB lift exactly where the listener is paying
+/// attention to the ending. Rising to an underlay first keeps that below a
+/// decibel and still lets the incoming take over across the decay.
+const COLD_END_UNDERLAY_DB: f64 = -12.0;
 
 /// The `(rise, fall)` pair when a cold ending holds the outgoing at unity until
 /// its final chord, at `hold` (a fraction of the fade).
@@ -510,14 +513,15 @@ fn cold_end_gains(progress: f64, hold: f64) -> (f32, f32) {
     if h <= 0.0 {
         return fade_gains(p, false);
     }
+    let underlay = db_to_gain(COLD_END_UNDERLAY_DB);
     if p <= h {
         // The chord is still ahead: the outgoing is at unity and the next
         // record is only establishing itself underneath it.
-        let rise = COLD_END_UNDERLAY * smoothstep(p / h);
+        let rise = underlay * smoothstep(p / h);
         return (rise as f32, 1.0);
     }
     let angle = ((p - h) / (1.0 - h)) * core::f64::consts::FRAC_PI_2;
-    let rise = COLD_END_UNDERLAY + (1.0 - COLD_END_UNDERLAY) * angle.sin();
+    let rise = underlay + (1.0 - underlay) * angle.sin();
     (rise as f32, angle.cos() as f32)
 }
 
@@ -934,10 +938,16 @@ impl Voice {
 
     /// Matches this deck's level to the one it is fading in over.
     ///
-    /// Armed when the blend is armed, so the correction is already in place by
-    /// the time the incoming deck becomes audible — a correction that arrived
-    /// during the fade would be a second, competing ramp.
+    /// Armed when the blend is armed, and the correction is **applied** here
+    /// rather than ramped in during the first 0.4 s of the fade: the owner's
+    /// "the next song blasts, then corrects" is exactly that late ramp. The
+    /// fade gain is zero at the first audible frame and the incoming's own
+    /// normalization is settled at the same time, so setting the targets here
+    /// has no step to click — there is nothing audible yet to step.
     fn arm_transition_match(&mut self, outgoing: Option<&Voice>, normalization: bool) {
+        // The incoming's own normalization also ramps for 50 ms inside
+        // `mix_into`; the first audible frame must already carry it.
+        self.smoothed_normalization = normalization_gain(self, normalization).0;
         let Some(outgoing) = outgoing else { return };
         let Some(db) = DeckLoudness::match_gain_db(
             self.deck_loudness(normalization),
@@ -949,8 +959,9 @@ impl Voice {
             return;
         }
         self.match_db = db as f32;
+        self.smoothed_match = db_to_gain(db) as f32;
         self.match_releasing = false;
-        log::info!("transition loudness match: {db:+.1} dB");
+        log::info!("transition loudness match: {db:+.1} dB (applied before the first frame)");
     }
 
     /// Walks the correction back to none after the blend.
@@ -4524,6 +4535,49 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    /// A beat-aligned kick pattern (55 Hz, one per beat) plus independent
+    /// noise: two of these with different seeds share their kicks and not their
+    /// noise, which is the correlated case a real beat-matched DjBlend has.
+    fn kick_wav(
+        path: &std::path::Path,
+        seconds: f32,
+        seed: u32,
+        kick: f32,
+        noise: f32,
+    ) {
+        let rate = 44_100u32;
+        let frames = (rate as f32 * seconds) as usize;
+        let data_len = frames * 4;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data_len as u32).to_le_bytes());
+        let mut state: u32 = seed.max(1);
+        for i in 0..frames {
+            let t = i as f32 / rate as f32;
+            let phase = t % 0.5;
+            let envelope = (-phase * 28.0).exp();
+            let body = (2.0 * std::f32::consts::PI * 55.0 * phase).sin() * envelope * kick;
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let unit = (state >> 8) as f32 / 16_777_216.0;
+            let sample = (body + (unit * 2.0 - 1.0) * noise) * i16::MAX as f32;
+            let value = sample as i16;
+            bytes.extend_from_slice(&value.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
     fn rms_window(samples: &[f32], start_frame: usize, frames: usize) -> f64 {
         let start = (start_frame * 2).min(samples.len());
         let end = ((start_frame + frames) * 2).min(samples.len());
@@ -4714,6 +4768,141 @@ mod tests {
             "the seam is a hole or a bump ({seam_level} vs {unit_level})"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    /// G: the transition match and the incoming's normalization are targets
+    /// **before** the first audible frame, not ramps through the first 0.4 s.
+    /// The owner hears the old shape as "the next song blasts, then corrects".
+    #[test]
+    fn a_transition_match_is_settled_before_the_first_audible_frame() {
+        let dir = std::env::temp_dir().join(format!("bitchord-match-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let loud = dir.join("loud.wav");
+        let quiet = dir.join("quiet.wav");
+        noise_wav(&loud, 0.0, 6.0, 0.5, 0x51DC_1A2B);
+        noise_wav(&quiet, 0.0, 6.0, 0.5, 0x77EE_3C4D);
+        let mut outgoing_source = transition_source(&loud);
+        outgoing_source.loudness_db = Some(-2.0);
+        let mut incoming_source = transition_source(&quiet);
+        incoming_source.loudness_db = Some(-8.0);
+        let mut outgoing =
+            Voice::open(&outgoing_source, false, 0.0, 48_000, 1.0, false, false).unwrap();
+        let mut incoming =
+            Voice::open(&incoming_source, false, 0.0, 48_000, 1.0, false, false).unwrap();
+        incoming.arm_transition_match(Some(&outgoing), false);
+        assert!(
+            (incoming.match_db - 6.0).abs() < 1e-6,
+            "expected a +6 dB match, got {}",
+            incoming.match_db
+        );
+        let target = db_to_gain(6.0) as f32;
+        assert!(
+            (incoming.smoothed_match - target).abs() < 1e-6,
+            "the match is set at arm, not ramped at the fade: {} vs {target}",
+            incoming.smoothed_match
+        );
+        let rate = 48_000usize;
+        let mut levels = Vec::new();
+        for window in 0..3 {
+            let frames = incoming.pull(rate, rate as u32);
+            let mut mixed = vec![0.0f32; frames.len()];
+            incoming.mix_into(&frames, &mut mixed, 1.0, false);
+            if window == 0 {
+                assert!(
+                    (mixed[0] / frames[0] - target).abs() < 1e-4,
+                    "the first audible sample is not at the match: {} vs {target}",
+                    mixed[0] / frames[0]
+                );
+            }
+            levels.push(rms_window(&mixed, 0, rate));
+        }
+        for pair in levels.windows(2) {
+            let jump = 20.0 * (pair[1] / pair[0]).log10();
+            assert!(
+                jump.abs() < 1.0,
+                "the incoming's first seconds jump by {jump:.2} dB: {levels:?}"
+            );
+        }
+        std::fs::remove_file(&loud).ok();
+        std::fs::remove_file(&quiet).ok();
+    }
+
+    /// G: a beat-matched DjBlend of two records with the same kick pattern is
+    /// the correlated case B's independent-noise harness cannot see. The bass
+    /// swap has to keep the aligned kicks from summing to +3 dB.
+    #[test]
+    fn a_correlated_dj_blend_does_not_bump_at_the_midpoint() {
+        const RATE: usize = 48_000;
+        const BEAT: f64 = 0.5;
+        const FADE: f64 = 8.0;
+        const CHUNK: usize = 512;
+        let dir = std::env::temp_dir().join(format!("bitchord-djcorr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let outgoing_path = dir.join("kick-a.wav");
+        let incoming_path = dir.join("kick-b.wav");
+        kick_wav(&outgoing_path, 12.0, 0x1234_5678, 0.45, 0.15);
+        kick_wav(&incoming_path, 12.0, 0x9E37_79B9, 0.45, 0.15);
+        let mut outgoing = open_voice(&outgoing_path);
+        let mut incoming = open_voice(&incoming_path);
+        incoming.gain = 0.0;
+        incoming.applied_gain = 0.0;
+        prime_voice(&mut incoming, RATE as u32);
+        let plan = TransitionPlan {
+            style: TransitionStyle::DjBlend,
+            bass_swap: true,
+            bass_swap_fraction: 0.62,
+            bed_fraction: 0.4,
+            bed_gain_db: -14.0,
+            dip_depth: 0.2,
+            dip_width: 0.08,
+            fade_seconds: FADE,
+            beat_seconds: BEAT,
+            ..Default::default()
+        };
+        let fade_frames = (FADE * RATE as f64) as usize;
+        let mut mixed = Vec::with_capacity(fade_frames * 2);
+        let mut out_raw = Vec::with_capacity(fade_frames * 2);
+        let mut in_raw = Vec::with_capacity(fade_frames * 2);
+        let mut done = 0usize;
+        while done < fade_frames {
+            let p = done as f64 / fade_frames as f64;
+            ride_filters(p, &plan, &mut outgoing.filter, &mut incoming.filter);
+            let (rise, fall) = automix_gains(p, &plan, 0.0);
+            let a = outgoing.pull(CHUNK, RATE as u32);
+            let b = incoming.pull(CHUNK, RATE as u32);
+            let mut out = vec![0.0f32; CHUNK * 2];
+            outgoing.mix_into(&a, &mut out, fall, false);
+            incoming.mix_into(&b, &mut out, rise, false);
+            let mut a_pad = a;
+            a_pad.resize(CHUNK * 2, 0.0);
+            let mut b_pad = b;
+            b_pad.resize(CHUNK * 2, 0.0);
+            out_raw.extend_from_slice(&a_pad);
+            in_raw.extend_from_slice(&b_pad);
+            mixed.extend_from_slice(&out);
+            done += CHUNK;
+        }
+        let window = 3 * RATE;
+        let span = fade_frames.saturating_sub(window);
+        let mut dip = 0.0f64;
+        let mut rise = 0.0f64;
+        let mut at = 0;
+        while at <= span {
+            let m = 20.0 * rms_window(&mixed, at, window).max(1e-9).log10();
+            let o = 20.0 * rms_window(&out_raw, at, window).max(1e-9).log10();
+            let i = 20.0 * rms_window(&in_raw, at, window).max(1e-9).log10();
+            dip = dip.min(m - o.min(i));
+            rise = rise.max(m - o.max(i));
+            at += 4_800;
+        }
+        println!("DjBlend correlated: 3s dip {dip:.2} dB, rise {rise:.2} dB");
+        assert!(dip > -3.0, "the correlated blend dipped {dip:.2} dB");
+        assert!(
+            rise < 2.0,
+            "the aligned kicks lift the blend by {rise:.2} dB; the bass swap did not separate them"
+        );
+        std::fs::remove_file(&outgoing_path).ok();
+        std::fs::remove_file(&incoming_path).ok();
     }
 
     #[test]
@@ -5150,9 +5339,11 @@ mod tests {
 
         incoming.arm_transition_match(Some(&outgoing), false);
         assert!((incoming.match_db - 6.0).abs() < 1e-6, "armed {}", incoming.match_db);
+        // G: the correction is in place at arm, before the incoming is audible.
+        // A ramp here is the owner's "blasts, then corrects" complaint.
         assert!(
-            (incoming.smoothed_match - 1.0).abs() < 1e-6,
-            "the match jumped at arm time: {}",
+            (incoming.smoothed_match - db_to_gain(6.0) as f32).abs() < 1e-6,
+            "the match was not in place at arm: {}",
             incoming.smoothed_match
         );
 
@@ -6688,8 +6879,14 @@ mod tests {
             "the final chord is faded through: {fall}"
         );
         assert!(
-            (rise - COLD_END_UNDERLAY as f32).abs() < 1e-6,
+            (rise as f64 - db_to_gain(COLD_END_UNDERLAY_DB)).abs() < 1e-6,
             "the incoming is not underneath at the chord: {rise}"
+        );
+        // Relative to the incoming's own matched level, never an absolute one.
+        let underlay_db = 20.0 * (rise as f64).log10();
+        assert!(
+            (underlay_db + 12.0).abs() < 0.01,
+            "the underlay is {underlay_db:.2} dB, not −12 dB under the matched level"
         );
         // It has started to leave immediately after the chord.
         let (_, after) = cold_end_gains(hold + 0.02, hold);
