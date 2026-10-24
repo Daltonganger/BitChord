@@ -555,6 +555,7 @@ struct NowPlayingView: View {
         TimelineView(.animation) { timeline in
             LyricsPane(
                 lines: controller.displayedLyrics,
+                originalLines: controller.lyrics,
                 loading: controller.lyricsLoading,
                 position: controller.livePosition(at: timeline.date),
                 hasTrack: controller.current != nil,
@@ -745,6 +746,7 @@ struct NowPlayingView: View {
             TimelineView(.animation) { timeline in
             LyricsPane(
                 lines: controller.displayedLyrics,
+                originalLines: controller.lyrics,
                 loading: controller.lyricsLoading,
                 position: controller.livePosition(at: timeline.date),
                 hasTrack: controller.current != nil,
@@ -2446,6 +2448,9 @@ struct LyricShareCard: View {
     /// was skipped between two picks.
     struct Line {
         var text: String
+        /// The romanization or translation drawn small underneath, when the
+        /// line has one that differs (upstream's `LyricsShareLine.subText`).
+        var subText: String? = nil
         var isGap: Bool = false
     }
 
@@ -2486,10 +2491,18 @@ struct LyricShareCard: View {
                             .font(.title3.weight(.semibold))
                             .foregroundStyle(.white.opacity(0.4))
                     } else {
-                        Text(line.text)
-                            .font(.title2.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(line.text)
+                                .font(.title2.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let sub = line.subText {
+                                Text(sub)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.white.opacity(0.72))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                     }
                 }
             }
@@ -2524,6 +2537,10 @@ struct LyricShareCard: View {
 
 struct LyricsPane: View {
     var lines: [LyricLineDto]
+    /// The lyric before translation, when the caller has it. The pane shows
+    /// the translation in place; the share card needs both, original above and
+    /// translation underneath.
+    var originalLines: [LyricLineDto]? = nil
     var loading: Bool
     var position: Double
     var hasTrack: Bool
@@ -2846,7 +2863,18 @@ struct LyricsPane: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.white.opacity(0.10), in: Capsule())
-        .task(id: selection) { renderShareCard() }
+        .task(id: shareCardKey) { renderShareCard() }
+    }
+
+    /// What makes the card worth re-rendering: the pick, and whether the
+    /// translation it would quote underneath has arrived or changed.
+    private var shareCardKey: ShareCardKey {
+        ShareCardKey(selection: selection, translated: translator?.translatedLines != nil)
+    }
+
+    private struct ShareCardKey: Equatable {
+        var selection: Set<Int>
+        var translated: Bool
     }
 
     private func toggleShareSelection(_ index: Int) {
@@ -2861,8 +2889,12 @@ struct LyricsPane: View {
     /// The picked lines as the card draws them. A jump over unchosen lines
     /// becomes the omission mark, so the picture says the verse was cut rather
     /// than letting two distant halves read as if they ran on (upstream
-    /// LyricsShare.kt:249).
+    /// LyricsShare.kt:249). The line quoted is the original and the translation
+    /// travels as its sub-line — the pane shows the translation in place, but a
+    /// card that never says what was actually sung is not a quote.
     private var pickedCardLines: [LyricShareCard.Line] {
+        let subLines = translator?.translatedLines
+        let subbed = subLines?.count == lines.count
         var out: [LyricShareCard.Line] = []
         var previous = -1
         for index in selection.sorted() {
@@ -2870,7 +2902,17 @@ struct LyricsPane: View {
             if previous >= 0, index > previous + 1 {
                 out.append(LyricShareCard.Line(text: "", isGap: true))
             }
-            out.append(LyricShareCard.Line(text: lines[index].text))
+            let original = originalLines?.indices.contains(index) == true
+                ? originalLines![index].text
+                : lines[index].text
+            let sub = subbed ? subLines?[index].text : nil
+            out.append(LyricShareCard.Line(
+                text: original,
+                subText: sub.flatMap {
+                    let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmed.isEmpty || $0 == original ? nil : $0
+                }
+            ))
             previous = index
         }
         return out
