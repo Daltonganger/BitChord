@@ -158,6 +158,11 @@ struct BitChordApp: App {
                         controller.reactivateAudioSessionAfterForeground()
                     }
                 }
+                #if os(macOS)
+                // Bare Space / ← / → live here rather than in the menu: see
+                // `MacTransportKeys`.
+                .modifier(MacTransportKeys(controller: controller))
+                #endif
                 .onOpenURL { url in
                     // Handling lives here, on the scene, rather than on `RootView`.
                     // It was installed in both places, so whichever ran second

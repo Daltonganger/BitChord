@@ -11,8 +11,10 @@ import BitChordShared
 /// The set is deliberately Music's, and the transport bindings are the ones
 /// people already have in their fingers:
 ///
-///  - Space — play-pause
-///  - ← → — previous / next track
+///  - Space — play-pause (handled in the content, not as a menu key equivalent:
+///    a menu key with no modifier wins over a focused text field)
+///  - ← → — previous / next track, the same way; ⇧⌘← ⇧⌘→ in the menu
+///  - ⌘P — play-pause from the menu, for when the content does not have focus
 ///  - ⌥⌘← ⌥⌘→ — seek back / forward ten seconds
 ///  - ⇧⌘S ⇧⌘R — shuffle / cycle repeat
 ///  - ⌘↑ ⌘↓ — volume
@@ -71,18 +73,23 @@ struct PlaybackCommands: Commands {
         }
 
         CommandMenu("Controls") {
+            // Modifier shortcuts only. A menu key equivalent with no modifier wins
+            // over the focused text field on macOS, so Space and the bare arrows
+            // would have typed nothing in Search and toggled playback instead; the
+            // bare keys are handled in `MacTransportKeys`, where a field editor
+            // has already consumed them by the time they could arrive.
             Button(controller.isPlaying ? "Pause" : "Play") {
                 controller.togglePlayPause()
             }
-            .keyboardShortcut(.space, modifiers: [])
+            .keyboardShortcut("p", modifiers: .command)
             .disabled(controller.current == nil)
 
             Button("Next Track") { controller.next() }
-                .keyboardShortcut(.rightArrow, modifiers: [])
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .shift])
                 .disabled(!controller.canPlayNext)
 
             Button("Previous Track") { controller.previous() }
-                .keyboardShortcut(.leftArrow, modifiers: [])
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .shift])
                 .disabled(!controller.canPlayPrevious)
 
             Divider()
@@ -128,7 +135,9 @@ struct PlaybackCommands: Commands {
         // like or a download means.
         CommandMenu("Track") {
             if let entry = controller.current {
-                Button("Play") { controller.play([entry], at: 0) }
+                // No "Play" row: it would replace the queue with this one song and
+                // restart it, which is not what a menu that acts on the *current*
+                // track should do to the listener's queue.
                 Button("Play Next") {
                     controller.playNext(entry)
                     toast.queueNotice("Playing next: \(entry.title)")
