@@ -84,6 +84,12 @@ struct SettingsView: View {
     @State private var backupNote: String?
     @State private var cacheLimitMB = SettingsView.cacheLimitMegabytes()
     @State private var cacheUnlimited = SettingsView.cacheIsUnlimited()
+    /// Whether the Library's folder list offers the cached-songs browser. Off by
+    /// default, as upstream's storage switch is: the cache is a storage detail,
+    /// not a music library, until somebody asks to browse it.
+    @State private var showCachedSongs = PlatformSettings.shared.getBoolean(
+        key: "show_cached_songs_in_library", default: false
+    )
     @State private var loginPresented = false
     @State private var discordPresented = false
     /// The Automix models offer, raised when Automix is switched on without the
@@ -1008,6 +1014,18 @@ struct SettingsView: View {
                     )
                     Task { await StreamFileCache.shared.trim() }
                 }
+            // Upstream gates the Library's cached-songs folder on a switch like
+            // this one. The row used to be always visible, which put a storage
+            // detail in the middle of somebody's music.
+            SettingsToggleLine(
+                glyph: .storage,
+                title: "Show Cached Songs in Library",
+                subtitle: "Adds the stream cache to the Library's folders",
+                isOn: $showCachedSongs
+            )
+            .onChange(of: showCachedSongs) { _, on in
+                PlatformSettings.shared.putBoolean(key: "show_cached_songs_in_library", value: on)
+            }
             Button {
                 Task {
                     await StreamFileCache.shared.clear()
