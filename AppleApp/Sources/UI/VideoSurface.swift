@@ -67,6 +67,12 @@ final class VideoPlayback {
     /// track, so a body pass cannot turn into a request loop.
     private func reconcile() {
         guard gate.canRequest, let id = gate.trackId else {
+            if gate.enabled, mountedId != nil || resolveTask != nil {
+                NSLog(
+                    "[BitChord] video: stopped (surfaces=%d active=%@ track=%@)",
+                    gate.surfaces, gate.active ? "yes" : "no", gate.trackId ?? "none"
+                )
+            }
             stop()
             return
         }
@@ -94,13 +100,19 @@ final class VideoPlayback {
                 // The audit's art-track guard: a square picture is the sleeve,
                 // not a music video, even when it happens to be AVC/MP4.
                 if side.url != nil, side.looksLikeMusicVideo {
+                    NSLog("[BitChord] video %@: attaching the picture", id)
                     self.side = side
                     self.controller.attach(side)
                 } else {
+                    NSLog(
+                        "[BitChord] video %@: no picture (%@)", id,
+                        side.url == nil ? "no AVC/MP4 rendition" : "not a music video: the art track's square sleeve"
+                    )
                     self.side = nil
                     self.controller.detach()
                 }
             } catch {
+                NSLog("[BitChord] video %@: resolve failed: %@", id, String(describing: error))
                 guard !Task.isCancelled, self.mountedId == id else { return }
                 self.resolvedId = id
                 self.resolveTask = nil
@@ -113,6 +125,7 @@ final class VideoPlayback {
     /// The picture failed (usually an expired signed URL): ask once more,
     /// bypassing the shared cache, then let the artwork stay.
     func videoFailed() {
+        NSLog("[BitChord] video %@: the player failed", gate.trackId ?? "-")
         guard gate.canRequest, let id = gate.trackId,
               mountedId == id, resolvedId == id, retriedId != id else { return }
         retriedId = id

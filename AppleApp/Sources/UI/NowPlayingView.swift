@@ -36,6 +36,9 @@ struct NowPlayingView: View {
     @State private var lyricsScrubbing = false
     @State private var volumeDragging = false
     @State private var showOutputDevice = false
+    /// The same switch as Settings ▸ Playback ▸ Show Music Videos, flipped
+    /// from the pill while the track plays.
+    @AppStorage("show_music_videos") private var showMusicVideos = false
     @State private var showPipeline = false
     @State private var showLyricsOffset = false
     @State private var showLyricsSources = false
@@ -1169,6 +1172,29 @@ struct NowPlayingView: View {
                 pillDivider
             }
 #endif
+
+            if pane == .main {
+                Button {
+                    let enabled = !showMusicVideos
+                    Haptics.play(enabled ? .toggleOn : .toggleOff)
+                    showMusicVideos = enabled
+                } label: {
+                    Image(systemName: showMusicVideos ? "play.rectangle.fill" : "play.rectangle")
+                        .scaledFont(size: 22, weight: .regular)
+                        .foregroundStyle(.white.opacity(showMusicVideos ? 1 : 0.75))
+                        .frame(width: outputPartyButtonWidth, height: 44)
+                        .background(.white.opacity(showMusicVideos ? 0.14 : 0))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("player.musicVideos")
+                .accessibilityLabel("Music Videos")
+                .accessibilityValue(showMusicVideos ? "On" : "Off")
+                .accessibilityAddTraits(showMusicVideos ? .isSelected : [])
+                .help(showMusicVideos ? "Music videos on" : "Music videos off")
+
+                pillDivider
+            }
 
             Button {
                 Haptics.play(.tap)
