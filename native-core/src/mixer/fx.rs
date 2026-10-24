@@ -4,17 +4,24 @@
 //! each other for a while, which only sounds right when their grids agree. The
 //! techniques here are the ones a DJ reaches for when they don't: the outgoing
 //! record is *finished off* by an effect — an echo, a beat repeat, a reverb, a
-//! filter build — and the incoming one lands on its own downbeat at full level.
-//! The two never have to agree on tempo, because they barely overlap.
+//! filter build — and the incoming one lands on its cue.
+//!
+//! They still cross over. Every technique ramps the outgoing dry down while the
+//! incoming ramps up over an overlap of **two beats or one second, whichever is
+//! longer** (a quarter beat, minimum 60 ms, for DropCut), so the incoming is
+//! never a step from silence and the outgoing dry never cuts while the incoming
+//! is still silent. Echo and reverb tails ring over the crossing. Loop roll and
+//! cut grow their windows by the overlap; the echo and the wash already have
+//! room after their landing.
 //!
 //! Each technique is a schedule over the transition window, in frames:
 //!
 //! | technique   | outgoing deck                                   | incoming lands |
 //! |-------------|--------------------------------------------------|----------------|
-//! | Echo out    | dry until the drop, echo thrown on the last beat, tail rings out | after 1 beat |
-//! | Loop roll   | captures a beat, then repeats ½, ¼, ⅛ of it while the high-pass rises | window end |
-//! | Reverb wash | dry falls while the send rises; tail washes over the drop | halfway |
-//! | Cut         | a high-pass build over two beats, then a hard cut | window end |
+//! | Echo out    | echo thrown on the last beat; dry ramps down over the overlap; tail rings out | after 1 beat |
+//! | Loop roll   | captures a beat, repeats ½, ¼, ⅛ under a rising high-pass; then ramps out over the overlap | at the old window end |
+//! | Reverb wash | dry dissolves while the send rises; incoming rises over the overlap; tail washes over | halfway |
+//! | Cut         | a high-pass build, then a quarter-beat (min 60 ms) crossfade | at the cut |
 //!
 //! The incoming voice is *held* (not decoded) until its landing frame, so its
 //! cue is the downbeat it lands on, exactly — not a guess at where it will be
@@ -22,9 +29,12 @@
 
 use super::TransitionStyle;
 
-/// Frames of ramp on every step change (dry cut, incoming landing). Short
-/// enough to read as a cut, long enough not to click.
-const EDGE_RAMP_SECONDS: f64 = 0.004;
+/// The shortest overlap an effect handover may use (except DropCut).
+const MIN_OVERLAP_SECONDS: f64 = 1.0;
+/// The overlap in beats, so a slower record gets a longer crossing.
+const OVERLAP_BEATS: f64 = 2.0;
+/// DropCut stays a cut: a quarter-beat edge, never shorter than this.
+const DROP_CUT_MIN_SECONDS: f64 = 0.06;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Technique {
@@ -45,7 +55,9 @@ impl Technique {
         }
     }
 
-    /// The window, in beats, and where in it the incoming record lands.
+    /// The base window, in beats, and where in it the incoming record lands.
+    /// Loop roll and cut add the overlap on top of this; the others already
+    /// have that much room after their landing.
     pub(crate) fn shape(self) -> (f64, f64) {
         match self {
             // One beat to throw the echo, four for it to ring out under the
@@ -59,13 +71,45 @@ impl Technique {
             Self::Cut => (2.0, 1.0),
         }
     }
+
+    /// Whether the window has to grow by the overlap after the landing.
+    fn extends_window(self) -> bool {
+        matches!(self, Self::LoopRoll | Self::Cut)
+    }
+}
+
+/// The crossing length for a technique, in seconds.
+fn overlap_seconds(style: TransitionStyle, beat_seconds: f64) -> f64 {
+    let Some(technique) = Technique::of(style) else {
+        return 0.0;
+    };
+    let beat = sane_beat(beat_seconds);
+    match technique {
+        Technique::Cut => (beat / 4.0).max(DROP_CUT_MIN_SECONDS),
+        _ => (beat * OVERLAP_BEATS).max(MIN_OVERLAP_SECONDS),
+    }
 }
 
 /// The window length a technique needs at `beat_seconds`.
 pub(crate) fn window_seconds(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
     let technique = Technique::of(style)?;
     let beat = sane_beat(beat_seconds);
-    Some(technique.shape().0 * beat)
+    let base = technique.shape().0 * beat;
+    Some(if technique.extends_window() {
+        base + overlap_seconds(style, beat_seconds)
+    } else {
+        base
+    })
+}
+
+/// Where the incoming lands, as a fraction of [`window_seconds`].
+pub(crate) fn landing_fraction(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
+    let technique = Technique::of(style)?;
+    let beat = sane_beat(beat_seconds);
+    let base = technique.shape().0 * beat;
+    let land = technique.shape().1 * base;
+    let window = window_seconds(style, beat_seconds)?;
+    Some((land / window).clamp(0.0, 1.0))
 }
 
 fn sane_beat(beat_seconds: f64) -> f64 {
@@ -82,6 +126,7 @@ pub(crate) struct DeckFx {
     beat_frames: usize,
     window_frames: u64,
     land_frame: u64,
+    overlap_frames: u64,
     elapsed: u64,
     delay: StereoDelay,
     reverb: Reverb,
@@ -95,9 +140,18 @@ impl DeckFx {
         let rate = device_rate.max(8_000) as f64;
         let beat = sane_beat(beat_seconds);
         let beat_frames = (beat * rate).round().max(1.0) as usize;
-        let (beats, land) = technique.shape();
-        let window_frames = (beats * beat_frames as f64).round() as u64;
-        let land_frame = (land * window_frames as f64).round() as u64;
+        let (base_beats, base_land) = technique.shape();
+        let base_window_frames = (base_beats * beat_frames as f64).round().max(1.0) as u64;
+        let land_frame = (base_land * base_window_frames as f64).round() as u64;
+        let wanted_overlap = (overlap_seconds(style, beat_seconds) * rate).round().max(1.0) as u64;
+        let (window_frames, overlap_frames) = if technique.extends_window() {
+            (base_window_frames + wanted_overlap, wanted_overlap)
+        } else {
+            (
+                base_window_frames,
+                wanted_overlap.min(base_window_frames.saturating_sub(land_frame)).max(1),
+            )
+        };
         // A dotted eighth: the delay DJs set by default, because it lands
         // between the beats instead of doubling them.
         let echo_frames = (beat_frames as f64 * 0.75).round() as usize;
@@ -107,6 +161,7 @@ impl DeckFx {
             beat_frames,
             window_frames: window_frames.max(1),
             land_frame,
+            overlap_frames,
             elapsed: 0,
             delay: StereoDelay::new(echo_frames.max(1), rate),
             reverb: Reverb::new(rate),
@@ -131,21 +186,35 @@ impl DeckFx {
         self.elapsed >= self.land_frame
     }
 
-    /// Level of the incoming voice for the chunk about to render: nothing
-    /// before it lands, then full — a cue on a downbeat is its own attack.
+    /// Level of the incoming voice for the next sample: nothing before it
+    /// lands, then a sine up over the overlap.
     pub(crate) fn incoming_gain(&self) -> f32 {
         if !self.incoming_live() {
             return 0.0;
         }
         let into = (self.elapsed - self.land_frame) as f64;
+        let p = (into / self.overlap_frames.max(1) as f64).clamp(0.0, 1.0);
+        (p * core::f64::consts::FRAC_PI_2).sin() as f32
+    }
+
+    /// The outgoing dry level for the next sample. Echo, loop roll and cut are
+    /// 1 at the landing and cosine down over the overlap; the wash keeps its
+    /// own dissolve into the landing (the reverb tail covers the crossing).
+    pub(crate) fn dry_gain(&self) -> f32 {
         match self.technique {
-            // The reverb arrival rises over a beat rather than landing hard:
-            // the wash is the cover for it.
             Technique::ReverbWash => {
-                let t = ((into + 1.0) / self.beat_frames as f64).clamp(0.0, 1.0);
-                (t * core::f64::consts::FRAC_PI_2).sin() as f32
+                let p = (self.elapsed as f64 / self.land_frame.max(1) as f64).clamp(0.0, 1.0);
+                (p * core::f64::consts::FRAC_PI_2).cos() as f32
             }
-            _ => 1.0,
+            _ => {
+                if self.elapsed < self.land_frame {
+                    return 1.0;
+                }
+                let p = ((self.elapsed - self.land_frame) as f64
+                    / self.overlap_frames.max(1) as f64)
+                    .clamp(0.0, 1.0);
+                (p * core::f64::consts::FRAC_PI_2).cos() as f32
+            }
         }
     }
 
@@ -157,7 +226,6 @@ impl DeckFx {
     /// technique and adds them to `dest`. `input` may be short — the outgoing
     /// file can end inside the window — and the effect tails keep sounding.
     pub(crate) fn render(&mut self, input: &[f32], dest: &mut [f32], frames: usize) {
-        let ramp = (EDGE_RAMP_SECONDS * self.rate).max(1.0);
         let window = self.window_frames as f64;
         let land = self.land_frame as f64;
         let beat = self.beat_frames as f64;
@@ -170,8 +238,7 @@ impl DeckFx {
             };
             let (out_l, out_r) = match self.technique {
                 Technique::EchoOut => {
-                    // Dry until the landing, then gone.
-                    let dry = ((land - n) / ramp).clamp(0.0, 1.0) as f32;
+                    let dry = self.dry_gain();
                     // Thrown on the beat before the landing; nothing after it
                     // feeds the echo, so it rings out rather than piling up.
                     let send = if n < land {
@@ -194,26 +261,32 @@ impl DeckFx {
                         let divisor = 1usize << segment.min(3);
                         self.roll.repeat(self.beat_frames / divisor)
                     };
-                    // The rising high-pass across the roll is the build.
-                    let rise = ((n - beat) / (window - beat)).clamp(0.0, 1.0);
+                    // The rising high-pass across the roll is the build; it
+                    // reaches its corner at the landing and holds through the
+                    // crossing while the dry ramps out.
+                    let rise = if land > beat {
+                        ((n - beat) / (land - beat)).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
                     self.build.set(glide(20.0, 900.0, rise * rise), self.rate);
                     let (hl, hr) = self.build.process(sl, sr);
-                    let out = ((window - n) / ramp).clamp(0.0, 1.0) as f32;
+                    let out = self.dry_gain();
                     (hl * out, hr * out)
                 }
                 Technique::ReverbWash => {
+                    let dry = self.dry_gain();
                     let p = (n / land).clamp(0.0, 1.0);
-                    let dry = ((p * core::f64::consts::FRAC_PI_2).cos()) as f32;
                     let send = (p.sqrt()) as f32;
                     let (wl, wr) = self.reverb.process(l * send, r * send);
-                    let tail = ((window - n) / (window - land)).clamp(0.0, 1.0) as f32;
+                    let tail = ((window - n) / (window - land).max(1.0)).clamp(0.0, 1.0) as f32;
                     (l * dry + wl * tail, r * dry + wr * tail)
                 }
                 Technique::Cut => {
-                    let rise = (n / window).clamp(0.0, 1.0);
+                    let rise = (n / land).clamp(0.0, 1.0);
                     self.build.set(glide(20.0, 600.0, rise * rise * rise), self.rate);
                     let (hl, hr) = self.build.process(l, r);
-                    let out = ((window - n) / ramp).clamp(0.0, 1.0) as f32;
+                    let out = self.dry_gain();
                     (hl * out, hr * out)
                 }
             };
@@ -495,6 +568,16 @@ mod tests {
         samples.iter().fold(0.0f32, |m, s| m.max(s.abs()))
     }
 
+    /// Render one frame at a time until `target`, so gains can be sampled
+    /// exactly at the landing and across the crossing.
+    fn advance_to(fx: &mut DeckFx, target: u64) {
+        let input = tone(2, 48_000.0);
+        let mut out = vec![0.0f32; 2];
+        while fx.elapsed < target && !fx.finished() {
+            fx.render(&input, &mut out, 1);
+        }
+    }
+
     #[test]
     fn every_technique_finishes_its_window_without_clipping() {
         for style in [
@@ -521,19 +604,87 @@ mod tests {
     }
 
     #[test]
-    fn the_incoming_is_held_until_its_landing() {
+    fn the_incoming_is_held_then_ramps_over_the_overlap() {
         let mut fx = DeckFx::new(TransitionStyle::EchoOut, 48_000, 0.5).unwrap();
         assert!(!fx.incoming_live());
         assert_eq!(fx.incoming_gain(), 0.0);
-        let input = tone(512, 48_000.0);
-        // One beat at 120 BPM is 24 000 frames; the echo lands after it, at
-        // the first chunk boundary past it.
-        while !fx.incoming_live() {
-            let mut out = vec![0.0; 1024];
-            fx.render(&input, &mut out, 512);
+        let land = fx.land_frame;
+        let overlap = fx.overlap_frames;
+        advance_to(&mut fx, land);
+        assert_eq!(fx.elapsed, land);
+        assert_eq!(fx.incoming_gain(), 0.0);
+        assert_eq!(fx.dry_gain(), 1.0);
+        advance_to(&mut fx, land + overlap);
+        assert_eq!(fx.elapsed, land + overlap);
+        assert!((fx.incoming_gain() - 1.0).abs() < 0.001);
+        assert!(fx.dry_gain() < 0.001);
+    }
+
+    #[test]
+    fn echo_loop_and_cut_cross_over_equal_power() {
+        for style in [
+            TransitionStyle::EchoOut,
+            TransitionStyle::LoopRoll,
+            TransitionStyle::DropCut,
+        ] {
+            let rate = 48_000u32;
+            let mut fx = DeckFx::new(style, rate, 0.5).unwrap();
+            let land = fx.land_frame;
+            let overlap = fx.overlap_frames;
+            advance_to(&mut fx, land);
+            assert!((fx.dry_gain() - 1.0).abs() < 0.001, "{style:?} dry at landing");
+            assert!(fx.incoming_gain() < 0.001, "{style:?} incoming at landing");
+            advance_to(&mut fx, land + overlap / 2);
+            let dry = fx.dry_gain();
+            let incoming = fx.incoming_gain();
+            let power = dry * dry + incoming * incoming;
+            assert!(
+                (power - 1.0).abs() < 0.01,
+                "{style:?} crossing power {power} (dry {dry}, incoming {incoming})"
+            );
+            advance_to(&mut fx, land + overlap);
+            assert!(fx.dry_gain() < 0.001, "{style:?} dry at crossing end");
+            assert!((fx.incoming_gain() - 1.0).abs() < 0.001, "{style:?} incoming at crossing end");
         }
-        assert!(fx.elapsed >= 24_000 && fx.elapsed < 24_000 + 512);
-        assert_eq!(fx.incoming_gain(), 1.0);
+    }
+
+    #[test]
+    fn reverb_wash_keeps_its_own_dry_dissolve_and_a_ramped_incoming() {
+        let mut fx = DeckFx::new(TransitionStyle::ReverbWash, 48_000, 0.5).unwrap();
+        let land = fx.land_frame;
+        let overlap = fx.overlap_frames;
+        advance_to(&mut fx, land / 2);
+        let half = fx.dry_gain();
+        assert!(half > 0.6 && half < 0.8, "wash dry at half {half}");
+        advance_to(&mut fx, land);
+        assert!(fx.dry_gain() < 0.001, "wash dry at landing");
+        assert!(fx.incoming_gain() < 0.001, "wash incoming at landing");
+        advance_to(&mut fx, land + overlap / 2);
+        assert!((fx.incoming_gain() - core::f64::consts::FRAC_1_SQRT_2 as f32).abs() < 0.01);
+        advance_to(&mut fx, land + overlap);
+        assert!((fx.incoming_gain() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn drop_cut_keeps_a_short_overlap() {
+        let rate = 48_000f64;
+        let fx = DeckFx::new(TransitionStyle::DropCut, rate as u32, 0.5).unwrap();
+        let seconds = fx.overlap_frames as f64 / rate;
+        assert!(
+            (0.06..=0.13).contains(&seconds),
+            "DropCut overlap {seconds}s"
+        );
+    }
+
+    #[test]
+    fn only_the_window_extending_techniques_grow() {
+        let beat = 0.5;
+        assert!((window_seconds(TransitionStyle::EchoOut, beat).unwrap() - 2.5).abs() < 1e-9);
+        assert!((window_seconds(TransitionStyle::ReverbWash, beat).unwrap() - 4.0).abs() < 1e-9);
+        assert!((window_seconds(TransitionStyle::LoopRoll, beat).unwrap() - 3.0).abs() < 1e-9);
+        assert!((window_seconds(TransitionStyle::DropCut, beat).unwrap() - 1.125).abs() < 1e-9);
+        assert!((landing_fraction(TransitionStyle::LoopRoll, beat).unwrap() - 2.0 / 3.0).abs() < 1e-9);
+        assert!((landing_fraction(TransitionStyle::EchoOut, beat).unwrap() - 0.2).abs() < 1e-9);
     }
 
     #[test]

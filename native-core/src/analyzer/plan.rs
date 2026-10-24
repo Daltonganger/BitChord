@@ -1835,7 +1835,7 @@ fn technique_plan(
     let (style, why) = *eligible.get(pair_salt(outgoing, incoming) % eligible.len().max(1))?;
 
     let window = crate::mixer::technique_window_seconds(style, beat)?;
-    let land_fraction = crate::mixer::technique_landing_fraction(style)?;
+    let land_fraction = crate::mixer::technique_landing_fraction(style, beat)?;
     // The landing — the dry cut, the drop — goes on a downbeat (a phrase
     // start when one is near) at the mix-out anchor.
     let lead = land_fraction * window;
