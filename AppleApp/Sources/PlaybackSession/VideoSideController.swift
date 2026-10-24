@@ -47,6 +47,10 @@ final class VideoSideController {
     @ObservationIgnored private var failedObserver: NSObjectProtocol?
     @ObservationIgnored private var isSeeking = false
     @ObservationIgnored private var lastSeekAt: CFTimeInterval = 0
+    /// How long a seek on this picture takes to land, averaged: the policy
+    /// aims that far ahead of a playing engine.
+    @ObservationIgnored private var seekLead: Double = 0.4
+    @ObservationIgnored private var lastStatusLog: CFTimeInterval = 0
 
     /// - Parameter clock: read on the main actor, once per tick.
     init(clock: VideoClock) {
@@ -137,6 +141,13 @@ final class VideoSideController {
     /// One policy pass. Called by the timer; exposed so a surface can force a
     /// pass after a transport change instead of waiting for the next 250 ms.
     func tick() {
+        if state != .idle, CACurrentMediaTime() - lastStatusLog >= 2,
+           state != .ready || isSeeking || player.currentItem?.status != .readyToPlay {
+            lastStatusLog = CACurrentMediaTime()
+            PlaybackDebugLog.shared.record(
+                "video sync: held (state=\(state) item=\(player.currentItem?.status.rawValue ?? -1) seeking=\(isSeeking))"
+            )
+        }
         guard state == .ready, let item = player.currentItem, item.status == .readyToPlay, !isSeeking else {
             return
         }
@@ -144,13 +155,22 @@ final class VideoSideController {
         let video = player.currentTime().seconds
         guard engine.isFinite, video.isFinite else { return }
         let now = CACurrentMediaTime()
+        if now - lastStatusLog >= 2 {
+            lastStatusLog = now
+            PlaybackDebugLog.shared.record(String(
+                format: "video sync: engine %.2f video %.2f playing=%@ rate %.2f control=%d waiting=%@ lead %.2f",
+                engine, video, clock.isPlaying() ? "yes" : "no", player.rate, player.timeControlStatus.rawValue,
+                player.reasonForWaitingToPlay?.rawValue ?? "-", seekLead
+            ))
+        }
         let decision = VideoSyncPolicy.decide(
             engineSeconds: engine,
             videoSeconds: video,
             enginePlaying: clock.isPlaying(),
             engineRate: clock.rate(),
             videoRate: player.rate,
-            secondsSinceSeek: now - lastSeekAt
+            secondsSinceSeek: now - lastSeekAt,
+            seekLead: seekLead
         )
         switch decision {
         case .none:
@@ -166,10 +186,14 @@ final class VideoSideController {
             lastSeekAt = now
             let time = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
             let tolerance = CMTime(seconds: 0.05, preferredTimescale: 600)
-            player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
+            player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] finished in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.isSeeking = false
+                    if finished {
+                        let took = CACurrentMediaTime() - now
+                        self.seekLead = min(2, max(0.05, self.seekLead * 0.5 + took * 0.5))
+                    }
                     self.tick()
                 }
             }

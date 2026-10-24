@@ -43,7 +43,8 @@ enum VideoSyncPolicy {
         enginePlaying: Bool,
         engineRate: Double,
         videoRate: Float,
-        secondsSinceSeek: Double
+        secondsSinceSeek: Double,
+        seekLead: Double = 0
     ) -> Action {
         guard engineSeconds.isFinite, videoSeconds.isFinite else { return .none }
         let drift = engineSeconds - videoSeconds
@@ -60,7 +61,14 @@ enum VideoSyncPolicy {
         }
 
         if abs(drift) > seekDriftSeconds && canSeek {
-            return .seek(seconds: max(0, engineSeconds))
+            // A seek on a streamed picture takes a few hundred milliseconds,
+            // and the engine keeps moving while it does. Landing where the
+            // engine *was* leaves the picture behind by exactly that much,
+            // which is past the threshold again: the picture then seeks
+            // forever and shows one frame per seek. Aim where the engine will
+            // be when the seek lands.
+            let rate = engineRate.isFinite && engineRate > 0 ? engineRate : 1
+            return .seek(seconds: max(0, engineSeconds + max(0, seekLead) * rate))
         }
 
         let base = engineRate.isFinite && engineRate > 0 ? Float(engineRate) : 1
