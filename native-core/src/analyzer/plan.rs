@@ -2249,6 +2249,22 @@ fn note_technique(salt: usize, style: TransitionStyle) {
 /// The most outgoing tail an effect thrown early may skip.
 const MAX_THROW_DISCARD_SECONDS: f64 = 10.0;
 
+/// Before an effect takes the outgoing out, the incoming plays under it for
+/// this many of its beats (at least [`EFFECT_INTRO_MIN_SECONDS`]), so the
+/// listener hears the next record arrive while the last one is still going.
+/// Without it the next record sat 12 dB down until the throw: a cloud, then
+/// a new song, never the two together.
+const EFFECT_INTRO_BEATS: f64 = 8.0;
+const EFFECT_INTRO_MIN_SECONDS: f64 = 4.0;
+/// The incoming's level by the throw, relative to its matched level. Its bass
+/// is held out (and on a tempo clash its top too), so at this level it is
+/// plainly there without the two low ends or grids fighting.
+const EFFECT_INTRO_DB: f64 = -4.0;
+/// Clashing keys overlap for the same span, further down.
+const EFFECT_INTRO_KEY_CLASH_DB: f64 = -9.0;
+/// A cut keeps its impact: the next record is only a hint before it.
+const DROP_CUT_INTRO_DB: f64 = -12.0;
+
 /// Where the outgoing record is last at full strength before `mix_end`
 /// (within 3 dB of its loud reference), on the downbeat at or before it: the
 /// moment a DJ throws an effect when the record's own outro falls away.
@@ -2569,13 +2585,24 @@ fn technique_plan(
         Some((start, fade, cue)) => (start, fade, cue),
         None => ((mix_end - AUTO_FALLBACK_SECONDS).max(0.0), AUTO_FALLBACK_SECONDS, entry),
     };
-    let blend_fade = if style == TransitionStyle::DropCut {
+    let technique_window = crate::mixer::technique_window_seconds(style, beat)?;
+    let analysed_fade = if style == TransitionStyle::DropCut {
         // A deliberate short swap, at most one bar.
         blend_fade.clamp(0.5, 4.0 * beat)
     } else {
         blend_fade.max(AUTO_MIN_SECONDS)
     };
-    let technique_window = crate::mixer::technique_window_seconds(style, beat)?;
+    // The blend ends where the analysis put it; the intro only starts it
+    // earlier, so the incoming is under the outgoing for two bars before the
+    // technique begins.
+    let blend_fade = if style == TransitionStyle::DropCut {
+        analysed_fade
+    } else {
+        let intro = (EFFECT_INTRO_BEATS * beat).max(EFFECT_INTRO_MIN_SECONDS);
+        analysed_fade
+            .max(technique_window + intro)
+            .min(AUTO_TRANSITION_MAX_SECONDS.max(analysed_fade))
+    };
     let effect_seconds = if style == TransitionStyle::DropCut {
         (beat / 4.0).max(0.06)
     } else {
@@ -2588,7 +2615,7 @@ fn technique_plan(
     // into a faded outro, and the effect carries it out over what is left
     // of the fall. Without that the technique dressed a record already most
     // of the way down. At most `MAX_THROW_DISCARD_SECONDS` of tail goes.
-    let natural_end = blend_start + blend_fade;
+    let natural_end = blend_start + analysed_fade;
     let end = match throw_at {
         Some(throw) if throw + effect_seconds < natural_end
             && natural_end - (throw + effect_seconds) <= MAX_THROW_DISCARD_SECONDS =>
@@ -2607,11 +2634,23 @@ fn technique_plan(
     } else {
         blend_cue
     };
+    // The incoming's intro under the outgoing: its level by the throw, and
+    // how much of its top is held back. Two grids that do not agree tick
+    // against each other in the hats, so those stay soft until the landing.
+    let intro_db = if style == TransitionStyle::DropCut {
+        DROP_CUT_INTRO_DB
+    } else if key_clash {
+        EFFECT_INTRO_KEY_CLASH_DB
+    } else {
+        EFFECT_INTRO_DB
+    };
+    let grids_clash = !grid || !incoming_grid || tempo_gap > MAX_STRETCH_DEVIATION;
+    let intro_band = if grids_clash { 1.0 } else { 0.4 };
     Some(TransitionPlan {
         style,
         bass_swap: false,
         bass_swap_fraction: DEFAULT_BASS_SWAP_FRACTION,
-        filter_sweep: 0.0,
+        filter_sweep: intro_band,
         vocal_overlap: 0.0,
         fade_seconds: blend_fade,
         // The outgoing stays at unity, the next record rising underneath it,
@@ -2628,14 +2667,18 @@ fn technique_plan(
         cue_seconds: cue,
         playback_rate: 1.0,
         bed_fraction: 0.0,
-        bed_gain_db: 0.0,
+        // On an effect handover this is the intro level, not a DJ bed (a
+        // bed needs `bed_fraction`): the mixer brings the incoming to it
+        // across the hold.
+        bed_gain_db: intro_db,
         dip_depth: 0.0,
         dip_width: 0.0,
         post_glide_seconds: 0.0,
         outgoing_duration_seconds: outgoing.duration,
         beat_seconds: beat,
         reason: format!(
-            "{why} (clash; {blend_fade:.1}s blend, {effect_seconds:.1}s effect; {}, grid {:.2})",
+            "{why} (clash; {blend_fade:.1}s blend with the next record in at {intro_db:.0} dB, \
+             {effect_seconds:.1}s effect; {}, grid {:.2})",
             tempo_summary(out_bpm, in_bpm),
             outgoing.beat_confidence
         ),
@@ -4071,6 +4114,30 @@ mod tests {
             (plan.outgoing_hold_seconds - (plan.fade_seconds - plan.effect_seconds)).abs() < 1e-6,
             "the outgoing holds until its effect"
         );
+    }
+
+    #[test]
+    fn an_effect_brings_the_next_record_in_before_the_throw() {
+        // "A cloud, then the next song": the incoming has to be under the
+        // outgoing, plainly audible, for two bars before the technique takes
+        // the outgoing out, and the blend still ends where the analysis put it.
+        let (out, inc) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
+        assert!(plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
+        let beat = plan.beat_seconds;
+        let intro = (EFFECT_INTRO_BEATS * beat).max(EFFECT_INTRO_MIN_SECONDS);
+        if plan.style != TransitionStyle::DropCut {
+            assert!(
+                plan.outgoing_hold_seconds >= intro.min(AUTO_TRANSITION_MAX_SECONDS - plan.effect_seconds) - 1e-6,
+                "intro {:.2}s, wanted {intro:.2}s: {}",
+                plan.outgoing_hold_seconds,
+                plan.reason
+            );
+            assert!(plan.bed_gain_db >= EFFECT_INTRO_KEY_CLASH_DB && plan.bed_gain_db < 0.0);
+            // A 130/120 pair is a grid clash: the incoming's top is held back.
+            assert_eq!(plan.filter_sweep, 1.0);
+        }
+        assert!(plan.transition_end_seconds <= out.content_end + 1e-6);
     }
 
     #[test]

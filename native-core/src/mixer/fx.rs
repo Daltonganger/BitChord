@@ -103,7 +103,6 @@ pub(crate) fn window_seconds(style: TransitionStyle, beat_seconds: f64) -> Optio
 }
 
 /// Where the incoming lands, as a fraction of [`window_seconds`].
-#[allow(dead_code)]
 pub(crate) fn landing_fraction(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
     let technique = Technique::of(style)?;
     let beat = sane_beat(beat_seconds);
