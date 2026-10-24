@@ -1132,6 +1132,7 @@
     "BitChord installs from its releases page, so this opens it in your browser.": {},
     "BitChord watches the folder you choose for music files. Filtering keeps everything that is not a song out of the list.": {},
     "BitChord will still prefer its copy when the match is the same recording. It will not when it is not.": {},
+    "Bluetooth": {},
     "Bring your library, playlists and mixes with you, and start a Listen Together party with friends.": {
       "localizations": {
         "de": {
@@ -1357,6 +1358,7 @@
     "Can’t read that share": {},
     "Capture 30 seconds": {},
     "Capturing 30 seconds…": {},
+    "CarPlay": {},
     "Categories could not load. %@": {},
     "Category": {},
     "Change": {},
@@ -3530,7 +3532,9 @@
     "GitHub": {},
     "Go Home": {},
     "Go to Library": {},
+    "HDMI": {},
     "Headphone": {},
+    "Headphones": {},
     "High Performance Mode holds the display at the chosen refresh rate instead of letting the system vary it. Expect noticeably shorter battery life while it is on.": {},
     "Higher refresh rate?": {},
     "Hindi": {
@@ -7602,6 +7606,7 @@
     "Open the release": {},
     "Opens Now Playing": {},
     "Opens the lyrics": {},
+    "Output": {},
     "Output Precision": {},
     "Output Switcher": {},
     "PCM 16": {},
@@ -9087,6 +9092,7 @@
     },
     "R": {},
     "Read from the engine as it runs. “—” is a figure the system does not report.": {},
+    "Receiver": {},
     "Recent": {
       "localizations": {
         "it": {
@@ -13255,6 +13261,7 @@
     "Turn On": {},
     "Turn off to give BitChord audio priority. Other apps may pause.": {},
     "Turn on to keep other apps audible.": {},
+    "USB Audio": {},
     "Unlike": {},
     "Unlisted": {},
     "Unpin": {
