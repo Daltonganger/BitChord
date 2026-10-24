@@ -1450,21 +1450,22 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
     let too_short = (outgoing.duration > 0.0 && outgoing.duration < MIN_SMART_DURATION_SECONDS)
         || (incoming.duration > 0.0 && incoming.duration < MIN_SMART_DURATION_SECONDS);
     let tier = assess(outgoing, incoming);
-    if !too_short {
+    // The analysed blend is the default; an effect only seasons a pair the
+    // blend cannot take. A track too short to spend a smart transition on gets
+    // a plain fade, as upstream does.
+    if too_short {
+        let mut plan = plain_fallback(fade, outgoing);
+        plan.cue_seconds = entry;
+        plan.reason = "fade: a track is too short for a technique".into();
+        return plan;
+    }
+    if matches!(tier, Tier::Plain) {
         if let Some(plan) = technique_plan(outgoing, incoming, tier, entry) {
             return plan;
         }
-    }
-    if matches!(tier, Tier::Plain) || too_short {
         let mut plan = plain_fallback(fade, outgoing);
-        // Still enter at the top of the music, not at a drop and not at the
-        // file's last byte.
         plan.cue_seconds = entry;
-        plan.reason = if too_short {
-            "fade: a track is too short for a technique".into()
-        } else {
-            "fade: no usable tempo on either side".into()
-        };
+        plan.reason = "fade: no usable tempo on either side".into();
         return plan;
     }
 
@@ -1643,6 +1644,21 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
         out_bpm,
     );
 
+    // A usable blend is the answer for every pair except a real clash: a key
+    // the stretch cannot reconcile (so the two never overlap dry), a tempo gap
+    // past the filter blend's 7 % band, or a vocal-on-vocal overlap the planner
+    // could not shorten below the clash threshold. Only then may an effect
+    // replace the blend; the v0.1.3 blend remains the default.
+    let tempo_gap = (1.0 - ratio).abs();
+    let stretch_fix = transparent_playback_rate(out_bpm, in_bpm, MAX_BEATMATCH_STRETCH).is_some();
+    let key_clash = key_distance.is_some_and(|distance| distance > 3) && !stretch_fix;
+    let vocal_clash = vocal_conflict && vocal_overlap > 0.15;
+    if effect_earned(key_clash, tempo_gap, vocal_conflict, vocal_overlap) {
+        if let Some(plan) = technique_plan(outgoing, incoming, tier, entry) {
+            return plan;
+        }
+    }
+
     TransitionPlan {
         // Beatmatched + transparent stretch → DjBlend. DjAssisted used to
         // blend on tempo proximity alone; that stretched weak grids. Filter.
@@ -1758,6 +1774,13 @@ fn pair_salt(outgoing: &Analysis, incoming: &Analysis) -> usize {
     (a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.rotate_left(29) ^ c) as usize
 }
 
+/// Whether a pair's blend is a clash an effect should season. The 4–7 %
+/// DjFilter band is still a usable blend; only a gap past seven percent, a key
+/// the stretch cannot reconcile, or an unshortened vocal clash earns an effect.
+fn effect_earned(key_clash: bool, tempo_gap: f64, vocal_conflict: bool, vocal_overlap: f64) -> bool {
+    key_clash || tempo_gap > 0.07 || (vocal_conflict && vocal_overlap > 0.15)
+}
+
 fn technique_plan(
     outgoing: &Analysis,
     incoming: &Analysis,
@@ -1826,11 +1849,6 @@ fn technique_plan(
     }
     if grid && eligible.is_empty() {
         eligible.push((TransitionStyle::EchoOut, "echo out: tempos too far apart for a blend"));
-    }
-    // A pair that could blend at all keeps the filter blend some of the time,
-    // so a set is not all effects.
-    if matches!(tier, Tier::DjAssisted) && tempo_gap <= 0.06 && eligible.len() < 3 {
-        return None;
     }
     let (style, why) = *eligible.get(pair_salt(outgoing, incoming) % eligible.len().max(1))?;
 
@@ -2684,6 +2702,40 @@ mod tests {
         assert!(plan.transition_end_seconds <= 205.0 + 1e-6);
         assert!((plan.beat_seconds - 60.0 / 124.0).abs() < 1e-6);
         assert_eq!(plan.playback_rate, 1.0, "a technique never stretches");
+    }
+
+    #[test]
+    fn effect_earned_only_for_a_real_clash() {
+        assert!(!effect_earned(false, 0.0, false, 0.0));
+        // The 4–7 % DjFilter band is still a blend.
+        assert!(!effect_earned(false, 0.049, false, 0.0));
+        assert!(!effect_earned(false, 0.069, true, 0.10));
+        // A key the stretch cannot reconcile, a gap past the filter band, or a
+        // vocal overlap that stayed above the threshold.
+        assert!(effect_earned(true, 0.0, false, 0.0));
+        assert!(effect_earned(false, 0.071, false, 0.0));
+        assert!(effect_earned(false, 0.01, true, 0.16));
+    }
+
+    #[test]
+    fn a_five_percent_gap_keeps_the_analysed_blend() {
+        let grid = |bpm: f64| (0..200).map(|i| i as f64 * 4.0 * 60.0 / bpm).collect::<Vec<_>>();
+        let mut out = analysis(0.0, 210.0, grid(127.0));
+        out.bpm = 127.0;
+        out.beat_interval = 60.0 / 127.0;
+        out.beat_confidence = 0.9;
+        out.content_end = 205.0;
+        out.key = "C major".into();
+        out.key_confidence = 0.9;
+        let mut inc = analysis(0.0, 190.0, grid(121.0));
+        inc.bpm = 121.0;
+        inc.beat_interval = 60.0 / 121.0;
+        inc.beat_confidence = 0.9;
+        inc.key = "C major".into();
+        inc.key_confidence = 0.9;
+        let plan = plan_from(&out, &inc, 8.0);
+        assert!(!plan.style.is_effect(), "a 5 % gap got {:?}: {}", plan.style, plan.reason);
+        assert!(plan.fade_seconds >= AUTO_MIN_SECONDS - 1e-6);
     }
 
     /// A real beatmatch is still a blend: the techniques are for pairs that
