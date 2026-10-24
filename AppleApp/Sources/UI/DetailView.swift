@@ -464,6 +464,11 @@ struct DetailView: View {
             if !page.songs.isEmpty {
                 actionRow(page, tint: tint, isArtist: false)
                     .padding(.top, 6)
+            } else if kind(of: page) == .playlist {
+                // Nothing to play, but an empty playlist is still one to
+                // rename or delete — and empty is when that is usually wanted.
+                releaseMoreMenu(page)
+                    .padding(.top, 6)
             }
         }
         .frame(maxWidth: 860)
