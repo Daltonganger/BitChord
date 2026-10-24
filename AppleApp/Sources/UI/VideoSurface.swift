@@ -27,6 +27,8 @@ final class VideoPlayback {
     @ObservationIgnored private var retriedId: String?
     @ObservationIgnored private var resolveTask: Task<Void, Never>?
     @ObservationIgnored private var lastGateLog: String?
+    @ObservationIgnored private var aheadTask: Task<Void, Never>?
+    @ObservationIgnored private var aheadId: String?
 
     private init() {}
 
@@ -60,6 +62,7 @@ final class VideoPlayback {
         var track: () -> (title: String, artist: String, seconds: Double, durationText: String?)?
         var playVideoVersion: (_ videoId: String, _ durationText: String?) -> Void
         var playSongVersion: () -> Void
+        var next: () -> (videoId: String, title: String, artist: String, seconds: Double, durationText: String?)? = { nil }
     }
 
     @ObservationIgnored private var hooks: PlayerHooks?
@@ -147,6 +150,7 @@ final class VideoPlayback {
                     self.preparing = false
                     self.side = side
                     self.controller.attach(side)
+                    self.prepareAhead()
                     return
                 }
                 // An art track (or a still picture): the music video is another
@@ -183,6 +187,7 @@ final class VideoPlayback {
                         self.preparing = false
                         self.side = videoSide
                         self.controller.attach(videoSide, timeMap: map)
+                        self.prepareAhead()
                         return
                     }
                     self.controller.detach()
@@ -191,6 +196,7 @@ final class VideoPlayback {
                 guard let fallback else {
                     PlaybackDebugLog.shared.record("video: no music video for this song", about: id)
                     self.say("No music video for this song")
+                    self.prepareAhead()
                     self.side = nil
                     self.controller.detach()
                     return
@@ -226,7 +232,35 @@ final class VideoPlayback {
         start(id, forceRefresh: true)
     }
 
+    /// While this track plays, the next one's music video is found and lined
+    /// up (the map is kept on disk), so a change of track shows its picture
+    /// as soon as it loads instead of after the search and the alignment.
+    private func prepareAhead() {
+        guard gate.canRequest, let next = hooks?.next(), next.videoId != aheadId else { return }
+        aheadId = next.videoId
+        aheadTask?.cancel()
+        aheadTask = Task(priority: .utility) {
+            let own = try? await InnertubeStreamResolver.shared.resolveVideo(videoId: next.videoId)
+            if let own, own.url != nil, own.looksLikeMusicVideo, !own.isStillImage { return }
+            let track = (title: next.title, artist: next.artist, seconds: next.seconds, durationText: next.durationText)
+            for candidate in await Self.findVideoVersions(videoId: next.videoId, track: track).prefix(3) {
+                guard !Task.isCancelled else { return }
+                guard let side = try? await InnertubeStreamResolver.shared.resolveVideo(videoId: candidate.videoId),
+                      side.url != nil, side.looksLikeMusicVideo, !side.isStillImage else { continue }
+                let map = await VideoVersionAlignment.shared.map(songId: next.videoId, videoId: candidate.videoId)
+                PlaybackDebugLog.shared.record(
+                    "video: lined up ahead with \(candidate.videoId): \(map?.confident == true ? "aligned" : "not aligned")",
+                    about: next.videoId
+                )
+                if map?.confident == true { return }
+            }
+        }
+    }
+
     private func stop() {
+        aheadTask?.cancel()
+        aheadTask = nil
+        aheadId = nil
         resolveTask?.cancel()
         resolveTask = nil
         mountedId = nil
@@ -349,7 +383,11 @@ struct VideoSurface<Fallback: View>: View {
                     playVideoVersion: { [controller] id, durationText in
                         controller.playVideoVersion(videoId: id, durationText: durationText)
                     },
-                    playSongVersion: { [controller] in controller.playSongVersion() }
+                    playSongVersion: { [controller] in controller.playSongVersion() },
+                    next: { [controller] in
+                        guard let entry = controller.upNextEntry, let videoId = entry.videoId else { return nil }
+                        return (videoId, entry.title, entry.artist, entry.durationSeconds, entry.durationText)
+                    }
                 )
             )
             VideoPlayback.shared.setActive(scenePhase == .active)

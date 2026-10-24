@@ -3485,6 +3485,10 @@ final class PlaybackController {
         }
     }
 
+    /// The track that plays after this one, for work done ahead of it (the
+    /// music video is found and lined up while this track plays).
+    var upNextEntry: QueueEntry? { nextEntry }
+
     private var nextEntry: QueueEntry? {
         if repeatMode == .one {
             // Automix: blend the track into itself. Without Automix there is no
