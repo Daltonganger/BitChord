@@ -14,6 +14,7 @@ struct HomeView: View {
     @Bindable var feed: FeedLoader
     @Environment(PlaybackController.self) private var controller
     @Environment(AuthController.self) private var auth
+    @Environment(ToastCenter.self) private var toast
 
     var body: some View {
         NavigationStack {
@@ -30,6 +31,23 @@ struct HomeView: View {
                 }
                 .refreshable { await feed.load(force: true, epoch: auth.sessionEpoch) }
                 .task(id: auth.sessionEpoch) { await feed.load(force: false, epoch: auth.sessionEpoch) }
+                .onAppear {
+                    // Upstream's onHomeShown: coming back to the tab refetches
+                    // the feed over the loaded shelves, because Recents went
+                    // stale the moment something played elsewhere. The first
+                    // appearance is skipped — the task above owns the initial
+                    // load, and a feed still loading has nothing to refresh.
+                    if case .loaded = feed.phase {
+                        Task { await feed.load(force: true, epoch: auth.sessionEpoch) }
+                    }
+                }
+                .onChange(of: feed.refreshError) { _, message in
+                    // A refresh that failed over content leaves the content
+                    // up, as upstream does — but silently. The toast is the
+                    // difference between "nothing happened" and "this feed is
+                    // from this morning".
+                    if let message { toast.show(message) }
+                }
         }
     }
 
