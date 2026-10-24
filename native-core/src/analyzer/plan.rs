@@ -1728,15 +1728,32 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
     // A stretch does not change key; a wide key distance is a real clash on
     // its own. The corpus firing rates will decide whether that should earn an
     // effect or a shorter filtered blend.
-    let key_clash = key_distance.is_some_and(|distance| distance > 3);
+    let key_clash = keys_clash(&outgoing.key, outgoing.key_confidence, &incoming.key, incoming.key_confidence);
+    // Principle H: an unmatched tempo is not an effect. A pair whose outgoing
+    // end falls away is mixed with a plain equal-power crossfade, placed where
+    // the tail falls, and only a handover with no falling tail on either side
+    // (both records still busy across it) or a real key clash earns a
+    // technique.
+    let out_busy = handover_is_busy(outgoing, mix_end);
+    let in_busy = handover_is_busy(incoming, cue);
     log::info!(
-        "automix clash check [{:?}]: key_clash={key_clash} tempo_gap={tempo_gap:.3}          vocal_conflict={vocal_conflict} vocal_overlap={vocal_overlap:.3}",
+        "automix clash check [{:?}]: key_clash={key_clash} tempo_gap={tempo_gap:.3} \
+         vocal_conflict={vocal_conflict} vocal_overlap={vocal_overlap:.3} \
+         out_busy={out_busy} in_busy={in_busy}",
         tier
     );
-    if effect_earned(key_clash, tempo_gap) {
+    if effect_earned(key_clash, tempo_gap) && (key_clash || !falls_away(out_busy, in_busy)) {
         if let Some(plan) =
             technique_plan(outgoing, incoming, tier, entry, Some((transition_start, fade_seconds, cue)))
         {
+            return plan;
+        }
+    }
+    if !key_clash && tempo_gap > 0.07 {
+        // The tempo gap is the only reason an effect was on the table, and the
+        // outgoing record falls away: cross over where it does, for as long as
+        // it takes, at the rate the record already plays.
+        if let Some(plan) = clean_crossfade(outgoing, mix_end, entry) {
             return plan;
         }
     }
@@ -1879,6 +1896,156 @@ fn pair_salt(outgoing: &Analysis, incoming: &Analysis) -> usize {
 /// that a blend is impossible.
 fn effect_earned(key_clash: bool, tempo_gap: f64) -> bool {
     key_clash || tempo_gap > 0.07
+}
+
+/// Does at least one side fall away under the handover?
+///
+/// Principle H: an unmatched pair is answered with a clean crossfade *when
+/// there is somewhere to cross over*. That means the outgoing record's tail is
+/// quieter than the record, or the incoming's opening is — the two cases where
+/// an equal-power fade has room to work. Two records still at full energy on
+/// both sides of the join leave nothing to fade through, and that is when a
+/// technique is the musical answer.
+fn falls_away(out_busy: bool, in_busy: bool) -> bool {
+    !(out_busy && in_busy)
+}
+
+/// Is this record still at full energy at `time`?
+fn handover_is_busy(analysis: &Analysis, time: f64) -> bool {
+    let Some(reference) = loud_reference(analysis) else {
+        return true;
+    };
+    let window = 2.0;
+    let energy = energy_between(analysis, time - window, time + window)
+        .or_else(|| energy_between(analysis, time, time + window));
+    match energy {
+        // Within 3 dB of the level the record spends its loud passages at.
+        Some(value) => value >= reference * 0.707,
+        None => true,
+    }
+}
+
+/// The energy a record sits at while it is loud: its 75th percentile.
+fn loud_reference(analysis: &Analysis) -> Option<f64> {
+    let mut values: Vec<f64> = analysis
+        .energy_curve
+        .iter()
+        .map(|point| point.energy)
+        .filter(|energy| energy.is_finite() && *energy > 0.0)
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    values.get((values.len() - 1) * 3 / 4).copied()
+}
+
+/// An unmatched pair, mixed with a plain equal-power crossfade.
+///
+/// The length is the outgoing record's own falling tail — from the last moment
+/// it is still at its loud level to its content end — clamped to what a
+/// crossfade can use. No rate change, no bed, no duck: the simplest thing that
+/// can work, which is what the pair gets when nothing else is justified.
+fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Option<TransitionPlan> {
+    if mix_end <= 0.0 {
+        return None;
+    }
+    let reference = loud_reference(outgoing)?;
+    let fall_start = outgoing
+        .energy_curve
+        .iter()
+        .filter(|point| point.time.is_finite() && point.time <= mix_end)
+        .filter(|point| point.energy >= reference * 0.707)
+        .map(|point| point.time)
+        .next_back()
+        .unwrap_or((mix_end - AUTO_FALLBACK_SECONDS).max(0.0));
+    // A phrase is the shortest thing a crossfade can be and still be music: the
+    // last chord has to ring under it. The beat comes from the record, so the
+    // length is the analysis's, and the fall sets the floor when it is longer.
+    let phrase = 8.0 * beat_seconds_of(outgoing);
+    let fall = (mix_end - fall_start)
+        .max(phrase)
+        .clamp(2.0, AUTO_TRANSITION_MAX_SECONDS);
+    Some(TransitionPlan {
+        style: TransitionStyle::EqualPower,
+        bass_swap: false,
+        bass_swap_fraction: DEFAULT_BASS_SWAP_FRACTION,
+        filter_sweep: 0.0,
+        vocal_overlap: 0.0,
+        fade_seconds: fall,
+        effect_seconds: 0.0,
+        effect_start_seconds: 0.0,
+        transition_end_seconds: mix_end,
+        cue_seconds: incoming_cue,
+        playback_rate: 1.0,
+        bed_fraction: 0.0,
+        bed_gain_db: 0.0,
+        dip_depth: 0.0,
+        dip_width: 0.0,
+        post_glide_seconds: 0.0,
+        outgoing_duration_seconds: outgoing.duration,
+        beat_seconds: 0.0,
+        reason: format!(
+            "crossfade: no shared tempo, and the outgoing falls away over {fall:.1}s from {fall_start:.1}s"
+        ),
+    })
+}
+
+/// Do two confident keys clash?
+///
+/// Both sides have to be trusted — a key the analyzer is unsure of is no key at
+/// all. Relative major and minor (the same number on the Camelot wheel) and its
+/// neighbours never clash, and neither do keys the semitone distance already
+/// calls harmonically close; a clash needs to fail both tests.
+fn keys_clash(
+    left_key: &str,
+    left_confidence: f64,
+    right_key: &str,
+    right_confidence: f64,
+) -> bool {
+    if left_confidence < 0.25 || right_confidence < 0.25 {
+        return false;
+    }
+    if left_key.is_empty() || right_key.is_empty() {
+        return false;
+    }
+    if camelot_compatible(left_key, right_key) {
+        return false;
+    }
+    !harmonically_compatible(left_key, right_key)
+}
+
+/// Camelot-wheel neighbours: the same number across the letters (relative major
+/// and minor), or one step either way with the same letter.
+fn camelot_compatible(left: &str, right: &str) -> bool {
+    let Some((left_number, left_minor)) = camelot(left) else {
+        return false;
+    };
+    let Some((right_number, right_minor)) = camelot(right) else {
+        return false;
+    };
+    if left_number == right_number {
+        return left_minor != right_minor;
+    }
+    if left_minor != right_minor {
+        return false;
+    }
+    let step = (left_number + 12 - right_number) % 12;
+    step == 1 || step == 11
+}
+
+/// A key's Camelot number (1…12) and whether it is a minor key.
+fn camelot(key: &str) -> Option<(usize, bool)> {
+    let (index, mode) = split_key(key);
+    let index = index?;
+    let minor = mode? == "minor";
+    const MINOR: [usize; 12] = [5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10];
+    const MAJOR: [usize; 12] = [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1];
+    Some(if minor {
+        (MINOR[index], true)
+    } else {
+        (MAJOR[index], false)
+    })
 }
 
 fn technique_plan(
@@ -2867,6 +3034,105 @@ mod tests {
             .collect::<Vec<_>>();
         a.vocal_activity_mask = vec![mask; points.len()];
         a.energy_curve = points;
+    }
+
+    /// A curve at one energy, then `tail` seconds of it falling away to 0.05.
+    fn with_falling_tail(a: &mut Analysis, seconds: f64, tail: f64) {
+        let points = (0..((seconds / 0.5) as usize))
+            .map(|index| {
+                let time = index as f64 * 0.5;
+                let energy = if time < seconds - tail {
+                    0.8
+                } else {
+                    0.8 * (1.0 - (time - (seconds - tail)) / tail).max(0.06)
+                };
+                audio_analysis::EnergyPoint { time, energy }
+            })
+            .collect::<Vec<_>>();
+        a.energy_curve = points;
+        a.vocal_activity_mask = vec![0.5; a.energy_curve.len()];
+    }
+
+    fn flat_out_and_tempo_gap(seconds: f64, bpm: f64, incoming_bpm: f64) -> (Analysis, Analysis) {
+        let mut out = analysis(0.0, seconds + 5.0, vec![0.0, 2.0, 4.0]);
+        out.bpm = bpm;
+        out.beat_interval = 60.0 / bpm;
+        out.beat_confidence = 0.8;
+        out.content_end = seconds;
+        with_vocal_curve(&mut out, seconds + 5.0, 0.5);
+        let mut inc = analysis(0.0, seconds, vec![0.0, 2.0, 4.0]);
+        inc.bpm = incoming_bpm;
+        inc.beat_interval = 60.0 / incoming_bpm;
+        inc.beat_confidence = 0.8;
+        with_vocal_curve(&mut inc, seconds, 0.5);
+        (out, inc)
+    }
+
+    #[test]
+    fn an_unmatched_pair_crosses_over_where_the_tail_falls() {
+        // 8 % apart, and the outgoing record's last 12 s fall away: a clean
+        // equal-power crossfade placed on the fall, at the record's own rate.
+        let (mut out, inc) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
+        with_falling_tail(&mut out, 205.0, 12.0);
+        let plan = plan_from(&out, &inc, 8.0);
+        assert_eq!(plan.style, TransitionStyle::EqualPower);
+        assert_eq!(plan.playback_rate, 1.0, "an unmatched pair is not stretched");
+        assert!(plan.effect_seconds == 0.0);
+        assert!(!plan.bass_swap, "no bass swap on a clean crossfade");
+        assert!(
+            plan.fade_seconds >= 8.0 * 60.0 / 120.0 - 1e-6,
+            "at least a phrase: {:.2}s",
+            plan.fade_seconds
+        );
+        assert!((plan.transition_end_seconds - out.content_end).abs() < 1e-6);
+        assert!(plan.reason.contains("falls away"), "{}", plan.reason);
+    }
+
+    #[test]
+    fn a_busy_handover_earns_the_technique() {
+        // The same 8 % gap, but both records are still at full energy across
+        // the join: there is nowhere to cross over, so the technique stands.
+        let (out, inc) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
+        let plan = plan_from(&out, &inc, 8.0);
+        assert!(plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
+        assert!(!plan.reason.is_empty());
+    }
+
+    #[test]
+    fn a_key_clash_earns_an_effect_even_with_a_falling_tail() {
+        // Pair 10 of the corpus: C minor against A♭ major. They are a semitone
+        // distance no blend wants and neither is a Camelot neighbour, so the
+        // effect stands even though the outgoing tail falls away.
+        let (mut out, mut inc) = flat_out_and_tempo_gap(200.0, 144.0, 121.0);
+        out.key = "C minor".into();
+        out.key_confidence = 0.51;
+        inc.key = "A♭ major".into();
+        inc.key_confidence = 0.35;
+        with_falling_tail(&mut out, 205.0, 12.0);
+        assert!(keys_clash(&out.key, out.key_confidence, &inc.key, inc.key_confidence));
+        let plan = plan_from(&out, &inc, 8.0);
+        assert!(plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
+    }
+
+    #[test]
+    fn camelot_neighbours_and_relative_keys_never_clash() {
+        // C major and A minor: the same number on the wheel.
+        assert!(!keys_clash("C major", 0.6, "A minor", 0.6));
+        // A minor (8A) and E minor (9A): one step, same letter.
+        assert!(!keys_clash("A minor", 0.6, "E minor", 0.6));
+        // C major (8B) and G major (9B): one step the other way, and a fifth.
+        assert!(!keys_clash("C major", 0.6, "G major", 0.6));
+        // C major against F♯ major: six semitones and no wheel relationship.
+        assert!(keys_clash("C major", 0.6, "F♯ major", 0.6));
+        // One side under the trust gate is no key at all.
+        assert!(!keys_clash("C major", 0.24, "F♯ major", 0.9));
+        assert!(!keys_clash("C major", 0.9, "F♯ major", 0.10));
+        // The Camelot numbers themselves.
+        assert_eq!(camelot("A minor"), Some((8, true)));
+        assert_eq!(camelot("C major"), Some((8, false)));
+        assert_eq!(camelot("E minor"), Some((9, true)));
+        assert_eq!(camelot("G major"), Some((9, false)));
+        assert_eq!(camelot(""), None);
     }
 
     #[test]
