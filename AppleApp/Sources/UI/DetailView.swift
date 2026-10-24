@@ -538,18 +538,18 @@ struct DetailView: View {
                 artistMoreMenu(page)
             } else {
                 if isWide {
-                    PlayPill(iconOnly: false, isPlaying: controller.isPlaybackContextPlaying(browseId)) {
-                        playContext(page)
-                    }
                     ShufflePill {
                         playContext(page, shuffled: true)
                     }
-                } else {
-                    PlayPill(iconOnly: true, isPlaying: controller.isPlaybackContextPlaying(browseId)) {
+                    PlayPill(iconOnly: false, isPlaying: controller.isPlaybackContextPlaying(browseId)) {
                         playContext(page)
                     }
+                } else {
                     CircleIconButton(icon: Image(.bchShuffle), label: "Shuffle") {
                         playContext(page, shuffled: true)
+                    }
+                    PlayPill(iconOnly: true, isPlaying: controller.isPlaybackContextPlaying(browseId)) {
+                        playContext(page)
                     }
                 }
 
@@ -1210,12 +1210,21 @@ struct DetailView: View {
 
     private func toggleSave(_ page: DetailPageModel) async {
         guard let pid = page.libraryPlaylistId else { return }
+        guard !saving else { return }
         let generation = PageSession.generation()
         saving = true
-        let next = !saved
+        let wasSaved = saved
+        let next = !wasSaved
+        // Optimistic, like the subscribe button beside it: flip now so the
+        // control answers instantly, and roll back if the server refuses.
+        // Waiting on the network made the two library toggles disagree in feel.
+        saved = next
         let failure = await LibraryActions.ratePlaylist(playlistId: pid, saved: next)
         guard generation == PageSession.generation(), !Task.isCancelled else { return }
-        if failure == nil { saved = next }
+        if let failure {
+            saved = wasSaved
+            toast.show("Couldn’t update library: \(failure)", kind: .failure)
+        }
         saving = false
     }
 
