@@ -359,7 +359,7 @@ object InnertubeParser {
             .o("singleColumnBrowseResultsRenderer").a("tabs")?.firstOrNull()
             .o("tabRenderer").o("content").o("sectionListRenderer").a("contents")
             .orEmpty()
-        return sections.mapNotNull { section ->
+        val parsed = sections.mapNotNull { section ->
             val grid = section.o("gridRenderer") ?: return@mapNotNull null
             val title = grid.o("header").o("gridHeaderRenderer").o("title").runs()
             val items = grid.a("items").orEmpty().mapNotNull { item ->
@@ -374,9 +374,25 @@ object InnertubeParser {
                 val browseId = endpoint.s("browseId") ?: return@mapNotNull null
                 val label = button.o("buttonText").runs().takeIf { it.isNotBlank() }
                     ?: return@mapNotNull null
-                MoodGenre(label, browseId, endpoint.s("params"))
+                MoodGenre(
+                    title = label,
+                    browseId = browseId,
+                    params = endpoint.s("params"),
+                    stripeColor = button.o("solid").s("leftStripeColor")?.toLongOrNull(),
+                )
             }
             if (title.isBlank() || items.isEmpty()) null else MoodGenreSection(title, items)
+        }
+        // A signed-in page leads with a personalised "For you" grid, which is
+        // only shortcuts to buttons the Moods and Genres grids already hold.
+        // Dropped: Explore shows the full set once, not a second copy of a
+        // few. The heading is localised, so it is recognised by repeating a
+        // later section's button, with the English title as a backstop.
+        return parsed.filterIndexed { index, section ->
+            val later = parsed.drop(index + 1)
+                .flatMapTo(HashSet()) { it.items.map { item -> item.browseId to item.params } }
+            val shortcuts = section.items.any { (it.browseId to it.params) in later }
+            !shortcuts && !section.title.equals("For you", ignoreCase = true)
         }
     }
 
