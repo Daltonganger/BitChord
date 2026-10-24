@@ -2111,6 +2111,47 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
     let fall = (mix_end - fall_start)
         .max(phrase)
         .clamp(2.0, AUTO_TRANSITION_MAX_SECONDS);
+    // F-4: a DJ starts a crossfade on the one. The end stays on the fall/anchor
+    // rules (E/E-2 own it); the start moves to the nearest downbeat of the
+    // chosen bar grid, preferring a phrase boundary (an even bar), taking or
+    // giving at most one bar.
+    let bar = 4.0 * beat_seconds_of(outgoing);
+    let start = mix_end - fall;
+    // The phrase is the crossfade's floor; a bar snap may not eat into it.
+    // Otherwise a slightly-nearer phrase bar would shorten a two-bar fade to
+    // one bar and undo the length the phrase exists to guarantee.
+    let min_keep = phrase.min(AUTO_TRANSITION_MAX_SECONDS);
+    let snapped_start = if bar > 0.1 {
+        let mut candidates: Vec<(f64, bool, f64)> = Vec::new();
+        for (index, bar_time) in outgoing.downbeats.iter().enumerate() {
+            if !bar_time.is_finite() {
+                continue;
+            }
+            let distance = (bar_time - start).abs();
+            if distance > bar + 1e-6 {
+                continue;
+            }
+            let fall_after = mix_end - *bar_time;
+            if fall_after + 1e-6 < min_keep || fall_after > AUTO_TRANSITION_MAX_SECONDS {
+                continue;
+            }
+            candidates.push((*bar_time, index % 2 == 0, distance));
+        }
+        // A phrase boundary first, then the nearest; the length floor already
+        // removed the snaps that would shorten the fade.
+        candidates.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then(a.2.total_cmp(&b.2))
+                .then(a.0.total_cmp(&b.0))
+        });
+        candidates.first().map(|(bar_time, _, _)| *bar_time)
+    } else {
+        None
+    };
+    let (fall, start, snapped) = match snapped_start {
+        Some(bar_time) => (mix_end - bar_time, bar_time, true),
+        None => (fall, start, false),
+    };
     Some(TransitionPlan {
         style: TransitionStyle::EqualPower,
         bass_swap: false,
@@ -2135,7 +2176,9 @@ fn clean_crossfade(outgoing: &Analysis, mix_end: f64, incoming_cue: f64) -> Opti
         outgoing_duration_seconds: outgoing.duration,
         beat_seconds: 0.0,
         reason: format!(
-            "crossfade: no shared tempo, and the outgoing falls away over {fall:.1}s from {fall_start:.1}s"
+            "crossfade: no shared tempo; the outgoing falls away from {fall_start:.1}s and the \
+             {fall:.1}s blend starts at {start:.1}s{}",
+            if snapped { " (bar-aligned)" } else { "" }
         ),
     })
 }
@@ -4788,6 +4831,36 @@ mod tests {
         assert!((phrase_beat - 2.45 / 4.0).abs() < 1e-6, "{phrase_beat}");
         // The phrase is now a musical 8 beats, not half of one.
         assert!((8.0 * phrase_beat - 4.9).abs() < 0.1);
+    }
+
+    /// F-4: a clean crossfade starts on the one. The end is untouched; the
+    /// start moves to the nearest downbeat, and an even (phrase) bar beats a
+    /// nearer odd one.
+    #[test]
+    fn a_clean_crossfade_starts_on_a_phrase_bar() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.content_end = 100.0;
+        // Last full-energy point 95.5 -> a 4.5 s fall, start 95.5.
+        with_energy(&mut out, 100.0, |time| if time <= 95.5 { 0.8 } else { 0.1 });
+        let plan = clean_crossfade(&out, 100.0, 0.0).expect("a crossfade");
+        let start = plan.transition_end_seconds - plan.fade_seconds;
+        assert!((start - 96.0).abs() < 1e-6, "start {start}");
+        assert!((plan.fade_seconds - 4.0).abs() < 1e-6, "fade {}", plan.fade_seconds);
+        assert!(plan.reason.contains("bar-aligned"), "{}", plan.reason);
+    }
+
+    #[test]
+    fn a_clean_crossfade_may_snap_to_an_odd_bar_when_that_is_all_there_is() {
+        let mut out = analysis(0.0, 100.0, vec![
+            0.0, 20.0, 40.0, 60.0, 80.0, 85.0, 90.0, 95.0, 99.0, 103.0,
+        ]);
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |time| if time <= 95.5 { 0.8 } else { 0.1 });
+        let plan = clean_crossfade(&out, 100.0, 0.0).expect("a crossfade");
+        let start = plan.transition_end_seconds - plan.fade_seconds;
+        // 95 is the only downbeat inside the one-bar radius.
+        assert!((start - 95.0).abs() < 1e-6, "start {start}");
+        assert!((plan.fade_seconds - 5.0).abs() < 1e-6);
     }
 
     /// F: a vocal-free, phrase-aligned unit after the blend start is replayed
