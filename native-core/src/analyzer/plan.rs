@@ -23,6 +23,11 @@ const VOCAL_ACTIVE_THRESHOLD: f64 = 0.6;
 const FILTER_SWEEP: f64 = 1.0;
 const AUTO_TRANSITION_MAX_BEATS: f64 = 16.0;
 const AUTO_TRANSITION_MAX_SECONDS: f64 = 12.0;
+/// F's bridged transition may run longer than an ordinary one: the owner wants
+/// long, natural overlaps, and the 12 s ceiling was upstream's choice rather
+/// than a listening result. The base fade still respects 12 s; only the bridge
+/// may take the total to this.
+const MAX_BRIDGED_SECONDS: f64 = 16.0;
 const AUTO_MIN_SECONDS: f64 = 4.0;
 const AUTO_FAST_TRACK_MIN_SECONDS: f64 = 6.0;
 /// Upstream `AUTO_FALLBACK_SECONDS` — the fade used when no analysis landed.
@@ -940,10 +945,15 @@ fn analyze(
     match model_grid {
         Some(grid) => {
             log::info!(
-                "automix analysis {path}: beat model grid {:.1} bpm, {} downbeats, confidence {:.2}",
+                "automix analysis {path}: beat model grid {:.1} bpm, {} downbeats, confidence {:.2}, \
+                 beats {} span {:.1}..{:.1} of {:.1}s",
                 grid.bpm,
                 grid.downbeats.len(),
                 grid.beat_confidence,
+                grid.beats.len(),
+                grid.beats.first().copied().unwrap_or(0.0),
+                grid.beats.last().copied().unwrap_or(0.0),
+                duration,
             );
             fill_grid(&mut analysis, grid);
         }
@@ -2588,8 +2598,8 @@ fn bridge_unit(outgoing: &Analysis, plan: &TransitionPlan) -> Result<BridgeUnit,
     let mut failure: &'static str = "no phrase-aligned unit after the blend start";
     for &bars in orders {
         let ideal = 4.0 * bars as f64 * beat;
-        if plan.fade_seconds + ideal > AUTO_TRANSITION_MAX_SECONDS {
-            failure = "the unit would push the fade past 12s";
+        if plan.fade_seconds + ideal > MAX_BRIDGED_SECONDS {
+            failure = "the unit would push the fade past 16s";
             continue;
         }
         // The last eligible unit, closest to the record's ending.
@@ -2630,8 +2640,8 @@ fn bridge_unit(outgoing: &Analysis, plan: &TransitionPlan) -> Result<BridgeUnit,
             if measured <= 0.5 {
                 continue;
             }
-            if plan.fade_seconds + measured > AUTO_TRANSITION_MAX_SECONDS {
-                failure = "the unit would push the fade past 12s";
+            if plan.fade_seconds + measured > MAX_BRIDGED_SECONDS {
+                failure = "the unit would push the fade past 16s";
                 continue;
             }
             let Some(mean) = vocal_activity_between(outgoing, begin, end) else {
@@ -4601,6 +4611,31 @@ mod tests {
         assert!((plan.fade_seconds - 12.0).abs() < 1e-6);
         assert_eq!(plan.outgoing_hold_seconds, 0.0, "an ordinary blend has no hold");
         assert!(plan.reason.contains("bridge: 2 bars"), "{}", plan.reason);
+    }
+
+    /// A bridged fade may run past the ordinary 12 s ceiling, up to 16 s.
+    #[test]
+    fn a_bridge_may_take_the_fade_to_sixteen_seconds() {
+        let mut out = analysis(0.0, 100.0, (0..=50).map(|i| i as f64 * 2.0).collect());
+        out.beat_confidence = 0.8;
+        out.content_end = 100.0;
+        with_energy(&mut out, 100.0, |time| {
+            if time < 80.0 {
+                0.8
+            } else {
+                0.8 * (1.0 - (time - 80.0) / 20.0).max(0.02)
+            }
+        });
+        for value in out.vocal_activity_mask.iter_mut() {
+            *value = 0.1;
+        }
+        // 10.5 s base + a 4 s unit = 14.5 s, which the old 12 s cap refused.
+        let mut plan = edge_plan(100.0, 10.5, 0.0);
+        plan.reason = "crossfade: test".into();
+        apply_bridge(&out, &mut plan);
+        assert!((plan.bridge_seconds - 4.0).abs() < 1e-6, "{}", plan.reason);
+        assert!((plan.fade_seconds - 14.5).abs() < 1e-6, "{}", plan.reason);
+        assert!(plan.fade_seconds <= 16.0);
     }
 
     /// A bridge on a cold ending sits before the chord and grows the hold by
