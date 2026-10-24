@@ -440,6 +440,19 @@ object Innertube {
         }
 
     /**
+     * Live media results for the typeahead phase — the same shape as [search]
+     * but deliberately unauthenticated, so YouTube Music does not log each
+     * debounced keystroke to the account's server-side search history. Upstream
+     * `Innertube.kt:658` `searchTypeahead`.
+     */
+    suspend fun searchTypeahead(query: String): JsonObject = postMusic(
+        endpoint = "search",
+        anonymous = true,
+    ) {
+        put("query", query)
+    }
+
+    /**
      * A browse page — Home (`FEmusic_home`), Explore (`FEmusic_explore`),
      * charts (`FEmusic_charts`), new releases (`FEmusic_new_releases`) and
      * detail pages are all this one endpoint with a different id, upstream's
@@ -989,6 +1002,7 @@ object Innertube {
         query: Map<String, String> = emptyMap(),
         refreshAllowed: Boolean = true,
         requireIdentity: Boolean = false,
+        anonymous: Boolean = false,
         bodyExtras: JsonObjectBuilder.() -> Unit,
     ): JsonObject {
         val generation = sessionGeneration
@@ -1023,7 +1037,7 @@ object Innertube {
             put("X-YouTube-Client-Name", WEB_REMIX_CLIENT_ID)
             put("X-YouTube-Client-Version", clientVersion)
             session.visitor?.let { put("X-Goog-Visitor-Id", it) }
-            putAll(authHeaders(session, MUSIC_ORIGIN))
+            if (!anonymous) putAll(authHeaders(session, MUSIC_ORIGIN))
         }
         val text = try { withRetry("postMusic/$endpoint", attempts = if (safeRead) 3 else 1) {
             checkSession(generation)
@@ -1036,7 +1050,7 @@ object Innertube {
                 if (safeRead && refreshAllowed) {
                     checkSession(generation)
                     updateSession { if (it.generation == generation) it.copy(scope = null) else it }
-                    return postMusic(endpoint, query, refreshAllowed = false, requireIdentity = requireIdentity, bodyExtras = bodyExtras)
+                    return postMusic(endpoint, query, refreshAllowed = false, requireIdentity = requireIdentity, anonymous = anonymous, bodyExtras = bodyExtras)
                 }
                 throw AuthenticationException()
             }

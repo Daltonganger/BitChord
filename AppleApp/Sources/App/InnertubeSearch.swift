@@ -117,6 +117,30 @@ final class InnertubeSearch: Sendable {
         }
     }
 
+    /// Live media rows for the typeahead dropdown — the same hits as a search,
+    /// but unauthenticated so a slow typist's intermediate queries don't land
+    /// in the account's server-side search history.
+    func typeahead(_ input: String) async throws -> [SearchHitDTO] {
+        try await withCheckedThrowingContinuation { continuation in
+            SearchBridge.shared.searchTypeahead(
+                query: input,
+                callback: BridgeCallbackAdapter { json, message in
+                    if let json {
+                        do {
+                            let hits = try JSONDecoder()
+                                .decode([SearchHitDTO].self, from: Data(json.utf8))
+                            continuation.resume(returning: hits)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    } else {
+                        continuation.resume(throwing: SearchError(message: message ?? "typeahead failed"))
+                    }
+                }
+            )
+        }
+    }
+
     struct SearchError: Error { let message: String }
 }
 

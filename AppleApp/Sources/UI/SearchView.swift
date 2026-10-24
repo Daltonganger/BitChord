@@ -105,6 +105,11 @@ struct SearchView: View {
     /// Focus for the native search field, including tab reselect and deep links.
     @FocusState private var searchFieldFocused: Bool
     @State private var suggestTask: Task<Void, Never>?
+    /// Live media rows for the typeahead dropdown, fetched in parallel with the
+    /// text suggestions on its own, longer debounce (upstream's
+    /// `TYPEAHEAD_MEDIA_DEBOUNCE_MS`).
+    @State private var typeaheadHits: [SearchHitDTO] = []
+    @State private var typeaheadTask: Task<Void, Never>?
     /// The in-flight search, so leaving the screen or starting a new one can
     /// abandon it. Without a handle the late answer from an abandoned search
     /// writes its results into whatever the screen is showing by then.
@@ -227,6 +232,7 @@ struct SearchView: View {
         hits = []
         searchError = nil
         suggestions = []
+        typeaheadHits = []
         // Nothing on screen is for any term now, which is what stops the
         // old results reappearing under a field that has been emptied.
         searchedTerm = ""
@@ -259,6 +265,8 @@ struct SearchView: View {
     private func cancelSuggestions() {
         suggestTask?.cancel()
         suggestTask = nil
+        typeaheadTask?.cancel()
+        typeaheadTask = nil
     }
 
     private var resultsColumn: some View {
@@ -417,6 +425,49 @@ struct SearchView: View {
         .searchRowChrome()
     }
 
+    /// One live media row in the typeahead dropdown. A track starts a radio from
+    /// itself (upstream's `onTopResultPlay` — the dropdown is a set of answers,
+    /// not a running order); a browse hit opens its page. Shares the result-row
+    /// chrome so the dropdown reads as one column with the committed results.
+    @ViewBuilder
+    private func typeaheadRow(_ hit: SearchHitDTO) -> some View {
+        Group {
+            if hit.isBrowse, let browseId = hit.browseId {
+                NavigationLink(destination: DetailView(browseId: browseId, initialTitle: hit.title)) {
+                    browseRow(hit)
+                }
+                .buttonStyle(.plain)
+                .simultaneousGesture(TapGesture().onEnded {
+                    RecentSearchStore.record(RecentSearchEntity(
+                        id: browseId, title: hit.title,
+                        subtitle: hit.subtitle ?? "",
+                        artworkUrl: hit.thumbnailUrl,
+                        entityType: browseEntityType(hit)
+                    ))
+                })
+                .shelfCardContextMenu(
+                    ShelfCard(
+                        title: hit.title, subtitle: hit.subtitle,
+                        thumbnailUrl: hit.thumbnailUrl, browseId: browseId
+                    ),
+                    roundArtwork: hit.browseType?.uppercased() == "ARTIST"
+                )
+            } else {
+                SongRow(
+                    entry: hit.asEntry(),
+                    play: {
+                        recordTrackEntity(hit)
+                        controller.playRadio(hit.asEntry())
+                    },
+                    playNext: { controller.playNext(hit.asEntry()) },
+                    addToQueue: { controller.addToQueue(hit.asEntry()) }
+                )
+            }
+        }
+        .listRowInsets(EdgeInsets(top: 2, leading: 24, bottom: 2, trailing: 24))
+        .searchRowChrome()
+    }
+
     /// The trimmed query, in one place. Everywhere below asks the same question
     /// about the field's text and must get the same answer.
     private var term: String {
@@ -459,6 +510,17 @@ struct SearchView: View {
                 Section("Recent") {
                     ForEach(recent) { entity in
                         suggestionRow(entity.title)
+                    }
+                }
+            }
+            // Upstream's `searchTypeaheadDropdown`: live media rows under the
+            // text completions while the field is still being edited, so a
+            // half-typed query already answers the question. Cleared the moment
+            // a search commits, like the suggestions above it.
+            if !typeaheadHits.isEmpty {
+                Section {
+                    ForEach(typeaheadHits) { hit in
+                        typeaheadRow(hit)
                     }
                 }
             }
@@ -780,12 +842,14 @@ struct SearchView: View {
 
     private func scheduleSuggestions(_ value: String) {
         suggestTask?.cancel()
+        typeaheadTask?.cancel()
         let term = value.trimmingCharacters(in: .whitespacesAndNewlines)
         // A committed search sets the field to the term it just ran. Fetching
         // completions for that same string puts the suggestion list back on
         // top of the results.
         guard term.count >= 2, term != searchedTerm else {
             suggestions = []
+            typeaheadHits = []
             return
         }
         suggestTask = Task {
@@ -795,6 +859,18 @@ struct SearchView: View {
             await MainActor.run {
                 guard !Task.isCancelled, self.term == term, term != self.searchedTerm else { return }
                 suggestions = list
+            }
+        }
+        // The media dropdown debounces a little longer than the text
+        // completions so the pricier request doesn't fire per keystroke; a
+        // late answer for a term the reader has moved past is dropped, not shown.
+        typeaheadTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            let hits = (try? await InnertubeSearch.shared.typeahead(term)) ?? []
+            await MainActor.run {
+                guard !Task.isCancelled, self.term == term, term != self.searchedTerm else { return }
+                typeaheadHits = hits
             }
         }
     }
