@@ -13,6 +13,10 @@ struct ArtworkView: View {
     var url: String?
     var data: Data?
     var side: CGFloat?
+    /// Fill the proposed area (edge-to-edge, cropped) instead of drawing a
+    /// `side`-square: the mood tiles and any other caller whose artwork is a
+    /// region rather than a thumbnail.
+    var fill = false
     /// The id of a track in a remote file library, when the picture may be inside
     /// its file rather than beside it.
     ///
@@ -33,12 +37,13 @@ struct ArtworkView: View {
         )
     }
 
-    init(url: String?, data: Data?, side: CGFloat? = nil, remoteId: String? = nil) {
+    init(url: String?, data: Data?, side: CGFloat? = nil, remoteId: String? = nil, fill: Bool = false) {
         // Ask for the size the screen will actually draw at, on the screen's
         // actual scale. The old fixed `× 2` under-sampled every Retina row — a
         // 160pt card on a @3x display needs 480px and was being sent 320.
         let points = side ?? 300
         let scale = Double(PlatformScale.current)
+        self.fill = fill
         self.url = url.flatMap { SharedArtwork.sized($0, Int((points * scale).rounded())) }
         self.data = data
         self.side = side
@@ -47,10 +52,15 @@ struct ArtworkView: View {
 
     var body: some View {
         Group {
-            artwork
+            if fill {
+                artwork
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                artwork
+                    .frame(width: side, height: side)
+                    .aspectRatio(1, contentMode: .fit)
+            }
         }
-        .frame(width: side, height: side)
-        .aspectRatio(1, contentMode: .fit)
         .background(.quaternary)
         .clipped()
         // No `.id()` here. Keying the subtree on the URL and byte count made

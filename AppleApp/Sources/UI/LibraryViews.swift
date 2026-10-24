@@ -512,6 +512,7 @@ struct ExploreView: View {
                     .buttonStyle(.plain)
                 }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { gridWidth = $0 }
         }
     }
 
@@ -615,7 +616,7 @@ private struct MoodTile: View {
                         max(0, highlightRGB.1 - shadowRGB.1),
                         max(0, highlightRGB.2 - shadowRGB.2)
                     )
-                    ArtworkView(url: url, data: nil, side: 200)
+                    ArtworkView(url: url, data: nil, fill: true)
                         .grayscale(1)
                         .colorMultiply(rgbColor(span))
                         .blendMode(.plusLighter)
@@ -631,7 +632,7 @@ private struct MoodTile: View {
                 endPoint: .init(x: 0.5, y: 0.62)
             )
             Text(category.title)
-                .font(.callout.weight(.bold))
+                .font(.headline.bold())
                 .foregroundStyle(.white)
                 .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 1)
                 .lineLimit(2)
