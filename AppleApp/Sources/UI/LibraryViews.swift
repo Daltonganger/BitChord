@@ -22,7 +22,7 @@ struct HomeView: View {
     var scrollPosition: Binding<ScrollPosition>? = nil
 
     var body: some View {
-        NavigationStack {
+        PageStack {
             content
                 .navigationTitle("Listen Now")
                 .toolbar {
@@ -440,7 +440,7 @@ struct ExploreView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        NavigationStack {
+        PageStack {
             content
                 .navigationTitle("Explore")
                 .toolbar {
@@ -504,7 +504,7 @@ struct ExploreView: View {
             let tiles = sections.flatMap(\.items).dedupedById()
             LazyVGrid(columns: moodColumns, spacing: 12) {
                 ForEach(tiles) { item in
-                    NavigationLink {
+                    PushLink {
                         MoodGenrePlaylistsView(category: item)
                     } label: {
                         MoodTile(category: item)
@@ -700,7 +700,7 @@ struct MoodGenrePlaylistsView: View {
                                         .lineLimit(2)
                                     Spacer()
                                     if shelf.items.count > 5 {
-                                        NavigationLink {
+                                        PushLink {
                                             LibraryGridView(title: shelf.title, items: shelf.items)
                                         } label: {
                                             HStack(spacing: 2) {
@@ -859,7 +859,7 @@ struct LibraryView: View {
     @State private var showSpotifyImport = false
 
     var body: some View {
-        NavigationStack {
+        PageStack {
             if let locked = lockedSection {
                 // One header only. The section page below owns its title and
                 // trailing buttons; an outer `.navigationTitle`/`.toolbar`
@@ -880,7 +880,7 @@ struct LibraryView: View {
                         // disc each. (The account disc beside it stays solo,
                         // like on every other tab.)
                         HStack(spacing: 2) {
-                            NavigationLink {
+                            PushLink {
                                 HistoryView()
                             } label: {
                                 Image(systemName: "clock")
@@ -1160,7 +1160,7 @@ struct LibraryLandingView: View {
                 Text(shelf.title).font(.title3.weight(.bold))
                 Spacer()
                 if totalCount > 5 {
-                    NavigationLink {
+                    PushLink {
                         LibraryGridView(title: shelf.title, items: shelf.items, isPlaylists: isPlaylists)
                     } label: {
                         HStack(spacing: 2) {
@@ -1251,7 +1251,7 @@ struct OnDeviceCard<Destination: View>: View {
     let destination: Destination
 
     var body: some View {
-        NavigationLink(destination: destination) {
+        PushLink(destination: destination) {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -1585,7 +1585,7 @@ struct DownloadsView: View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 18)], spacing: 22) {
                 ForEach(albumGroups, id: \.name) { group in
-                    NavigationLink {
+                    PushLink {
                         LocalGroupPage(
                             title: group.name,
                             subtitle: "\(group.artist) • \(group.tracks.count) song\(group.tracks.count == 1 ? "" : "s")",
@@ -2287,7 +2287,7 @@ struct SavedPlaylistsView: View {
                 .font(.title3.weight(.semibold))
             VStack(spacing: 0) {
                 ForEach(devicePlaylists) { playlist in
-                    NavigationLink {
+                    PushLink {
                         ImportedPlaylistDetailView(playlist: playlist)
                     } label: {
                         HStack(spacing: 12) {
@@ -2317,7 +2317,7 @@ struct SavedPlaylistsView: View {
                     }
                 }
                 ForEach(m3uPlaylists) { playlist in
-                    NavigationLink {
+                    PushLink {
                         LocalM3uDetailView(playlist: playlist)
                     } label: {
                         HStack(spacing: 12) {
@@ -2484,14 +2484,14 @@ struct OnDeviceView: View {
 
     var body: some View {
         List {
-            NavigationLink(destination: DownloadsView()) {
+            PushLink(destination: DownloadsView()) {
                 deviceRow(
                     systemImage: "arrow.down.circle.fill", tint: .accentColor,
                     title: "Downloads",
                     subtitle: "\(downloadStore.items.count) downloaded song\(downloadStore.items.count == 1 ? "" : "s")"
                 )
             }
-            NavigationLink(destination: LocalMusicView()) {
+            PushLink(destination: LocalMusicView()) {
                 deviceRow(
                     systemImage: "folder.fill", tint: .indigo,
                     title: "Local Music",
@@ -2499,7 +2499,7 @@ struct OnDeviceView: View {
                 )
             }
             if showCachedSongs {
-                NavigationLink(destination: CachedSongsView()) {
+                PushLink(destination: CachedSongsView()) {
                     deviceRow(
                         systemImage: "internaldrive.fill", tint: .orange,
                         title: "Cached Songs",
@@ -2507,7 +2507,7 @@ struct OnDeviceView: View {
                     )
                 }
             }
-            NavigationLink(destination: WebDavLibraryView()) {
+            PushLink(destination: WebDavLibraryView()) {
                 deviceRow(
                     systemImage: "cloud.fill", tint: .teal,
                     title: "WebDAV",
@@ -3207,7 +3207,7 @@ private struct ArtistGroupRow: View {
     let group: (name: String, tracks: [LocalTrack])
 
     var body: some View {
-        NavigationLink {
+        PushLink {
             LocalGroupPage(
                 title: group.name,
                 subtitle: "\(group.tracks.count) song\(group.tracks.count == 1 ? "" : "s")",
@@ -3503,7 +3503,7 @@ private struct YoutubeLibraryView: View {
                                     Text(shelf.title).font(.title3.weight(.bold))
                                     Spacer()
                                     if shelf.items.count > 5 {
-                                        NavigationLink("Show all") {
+                                        PushLink("Show all") {
                                             LibraryGridView(title: shelf.title, items: shelf.items, isPlaylists: isPlaylistsShelf(shelf))
                                         }
                                         .font(.callout)

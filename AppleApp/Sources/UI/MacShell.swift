@@ -20,250 +20,47 @@ enum MacInspectorKind: String, Identifiable {
     }
 }
 
-// MARK: - Transport
+extension EnvironmentValues {
+    /// The inspector the pill's lyrics and queue buttons open and close.
+    @Entry var macInspectorSelection: Binding<MacInspectorKind?> = .constant(nil)
+}
 
-/// The transport in the window toolbar, at the leading edge where Music puts
-/// it: shuffle, previous, play/pause, next and repeat.
-///
-/// This replaces the floating pill on the Mac. The pill was an iPad shape
-/// hovering over the content; a Mac player is a row of titlebar controls with a
-/// readout in the middle, and that is what this and `MacNowPlayingLCD` are.
-struct MacTransportControls: View {
-    @Environment(PlaybackController.self) private var controller
-
-    var body: some View {
-        HStack(spacing: 2) {
-            Button {
-                controller.toggleShuffle()
-            } label: {
-                Image(systemName: "shuffle")
-                    .foregroundStyle(controller.shuffleEnabled ? Color.accentColor : .primary)
-            }
-            .help(controller.shuffleEnabled ? "Turn Shuffle Off" : "Shuffle")
-            .accessibilityLabel("Shuffle")
-            .accessibilityAddTraits(controller.shuffleEnabled ? .isSelected : [])
-
-            Button {
-                controller.previous()
-            } label: {
-                Image(systemName: "backward.fill")
-            }
-            .disabled(!controller.canPlayPrevious)
-            .help("Previous")
-            .accessibilityLabel("Previous")
-
-            if controller.isBuffering {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 26, height: 22)
-                    .help("Loading")
-            } else {
-                Button {
-                    controller.togglePlayPause()
-                } label: {
-                    Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                }
-                .disabled(controller.current == nil)
-                .help(controller.isPlaying ? "Pause" : "Play")
-                .accessibilityLabel(controller.isPlaying ? "Pause" : "Play")
-            }
-
-            Button {
-                controller.next()
-            } label: {
-                Image(systemName: "forward.fill")
-            }
-            .disabled(!controller.canPlayNext)
-            .help("Next")
-            .accessibilityLabel("Next")
-
-            Button {
-                controller.cycleRepeat()
-            } label: {
-                RepeatGlyph(mode: controller.repeatMode, size: 15)
-                    .foregroundStyle(controller.repeatMode == .off ? Color.primary : .accentColor)
-            }
-            .help(repeatHelp)
-            .accessibilityLabel(repeatHelp)
-
-            MacPartyButton()
-        }
-        .labelStyle(.iconOnly)
-        // Keep each button its own element. Once a pushed page puts its back
-        // button in the navigation area, AppKit otherwise reports every button
-        // in this item under the first one's name ("Shuffle").
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Playback Controls")
-    }
-
-    private var repeatHelp: String {
-        switch controller.repeatMode {
-        case .off: "Repeat Off"
-        case .all: "Repeat All"
-        case .one: "Repeat One"
+/// The floating pill under a page in the browse stack. Each page carries it,
+/// the root and every pushed one: an inset on the stack itself reaches only
+/// its root page.
+struct MacPillInset: ViewModifier {
+    func body(content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) {
+            PlaybackPill()
+                .frame(maxWidth: 940)
+                .padding(.horizontal, 18)
+                .padding(.bottom, 12)
+                .frame(maxWidth: .infinity)
         }
     }
 }
 
-/// Who is listening, and the way in when nobody is — the pill's party control,
-/// now a toolbar item. The badge is dropped here: the titlebar has no room for
-/// it, and the tooltip says the count.
-private struct MacPartyButton: View {
-    @Environment(AppModel.self) private var appModel
-    @State private var party = PartyStore.shared
+// MARK: - Downloads
 
-    private var help: String {
-        guard party.inParty else { return "Listen Together" }
-        let count = party.state.members.count
-        return count > 1 ? "Listening Together · \(count)" : "Listening Together"
-    }
+/// The titlebar's Downloads button. The list opens as a popover anchored to
+/// the button, so a click anywhere else in the window puts it away, rather
+/// than a sheet that holds the window until it is dismissed.
+struct MacDownloadsButton: View {
+    @Environment(AppModel.self) private var appModel
 
     var body: some View {
+        @Bindable var appModel = appModel
         Button {
-            if party.inParty {
-                appModel.partyMembersPresented = true
-            } else {
-                appModel.listenTogetherPresented = true
-            }
+            appModel.downloadManagerPresented.toggle()
         } label: {
-            Image(systemName: "person.2.fill")
-                .foregroundStyle(party.inParty ? Color.accentColor : .primary)
+            Image(systemName: "arrow.down.circle")
         }
-        .help(help)
-        .accessibilityLabel(help)
-    }
-}
-
-/// The centered readout: sleeve, title, artist and the scrubber.
-///
-/// Clicking the sleeve opens the full player, which stays the one place for the
-/// big artwork; the LCD is the always-there summary of what is playing.
-struct MacNowPlayingLCD: View {
-    @Environment(PlaybackController.self) private var controller
-    @Environment(AppModel.self) private var appModel
-    /// A drag in progress. The slider follows the pointer, and playback only
-    /// hears about it when the drag ends — seeking on every frame would fight
-    /// the clock it is meant to set.
-    @State private var scrub: Double?
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                appModel.nowPlayingPresented = true
-            } label: {
-                ArtworkView(entry: controller.current, side: 28)
-                    .clipShape(.rect(cornerRadius: 6, style: .continuous))
-            }
-            .buttonStyle(.plain)
-            .help("Open the Player")
-            .accessibilityLabel("Open the Player")
-
-            Button {
-                appModel.nowPlayingPresented = true
-            } label: {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(controller.current?.title ?? "Not Playing")
-                        .font(.callout.weight(.semibold))
-                        .lineLimit(1)
-                    Text(controller.current?.artist ?? "")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .frame(width: 128, alignment: .leading)
-                .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .disabled(controller.current == nil)
-            .help("Open the Player")
-
-            VStack(spacing: 2) {
-                Slider(value: scrubBinding, in: 0...max(controller.duration, 1)) { editing in
-                    guard !editing else { return }
-                    if let value = scrub { controller.seek(to: value) }
-                    scrub = nil
-                }
-                .controlSize(.mini)
-                .disabled(controller.duration <= 0)
-                .help("Scrub")
-
-                HStack(spacing: 4) {
-                    Text(clock(scrub ?? controller.position))
-                    Spacer(minLength: 4)
-                    Text(clock(max(controller.duration - (scrub ?? controller.position), 0)))
-                }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
-            .frame(width: 124)
+        .help("Downloads")
+        .accessibilityLabel("Downloads")
+        .popover(isPresented: $appModel.downloadManagerPresented, arrowEdge: .bottom) {
+            DownloadManagerView()
+                .frame(width: 420, height: 520)
         }
-        .frame(width: 306)
-        .contextMenu {
-            if let current = controller.current {
-                SongActionButtons(entry: current, showSleepTimer: false)
-            }
-        }
-    }
-
-    private var scrubBinding: Binding<Double> {
-        Binding(
-            get: { scrub ?? min(max(controller.position, 0), max(controller.duration, 0)) },
-            set: { scrub = $0 }
-        )
-    }
-
-    private func clock(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let total = Int(seconds.rounded(.down))
-        return "\(total / 60):\(String(format: "%02d", total % 60))"
-    }
-}
-
-// MARK: - Trailing controls
-
-/// Lyrics and queue: two toggles onto the same inspector, the way Music's
-/// titlebar has one button per panel.
-struct MacInspectorToggles: View {
-    @Binding var selection: MacInspectorKind?
-
-    var body: some View {
-        HStack(spacing: 2) {
-            toggle(.lyrics, icon: .bchLyrics, label: "Lyrics")
-            toggle(.queue, icon: .bchQueue, label: "Queue")
-        }
-    }
-
-    private func toggle(_ kind: MacInspectorKind, icon: ImageResource, label: String) -> some View {
-        let active = selection == kind
-        return Button {
-            selection = active ? nil : kind
-        } label: {
-            Image(icon)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 15, height: 15)
-                .frame(width: 24, height: 20)
-                .foregroundStyle(active ? Color.accentColor : .primary)
-        }
-        .help(active ? "Hide \(label)" : "Show \(label)")
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(active ? .isSelected : [])
-    }
-}
-
-/// The titlebar's volume slider — the pill's hairline, sized for the toolbar.
-struct MacVolumeControl: View {
-    @Environment(PlaybackController.self) private var controller
-
-    var body: some View {
-        PillSlider(volume: Binding(
-            get: { controller.volume },
-            set: { controller.volume = $0 }
-        ))
-        .frame(width: 92)
-        .help("Volume")
-        .accessibilityLabel("Volume")
     }
 }
 

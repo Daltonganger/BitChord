@@ -18,11 +18,15 @@ struct RootView: View {
     @Environment(ToastCenter.self) private var toast
     @State private var updateChecker = UpdateChecker.shared
     #if os(macOS)
-    @Environment(\.openSettings) private var openSettings
     /// Which side panel is open beside the library, if any (M4).
     @State private var macInspector: MacInspectorKind?
     /// What the sidebar has selected.
-    @State private var macSide: MacSide = .home
+    /// The window's history: the sidebar row and the pages pushed on it.
+    @State private var navigator = MacNavigator()
+    private var macSide: MacSide {
+        get { navigator.side }
+        nonmutating set { navigator.side = newValue }
+    }
     /// Home's scroll position, owned here rather than by HomeView: the detail
     /// column rebuilds on every sidebar row switch, and the reader's place in
     /// the feed should not be one of the things that resets.
@@ -101,12 +105,14 @@ struct RootView: View {
         )) { req in
             PlaylistPickerView(request: req)
         }
+        #if os(iOS)
         .sheet(isPresented: Binding(
             get: { appModel.downloadManagerPresented },
             set: { appModel.downloadManagerPresented = $0 }
         )) {
             DownloadManagerView()
         }
+        #endif
         .sheet(isPresented: Binding(
             get: { appModel.replayPresented },
             set: { appModel.replayPresented = $0 }
@@ -367,13 +373,13 @@ struct RootView: View {
             // sidebar to Playlists, where the deletion is visible.
             guard let deleted = note.userInfo?["browseId"] as? String else { return }
             if case .playlist(let shown, _) = macSide, shown == deleted {
-                macSide = .playlists
+                navigator.replaceSide(.playlists)
                 selection = MacSide.playlists.tab.rawValue
             }
         }
         .onAppear {
             // Reopen the row the window was left on.
-            macSide = MacSide(tab: resolvedTab(AppModel.Tab(rawValue: selection) ?? .home))
+            navigator.replaceSide(MacSide(tab: resolvedTab(AppModel.Tab(rawValue: selection) ?? .home)))
         }
     }
 
@@ -382,60 +388,46 @@ struct RootView: View {
             macSidebar
                 .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 320)
         } detail: {
-            macDetail
+            HStack(spacing: 0) {
+                // One stack for every row, bound to the window's history, so
+                // back and forward cover a page opened on any of them.
+                NavigationStack(path: Bindable(navigator).path) {
+                    macDetail
+                        .modifier(MacPillInset())
+                        .navigationDestination(for: PushRoute.self) { route in
+                            route.make()
+                                .modifier(MacPillInset())
+                                // The titlebar's own back button is the way back.
+                                .navigationBarBackButtonHidden(true)
+                        }
+                }
+                .environment(\.inBrowseStack, true)
+                // Lyrics and the queue sit beside the library as a plain
+                // column. The system inspector vends toolbar items of its own,
+                // and the window's toolbar fix-up answering them looped until
+                // AppKit killed the app.
+                if let kind = macInspector {
+                    Divider()
+                    MacInspectorPane(kind: kind)
+                        .frame(width: 340)
+                        .transition(.move(edge: .trailing))
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: macInspector)
+            .environment(\.macInspectorSelection, $macInspector)
         }
         .navigationSplitViewStyle(.balanced)
         .overlay(alignment: .topLeading) {
             MacWindowToolbar(isPlayerPresented: appModel.nowPlayingPresented)
                 .frame(width: 0, height: 0)
         }
-        // Lyrics and the queue are a trailing panel, not another screen: the
-        // library stays visible and the inspector sits beside it.
-        .inspector(isPresented: Binding(
-            get: { macInspector != nil },
-            set: { if !$0 { macInspector = nil } }
-        )) {
-            MacInspectorPane(kind: macInspector ?? .queue)
-                .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
-        }
         .toolbar {
             if !appModel.nowPlayingPresented {
-                // Music's arrangement: the transport at the leading edge, the
-                // readout in the middle, the panel and output controls trailing.
                 ToolbarItem(placement: .navigation) {
-                    MacTransportControls()
+                    MacHistoryButtons(navigator: navigator)
                 }
-                ToolbarItem(placement: .principal) {
-                    MacNowPlayingLCD()
-                }
-                ToolbarItemGroup(placement: .primaryAction) {
-                    MacInspectorToggles(selection: $macInspector)
-                    if !controller.hideVolumeBar {
-                        MacVolumeControl()
-                    }
-                    AirPlayRouteButton()
-                        .frame(width: 22, height: 22)
-                        .frame(width: 28, height: 24)
-                        .help("AirPlay")
-                        .accessibilityLabel("AirPlay")
-                }
-                ToolbarItem {
-                    Button {
-                        appModel.downloadManagerPresented = true
-                    } label: {
-                        Image(systemName: "arrow.down.circle")
-                    }
-                    .help("Downloads")
-                    .accessibilityLabel("Downloads")
-                }
-                ToolbarItem {
-                    Button {
-                        openSettings()
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .help("Settings")
-                    .accessibilityLabel("Settings")
+                ToolbarItem(placement: .primaryAction) {
+                    MacDownloadsButton()
                 }
             }
         }
@@ -517,9 +509,7 @@ struct RootView: View {
         case .search:
             SearchView()
         case .playlist(let id, let title):
-            NavigationStack {
-                DetailView(browseId: id, initialTitle: title)
-            }
+            DetailView(browseId: id, initialTitle: title)
         }
     }
 
@@ -817,7 +807,8 @@ struct PlaybackPillMount: ViewModifier {
             fallbackMount(content)
         }
         #else
-        // macOS has no pill: the transport lives in the window toolbar.
+        // macOS mounts the pill on the detail column (`macSplit`), so it
+        // floats over the content rather than across the sidebar.
         content
         #endif
     }
