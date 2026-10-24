@@ -12,6 +12,9 @@ import UniformTypeIdentifiers
 /// opened under a private scheme so every request comes here instead.
 final class ChunkedVideoLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
     static let scheme = "bitchord-chunked"
+    /// The playlist `VideoSegmentIndex` builds, served from here.
+    static let hlsScheme = "bitchord-hls"
+    static let playlistURL = URL(string: "\(hlsScheme)://picture/playlist.m3u8")!
     private static let chunkBytes: Int64 = 1 << 20
     private static let parallel: Int64 = 4
 
@@ -57,6 +60,10 @@ final class ChunkedVideoLoader: NSObject, AVAssetResourceLoaderDelegate, @unchec
     }
 
     private func serve(_ request: AVAssetResourceLoadingRequest) async {
+        if request.request.url?.scheme == Self.hlsScheme {
+            await servePlaylist(request)
+            return
+        }
         do {
             let total = try await length()
             if let info = request.contentInformationRequest {
@@ -106,6 +113,36 @@ final class ChunkedVideoLoader: NSObject, AVAssetResourceLoaderDelegate, @unchec
         } catch is CancellationError {
             // AVFoundation cancelled it; nothing to answer.
         } catch {
+            if !Task.isCancelled { request.finishLoading(with: error) }
+        }
+    }
+
+    /// The head of the file, read until its segment index is complete, as
+    /// an HLS playlist whose segments AVFoundation fetches itself: each is a
+    /// bounded range, which googlevideo serves at line rate.
+    private func servePlaylist(_ request: AVAssetResourceLoadingRequest) async {
+        let started = Date()
+        do {
+            var index: VideoSegmentIndex?
+            for headBytes in [65_536, 1_048_576] where index == nil {
+                let head = try await get(range: "bytes=0-\(headBytes - 1)").0
+                index = VideoSegmentIndex.parse(head: head)
+            }
+            guard let index else { throw URLError(.cannotParseResponse) }
+            let playlist = Data(index.playlist(url: source.absoluteString).utf8)
+            if let info = request.contentInformationRequest {
+                info.contentType = "public.m3u-playlist"
+                info.contentLength = Int64(playlist.count)
+                info.isByteRangeAccessSupported = false
+            }
+            request.dataRequest?.respond(with: playlist)
+            request.finishLoading()
+            PlaybackDebugLog.shared.record(String(
+                format: "video load: playlist of %d segments (init %d KB) in %.1fs",
+                index.segments.count, Int(index.initEnd / 1024), Date().timeIntervalSince(started)
+            ))
+        } catch {
+            PlaybackDebugLog.shared.record("video load: no playlist: \(error)")
             if !Task.isCancelled { request.finishLoading(with: error) }
         }
     }
