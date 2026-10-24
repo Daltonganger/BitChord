@@ -471,14 +471,14 @@ struct CollectionDownloadActions: View {
             if let owner, !downloading, owner.requests.allSatisfy({ request in
                 store.jobs.first { $0.id == request }?.status != .failed
             }) {
-                Button(“Delete Download”, role: .destructive) {
+                Button("Delete Download", role: .destructive) {
                     toast.requestConfirmation(ConfirmationRequest(
-                        title: “Delete the download?”,
-                        message: “The downloaded songs from “\(title)” will be removed from this device and will stream again when played.”,
-                        confirm: “Delete Download”
+                        title: "Delete the download?",
+                        message: "The downloaded songs from “\(title)” will be removed from this device and will stream again when played.",
+                        confirm: "Delete Download"
                     ) {
                         DownloadStore.shared.removeOwner(owner.id)
-                        toast.show(“Deleted \(title)”)
+                        toast.show("Deleted \(title)")
                     })
                 }
             } else {
