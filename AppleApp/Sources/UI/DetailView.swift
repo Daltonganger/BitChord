@@ -386,8 +386,6 @@ struct DetailView: View {
                     Text(lines.meta)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                        .tracking(0.7)
-                        .textCase(.uppercase)
                         .multilineTextAlignment(.center)
                         .lineLimit(1)
                         .padding(.horizontal, 24)
