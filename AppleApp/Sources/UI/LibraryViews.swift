@@ -2134,9 +2134,10 @@ struct UnifiedSongsView: View {
                     if auth.signedIn {
                         Section("Your Songs") {
                             if songsLoading {
-                                ProgressView()
-                                    .frame(maxWidth: .infinity)
-                                    .listRowSeparator(.hidden)
+                                ForEach(0..<6, id: \.self) { _ in
+                                    SkeletonSongRow()
+                                        .listRowSeparator(.hidden)
+                                }
                             } else if let songsError, songs.isEmpty {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text(songsError)
@@ -2774,7 +2775,17 @@ struct HistoryView: View {
                     buttonTitle: "Sign In"
                 ) { auth.loginPresented = true }
             } else if loading {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The list as it is about to be, not a spinner standing where
+                // the list will be — upstream never shows a bare full-screen
+                // spinner for list content.
+                List {
+                    ForEach(0..<9, id: \.self) { _ in
+                        SkeletonSongRow()
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    }
+                }
+                .listStyle(.plain)
             } else if let error, songs.isEmpty {
                 EmptyStateView(
                     icon: Image(.bchClock),
@@ -3050,7 +3061,13 @@ private struct LocalPlaylistsView: View {
     var body: some View {
         Group {
             if loading {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                List {
+                    ForEach(0..<6, id: \.self) { _ in
+                        SkeletonSongRow()
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    }
+                }
             } else if files.isEmpty && user.isEmpty && imported.playlists.isEmpty {
                 VStack(spacing: 16) {
                     EmptyStateView(

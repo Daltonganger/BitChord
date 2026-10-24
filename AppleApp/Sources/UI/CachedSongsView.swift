@@ -19,9 +19,14 @@ struct CachedSongsView: View {
     var body: some View {
         Group {
             if loading {
-                ProgressView()
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                List {
+                    ForEach(0..<8, id: \.self) { _ in
+                        SkeletonSongRow()
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    }
+                }
+                .listStyle(.plain)
             } else if entries.isEmpty {
                 EmptyStateView(
                     icon: Image(.bchMusicNote),
