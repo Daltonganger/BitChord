@@ -934,7 +934,44 @@ fn analyze(
     if let Some(overlay) = overlays::get(path) {
         apply_overlay(&mut analysis, &overlay);
     }
+    // Counted in one octave before anything plans from it: a detector that
+    // reads 44 or 196 for an 88 BPM record is not wrong so much as
+    // uncountable, and every rule downstream (the stretch, the overlap in
+    // beats, "is this a slow record", the printed gap) has to agree on which
+    // octave that is.
+    let counted = fold_tempo(analysis.bpm);
+    if (counted - analysis.bpm).abs() > 0.5 {
+        log::info!(
+            "automix analysis {path}: tempo {:.1} BPM counted as {counted:.1} \
+             (octave fold for planning)",
+            analysis.bpm
+        );
+        analysis.bpm = counted;
+        analysis.beat_interval = 60.0 / counted;
+    }
     analysis
+}
+
+/// The octave a tempo is counted in, for planning.
+///
+/// Tempo is octave-ambiguous by nature — half-time and double-time readings
+/// describe the same record — and the beat models take both: the corpus reads
+/// tracks at 44, 196, 198 and 208 BPM that the DSP estimator put near 88–134.
+/// Folding into the band where a beat is a useful beat keeps the plan and the
+/// log in one octave; the phase is unaffected, because the beat times
+/// themselves are left exactly as measured.
+fn fold_tempo(bpm: f64) -> f64 {
+    if !bpm.is_finite() || bpm <= 0.0 {
+        return bpm;
+    }
+    let mut folded = bpm;
+    while folded >= 175.0 {
+        folded /= 2.0;
+    }
+    while folded < 70.0 {
+        folded *= 2.0;
+    }
+    folded
 }
 
 /// Resamples the open-unmix head mask onto the energy-curve grid and overrides
@@ -1918,7 +1955,8 @@ fn technique_plan(
         outgoing_duration_seconds: outgoing.duration,
         beat_seconds: beat,
         reason: format!(
-            "{why} (clash; {blend_fade:.1}s blend, {effect_seconds:.1}s effect; tempo {out_bpm:.0}→{in_bpm:.0} BPM, grid {:.2})",
+            "{why} (clash; {blend_fade:.1}s blend, {effect_seconds:.1}s effect; {}, grid {:.2})",
+            tempo_summary(out_bpm, in_bpm),
             outgoing.beat_confidence
         ),
     })
@@ -2023,6 +2061,29 @@ fn normalized_tempo_ratio(current: f64, next: f64) -> f64 {
         ratio *= 2.0;
     }
     ratio
+}
+
+/// The tempo relationship a plan was decided from, in words a log can carry.
+///
+/// A beat tracker reads an octave out often enough that the planner already
+/// compares tempos folded — 198 against 99 is the same beat at double time,
+/// not a clash — but the reason string printed the raw numbers, so the log read
+/// like one (`tempo 198→99 BPM, clash`). The fold is printed with the gap it
+/// produced, which is the number [`effect_earned`] actually decided on.
+fn tempo_summary(out_bpm: f64, in_bpm: f64) -> String {
+    if out_bpm <= 0.0 || in_bpm <= 0.0 {
+        return "tempo unknown".into();
+    }
+    let ratio = normalized_tempo_ratio(out_bpm, in_bpm);
+    // `normalized_tempo_ratio` folds `in/out` by a power of two, so this is the
+    // octave multiplier it applied to the incoming tempo.
+    let fold = ratio * out_bpm / in_bpm;
+    let mut summary = format!("tempo {out_bpm:.0}→{in_bpm:.0} BPM");
+    if (fold - 1.0).abs() > 0.01 {
+        summary.push_str(&format!(" ({fold}× to align)"));
+    }
+    summary.push_str(&format!(", gap {:.0}%", (1.0 - ratio).abs() * 100.0));
+    summary
 }
 
 /// Where playback of the incoming track starts: the earliest point it makes
@@ -2759,6 +2820,56 @@ mod tests {
         assert!(effect_earned(true, 0.0, false, 0.0));
         assert!(effect_earned(false, 0.071, false, 0.0));
         assert!(effect_earned(false, 0.01, true, 0.16));
+    }
+
+    #[test]
+    fn a_tempo_is_counted_in_the_octave_that_plans() {
+        // The corpus's four out-of-band readings fold to the octave the DSP
+        // estimator and the Music Understanding overlay agree on.
+        assert!((fold_tempo(44.0) - 88.0).abs() < 1e-9);
+        assert!((fold_tempo(196.0) - 98.0).abs() < 1e-9);
+        assert!((fold_tempo(198.2) - 99.1).abs() < 1e-9);
+        assert!((fold_tempo(207.7) - 103.85).abs() < 1e-9);
+        // Readings already in the band are left exactly alone.
+        for bpm in [70.0, 88.0, 93.4, 121.3, 127.0, 143.0, 174.9] {
+            assert!((fold_tempo(bpm) - bpm).abs() < 1e-9, "{bpm}");
+        }
+        // A nonsense tempo is passed through rather than spun to nothing.
+        assert_eq!(fold_tempo(0.0), 0.0);
+        assert!(fold_tempo(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn two_to_one_tempos_are_the_same_beat() {
+        // A 198 BPM grid against a 99 BPM one is double time, not a clash: the
+        // ratio folds by an octave and the gap that decides an effect is ~0.
+        let ratio = normalized_tempo_ratio(198.2, 99.0);
+        assert!((ratio - 1.0).abs() < 0.01, "ratio {ratio}");
+        assert!(!effect_earned(false, (1.0 - ratio).abs(), false, 0.0));
+        assert!(!effect_earned(false, (1.0 - normalized_tempo_ratio(99.0, 198.2)).abs(), false, 0.0));
+        // …and the log says so instead of printing a raw 2:1 beside "clash".
+        let summary = tempo_summary(198.2, 99.0);
+        assert!(summary.contains("2×"), "{summary}");
+        assert!(summary.contains("gap 0%"), "{summary}");
+    }
+
+    #[test]
+    fn three_to_two_is_not_a_beatmatch() {
+        // 3:2 is a polyrhythm, not the same beat: it stays a clash in both
+        // directions, which is why the fold is a power of two and not a
+        // harmonic ratio.
+        for (out, inc) in [(120.0, 180.0), (180.0, 120.0)] {
+            let gap = (1.0 - normalized_tempo_ratio(out, inc)).abs();
+            assert!(gap > 0.07, "{out}→{inc} gap {gap}");
+            assert!(effect_earned(false, gap, false, 0.0));
+        }
+    }
+
+    #[test]
+    fn a_near_ratio_is_reported_without_an_octave_fold() {
+        let summary = tempo_summary(127.0, 134.0);
+        assert!(!summary.contains("×"), "{summary}");
+        assert!(summary.contains("gap 6%"), "{summary}");
     }
 
     #[test]

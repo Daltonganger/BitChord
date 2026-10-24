@@ -1406,7 +1406,7 @@ mod tests {
     /// *track's* duration unset, which is the field this decoder looked at.
     /// Nothing is decoded here, so the bytes are generated rather than a
     /// recording committed to the repository.
-    fn webm_opus_bytes(duration_seconds: Option<f32>) -> Vec<u8> {
+    fn webm_opus_bytes(duration_seconds: Option<f32>, timestamp_scale: u32) -> Vec<u8> {
         // EBML variable-length size: a leading marker bit, then the value.
         fn size(len: usize) -> Vec<u8> {
             match len {
@@ -1438,12 +1438,15 @@ mod tests {
         let header = element(&[0x1A, 0x45, 0xDF, 0xA3], &header);
 
         let mut info = Vec::new();
-        info.extend(element(&[0x2A, 0xD7, 0xB1], &uint(1_000_000))); // TimestampScale
+        // TimestampScale is a count of nanoseconds per tick, so a Duration is
+        // expressed in these ticks — 1 ms by default, 2 ms in the case that
+        // pins the decoder reading the time base rather than assuming it.
+        info.extend(element(&[0x2A, 0xD7, 0xB1], &uint(timestamp_scale as u64))); // TimestampScale
         info.extend(element(&[0x4D, 0x80], b"bitchord-test")); // MuxingApp
         info.extend(element(&[0x57, 0x41], b"bitchord-test")); // WritingApp
         if let Some(seconds) = duration_seconds {
-            // Segment ticks: milliseconds at the default timestamp scale.
-            info.extend(element(&[0x44, 0x89], &(seconds * 1000.0).to_be_bytes())); // Duration
+            let ticks = seconds * 1e9 / timestamp_scale as f32;
+            info.extend(element(&[0x44, 0x89], &ticks.to_be_bytes())); // Duration
         }
         let info = element(&[0x15, 0x49, 0xA9, 0x66], &info);
 
@@ -1489,9 +1492,13 @@ mod tests {
     /// clever: the probe reads the bytes, so the container is found regardless,
     /// and a future change that trusted the extension would break the app's
     /// whole stream cache.
-    fn write_generated_webm(name: &str, duration_seconds: Option<f32>) -> std::path::PathBuf {
+    fn write_generated_webm(
+        name: &str,
+        duration_seconds: Option<f32>,
+        timestamp_scale: u32,
+    ) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("bitcord-decode-{name}.m4a"));
-        std::fs::write(&path, webm_opus_bytes(duration_seconds)).unwrap();
+        std::fs::write(&path, webm_opus_bytes(duration_seconds, timestamp_scale)).unwrap();
         path
     }
 
@@ -1505,7 +1512,7 @@ mod tests {
 
     #[test]
     fn opus_in_webm_reports_the_segments_length() {
-        let path = write_generated_webm("segment-duration", Some(187.8));
+        let path = write_generated_webm("segment-duration", Some(187.8), 1_000_000);
         let decoder = open_webm(&path);
         assert_eq!(decoder.sample_rate(), 48_000);
         assert_eq!(
@@ -1522,9 +1529,22 @@ mod tests {
         // The negative side of the same rule: this decoder may not invent a
         // length for a container that declares none, because a wrong one moves
         // the mix-out anchor and the audible symptom is a track faded early.
-        let path = write_generated_webm("no-duration", None);
+        let path = write_generated_webm("no-duration", None, 1_000_000);
         let decoder = open_webm(&path);
         assert_eq!(decoder.duration_seconds(), None);
+        drop(decoder);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn opus_in_webm_honours_a_non_default_timestamp_scale() {
+        // The MediaInfo duration is a count of TimestampScale ticks, not
+        // milliseconds: with 2 ms ticks the same 187.8 s must still read as
+        // 187.8 s, which is what pins the time base being used rather than
+        // assumed.
+        let path = write_generated_webm("scale-2ms", Some(187.8), 2_000_000);
+        let decoder = open_webm(&path);
+        assert_eq!(decoder.duration_seconds(), Some(187.8));
         drop(decoder);
         std::fs::remove_file(&path).ok();
     }
