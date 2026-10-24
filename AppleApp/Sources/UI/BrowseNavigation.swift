@@ -77,6 +77,39 @@ extension PushLink where Label == Text {
 }
 
 #if os(macOS)
+/// A window history the titlebar's back and forward buttons can walk.
+@MainActor
+protocol HistoryNavigating: AnyObject, Observable {
+    var canGoBack: Bool { get }
+    var canGoForward: Bool { get }
+    func goBack()
+    func goForward()
+}
+
+/// A history of one stack's pages, for a window with no sidebar (Settings).
+@MainActor
+@Observable
+final class PathNavigator: HistoryNavigating {
+    private(set) var history: [[PushRoute]] = [[]]
+    private(set) var index = 0
+
+    var canGoBack: Bool { index > 0 }
+    var canGoForward: Bool { index < history.count - 1 }
+
+    var path: [PushRoute] {
+        get { history[index] }
+        set {
+            guard newValue != history[index] else { return }
+            history.removeSubrange((index + 1)...)
+            history.append(newValue)
+            index = history.count - 1
+        }
+    }
+
+    func goBack() { if canGoBack { index -= 1 } }
+    func goForward() { if canGoForward { index += 1 } }
+}
+
 /// The Mac window's history: which sidebar row, and which pages pushed on it.
 ///
 /// Back and forward walk whole locations, as Music and Finder do: from an album
@@ -84,7 +117,7 @@ extension PushLink where Label == Text {
 /// whichever row was showing before it, and forward retraces both steps.
 @MainActor
 @Observable
-final class MacNavigator {
+final class MacNavigator: HistoryNavigating {
     struct Location: Equatable {
         var side: MacSide
         var path: [PushRoute]
@@ -143,8 +176,8 @@ final class MacNavigator {
 }
 
 /// The titlebar's back and forward buttons.
-struct MacHistoryButtons: View {
-    let navigator: MacNavigator
+struct MacHistoryButtons<Navigator: HistoryNavigating>: View {
+    let navigator: Navigator
 
     var body: some View {
         ControlGroup {

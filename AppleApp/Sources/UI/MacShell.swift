@@ -40,6 +40,38 @@ struct MacPillInset: ViewModifier {
     }
 }
 
+// MARK: - Full screen
+
+/// Enters or leaves full screen, and draws which: arrows pointing out to go
+/// full screen, pointing in to come back.
+struct MacFullScreenButton: View {
+    @State private var isFullScreen = false
+
+    var body: some View {
+        Button(
+            isFullScreen ? "Exit Full Screen" : "Enter Full Screen",
+            systemImage: isFullScreen
+                ? "arrow.down.right.and.arrow.up.left"
+                : "arrow.up.left.and.arrow.down.right"
+        ) {
+            NSApp.keyWindow?.toggleFullScreen(nil)
+        }
+        .keyboardShortcut("f", modifiers: [.command, .control])
+        .labelStyle(.iconOnly)
+        .help(isFullScreen ? "Exit Full Screen" : "Enter Full Screen")
+        .accessibilityLabel(isFullScreen ? "Exit Full Screen" : "Enter Full Screen")
+        .onAppear {
+            isFullScreen = NSApp.keyWindow?.styleMask.contains(.fullScreen) ?? false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+            isFullScreen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+            isFullScreen = false
+        }
+    }
+}
+
 // MARK: - Downloads
 
 /// The titlebar's Downloads button. The list opens as a popover anchored to
