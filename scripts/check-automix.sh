@@ -81,6 +81,7 @@ effects="$(echo "$summary" | sed -E 's/.*effects ([0-9]+)\/([0-9]+).*/\1/')"
 pairs="$(echo "$summary" | sed -E 's/.*effects ([0-9]+)\/([0-9]+).*/\2/')"
 minfade="$(echo "$summary" | sed -E 's/.*min fade ([0-9.]+)s.*/\1/')"
 min_nondropcut="$(echo "$summary" | sed -E 's/.*min non-DropCut fade ([0-9.]+)s.*/\1/')"
+bridged="$(echo "$summary" | sed -E 's/.*bridged ([0-9]+)\/([0-9]+).*/\1/')"
 
 fail=0
 # Enforced: freshness. A session may not be mostly effects.
@@ -123,5 +124,10 @@ awk -v m="$minfade" 'BEGIN { if (m + 0 >= 4.0) print "ok   shortest overlap " m 
 # at least a 3 s phrase now that a cold ending keeps its phrase instead of
 # collapsing to the chord's decay.
 awk -v m="$min_nondropcut" 'BEGIN { if (m + 0 >= 3.0) print "ok   shortest non-DropCut overlap " m "s is at least 3s"; else { print "FAIL shortest non-DropCut overlap " m "s is under 3s"; exit 1 } }' || fail=1
+
+# Reported: F. A bridge is an extension of a clean crossfade, so it is not a
+# gate of its own; the per-row reason says why a pair did not bridge and the
+# median line says whether the length work reached the owner's bar.
+echo "     loop bridges: ${bridged:-0} of $pairs (the per-row reason names the blocker)"
 
 exit "$fail"

@@ -132,6 +132,15 @@ pub struct TransitionPlanRec {
     /// phrase earlier and is rising underneath it.
     #[uniffi(default = 0.0)]
     pub outgoing_hold_seconds: f64,
+    /// F's loop bridge: where on the outgoing's timeline the measured unit
+    /// starts, how long it is (the measured downbeat span), and how many times
+    /// it is replayed. 0 = no bridge.
+    #[uniffi(default = 0.0)]
+    pub bridge_start_seconds: f64,
+    #[uniffi(default = 0.0)]
+    pub bridge_seconds: f64,
+    #[uniffi(default = 0)]
+    pub bridge_repeats: u32,
     /// The effect's own window inside the blend; 0 = no effect.
     #[uniffi(default = 0.0)]
     pub effect_seconds: f64,
@@ -189,6 +198,9 @@ impl From<TransitionPlanRec> for TransitionPlan {
             vocal_overlap: rec.vocal_overlap,
             fade_seconds: rec.fade_seconds,
             outgoing_hold_seconds: rec.outgoing_hold_seconds,
+            bridge_start_seconds: rec.bridge_start_seconds,
+            bridge_seconds: rec.bridge_seconds,
+            bridge_repeats: rec.bridge_repeats,
             effect_seconds: rec.effect_seconds,
             effect_start_seconds: rec.effect_start_seconds,
             transition_end_seconds: rec.transition_end_seconds,
@@ -225,6 +237,9 @@ impl From<TransitionPlan> for TransitionPlanRec {
             vocal_overlap: plan.vocal_overlap,
             fade_seconds: plan.fade_seconds,
             outgoing_hold_seconds: plan.outgoing_hold_seconds,
+            bridge_start_seconds: plan.bridge_start_seconds,
+            bridge_seconds: plan.bridge_seconds,
+            bridge_repeats: plan.bridge_repeats,
             effect_seconds: plan.effect_seconds,
             effect_start_seconds: plan.effect_start_seconds,
             transition_end_seconds: plan.transition_end_seconds,
@@ -3367,6 +3382,7 @@ mod tests {
         let mut in_discarded = Vec::new();
         let mut cold_endings = 0usize;
         let mut clipped_chords = 0usize;
+        let mut bridged = 0usize;
         println!("automix corpus: {pairs} pairs from {} files", files.len());
         for index in 0..pairs {
             let outgoing = &files[index];
@@ -3407,13 +3423,18 @@ mod tests {
             if edges.clipped_final_chord {
                 clipped_chords += 1;
             }
+            if plan.bridge_repeats > 0 {
+                bridged += 1;
+            }
             println!(
-                "{:>2}. {:?} fade={:.2}s hold={:.2}s effect={:.2}s end={:.2}s beat={:.3}s rate={:.4} | \
-                 {} → {} | discarded out {:.1}s in {:.1}s{} | {}",
+                "{:>2}. {:?} fade={:.2}s hold={:.2}s bridge={:.2}s×{} effect={:.2}s end={:.2}s \
+                 beat={:.3}s rate={:.4} | {} → {} | discarded out {:.1}s in {:.1}s{} | {}",
                 index + 1,
                 plan.style,
                 plan.fade_seconds,
                 plan.outgoing_hold_seconds,
+                plan.bridge_seconds,
+                plan.bridge_repeats,
                 plan.effect_seconds,
                 plan.transition_end_seconds,
                 plan.beat_seconds,
@@ -3442,14 +3463,16 @@ mod tests {
         let max_in = in_discarded.iter().copied().fold(0.0f64, f64::max);
         println!(
             "automix scorecard: usable {}/{}, median fade {:.2}s, effects {}/{}, min fade {:.2}s, \
-             min non-DropCut fade {:.2}s",
+             min non-DropCut fade {:.2}s, bridged {}/{}",
             fades.len(),
             pairs,
             median,
             effects,
             pairs,
             sorted.first().copied().unwrap_or(0.0),
-            min_non_dropcut
+            min_non_dropcut,
+            bridged,
+            pairs
         );
         println!(
             "automix edges: discarded out median {median_out:.1}s max {max_out:.1}s, in median \
