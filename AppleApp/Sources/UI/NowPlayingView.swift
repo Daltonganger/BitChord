@@ -564,6 +564,7 @@ struct NowPlayingView: View {
                 hasTrack: controller.current != nil,
                 sourceLabel: controller.lyricsSourceLabel,
                 alignmentInProgress: controller.lyricsAligning,
+                alignedLocally: controller.lyricsAlignedLocally,
                 onSeek: { controller.seek(to: $0) },
                 translator: controller.lyricsTranslator,
                 trackId: controller.current?.id ?? "",
@@ -755,6 +756,7 @@ struct NowPlayingView: View {
                 hasTrack: controller.current != nil,
                 sourceLabel: controller.lyricsSourceLabel,
                 alignmentInProgress: controller.lyricsAligning,
+                alignedLocally: controller.lyricsAlignedLocally,
                 onSeek: { controller.seek(to: $0) },
                 translator: controller.lyricsTranslator,
                 trackId: controller.current?.id ?? "",
@@ -2549,6 +2551,9 @@ struct LyricsPane: View {
     var hasTrack: Bool
     var sourceLabel: String? = nil
     var alignmentInProgress: Bool = false
+    /// The word timings were added by this app's on-device alignment, not
+    /// supplied by the provider — the attribution says so.
+    var alignedLocally: Bool = false
     var onSeek: ((Double) -> Void)? = nil
     /// Absent where the caller has no track to translate, which is the case that
     /// matters: an empty lyric has nothing to translate and offering the control
@@ -2976,6 +2981,7 @@ struct LyricsPane: View {
     private var attribution: String? {
         guard let sourceLabel, !sourceLabel.isEmpty else { return nil }
         if alignmentInProgress { return "Lyrics by \(sourceLabel) · aligning locally…" }
+        if alignedLocally { return "Lyrics by \(sourceLabel) · Synced by BitChord" }
         guard hasSyncedTimings else { return "Lyrics by \(sourceLabel) · unsynced" }
         let lyricRows = lines.filter { !$0.isGap }
         let timedRows = lyricRows.enumerated().filter { lineHasSyncedTimings($0.element, at: $0.offset) }
