@@ -1200,6 +1200,10 @@ private struct MacRowInteraction: ViewModifier {
 enum CurrentLyricLine {
     static func line(in lines: [LyricLineDto], at position: Double, offsetMs: Int32) -> String? {
         guard !lines.isEmpty else { return nil }
+        // A sheet with no timings on it (plain text lyrics every parser hands over
+        // the same way) has no line *at* the playhead: the last one would be
+        // "current" for the whole track, in the strip and the menu bar both.
+        guard lines.contains(where: { $0.timeMs > 0 }) else { return nil }
         let ms = max(0, Int64(position * 1000) - Int64(offsetMs))
         guard let index = lines.lastIndex(where: { $0.timeMs <= ms }) else { return nil }
         return lines[index].text
