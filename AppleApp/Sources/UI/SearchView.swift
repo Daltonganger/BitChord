@@ -67,15 +67,6 @@ enum RecentSearchStore {
         save(Array(list.prefix(maxEntries)))
     }
 
-    /// The raw submitted query, for when no result has been tapped yet.
-    /// A later tap on a real hit records the rich entity alongside it, which
-    /// is what carries the artwork — same as upstream's `recordSearch`.
-    static func recordQuery(_ query: String) {
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty else { return }
-        record(RecentSearchEntity(id: "q:\(term.lowercased())", title: term))
-    }
-
     static func remove(id: String) {
         save(load().filter { !$0.id.equalsIgnoringCase(id) })
     }
@@ -273,12 +264,12 @@ struct SearchView: View {
     private var resultsColumn: some View {
         VStack(spacing: 0) {
             // Upstream's rule for the filter tabs, and the reason it is a rule
-            // rather than a detail: they only mean something once there is a
-            // result set to narrow, and they stay hidden while suggestions are up
+            // rather than a detail: they only mean something once a search has
+            // been committed, and they stay hidden while suggestions are up
             // because everything below them is for whatever was searched before
-            // this edit began. They also stay hidden for a search that failed —
-            // "pick a filter that finds nothing" would take away the control
-            // needed to leave it.
+            // this edit began. They stay up for an empty or failed search too —
+            // "pick a filter that finds nothing" is exactly when the chips are
+            // the only way out, so hiding them would trap the reader.
             if showsFilters {
                 filterChips
                     .padding(.bottom, 6)
@@ -443,10 +434,11 @@ struct SearchView: View {
         !term.isEmpty && term != searchedTerm
     }
 
-    /// See [resultsColumn]. Hidden for an empty search, a failed one, and while
-    /// typing.
+    /// See [resultsColumn]. Hidden only while a search is in flight or the field
+    /// is being edited — upstream keeps them up for an empty or failed search
+    /// too, since the chips are the only way out of an empty result set.
     private var showsFilters: Bool {
-        attempted && !searching && searchError == nil && !hits.isEmpty && !isEditing
+        attempted && !searching && !isEditing
     }
 
     private var suggestionList: some View {
@@ -862,7 +854,6 @@ struct SearchView: View {
         // A new list identity per request, so the results open at the top rather
         // than at the previous set's offset.
         requestToken &+= 1
-        RecentSearchStore.recordQuery(term)
         searchedTerm = term
         let wanted = scope
         let task = Task { @MainActor in
