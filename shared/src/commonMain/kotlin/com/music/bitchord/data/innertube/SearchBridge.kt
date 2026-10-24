@@ -43,6 +43,27 @@ object SearchBridge {
     }
 
     /**
+     * Live media rows for the typeahead dropdown. Unauthenticated (see
+     * [Innertube.searchTypeahead]) and read as the mixed "All" page, so the
+     * promoted card is read like the unfiltered search it mirrors.
+     */
+    fun searchTypeahead(query: String, callback: SearchCallback) {
+        val generation = Innertube.sessionGeneration
+        bridgeScope.launch {
+            try {
+                Innertube.checkSession(generation)
+                val response = Innertube.searchTypeahead(query)
+                val hits = InnertubeParser.parseSearchPage(response, includeVideos = false)
+                    .map { result -> hitOf(result) }
+                Innertube.checkSession(generation)
+                callback.onResult(json.encodeToString(ListSerializer(SearchHit.serializer()), hits), null)
+            } catch (e: Throwable) {
+                callback.onResult(null, e.message ?: e.toString())
+            }
+        }
+    }
+
+    /**
      * The promoted card and an ordinary track are the same row on screen; what
      * differs is the heading above them, and the host tells them apart by [kind].
      */
