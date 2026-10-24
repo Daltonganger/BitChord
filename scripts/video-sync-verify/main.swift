@@ -120,6 +120,25 @@ checkAction("the cooldown expires at 0.5 s",
                           engineRate: 1, videoRate: 1, secondsSinceSeek: 0.5),
             .seek(seconds: 100.5))
 
+// 8b. A seek on a streamed picture lands late; aim where the engine will be,
+//     or the picture seeks forever and shows one frame per seek (owner's Mac).
+checkAction("a playing engine is sought ahead by the measured seek time",
+            policy.decide(engineSeconds: 100.5, videoSeconds: 100, enginePlaying: true,
+                          engineRate: 1, videoRate: 0, secondsSinceSeek: 1, seekLead: 0.4),
+            .seek(seconds: 100.9))
+checkAction("the lead scales with a faster engine",
+            policy.decide(engineSeconds: 100.5, videoSeconds: 100, enginePlaying: true,
+                          engineRate: 1.5, videoRate: 0, secondsSinceSeek: 1, seekLead: 0.4),
+            .seek(seconds: 101.1))
+checkAction("a paused engine is sought exactly, with no lead",
+            policy.decide(engineSeconds: 100, videoSeconds: 99, enginePlaying: false,
+                          engineRate: 1, videoRate: 0, secondsSinceSeek: 1, seekLead: 0.4),
+            .seek(seconds: 100))
+checkRate("a picture that landed on the lead plays rather than seeking again",
+          policy.decide(engineSeconds: 100.89, videoSeconds: 100.9, enginePlaying: true,
+                        engineRate: 1, videoRate: 0, secondsSinceSeek: 0.4, seekLead: 0.4),
+          1.0)
+
 // 9. Speed-changed engine: the picture matches the engine's rate.
 checkRate("a 1.5x engine runs the picture at 1.5x",
           policy.decide(engineSeconds: 100, videoSeconds: 100, enginePlaying: true,
