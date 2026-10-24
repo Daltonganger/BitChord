@@ -233,8 +233,6 @@ private final class VideoVersionAdapter: VideoVersionBridgeVideoVersionCallback 
     init(_ handler: @escaping (String?, String?) -> Void) { self.handler = handler }
     func onResult(json: String?, message: String?) { handler(json, message) }
 }
-    func onResult(videoId: String?, durationText: String?, message: String?) { handler(videoId, durationText, message) }
-}
 
 /// One place the picture can appear. The fallback is what the surface shows
 /// when the switch is off, the track has no video side, or the picture failed;
