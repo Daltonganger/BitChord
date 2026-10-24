@@ -1035,7 +1035,11 @@ object Innertube {
                 }
                 putJsonObject("user") {
                     put("lockedSafetyMode", false)
-                    session.dataSyncId?.let { put("onBehalfOfUser", it) }
+                    // No account context on an anonymous read: sending a
+                    // session's dataSyncId without the cookie that goes with it
+                    // is a malformed signed-in request, and the server answers
+                    // it with nothing. Upstream's postMusicAnonymous omits it too.
+                    if (!anonymous) session.dataSyncId?.let { put("onBehalfOfUser", it) }
                 }
                 putJsonObject("request") { put("useSsl", true) }
             }
