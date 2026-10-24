@@ -1184,11 +1184,13 @@ struct SettingsView: View {
                     EmptyView()
                 }
             }
-            SecureField("Spotify sp_dc cookie (optional canvas)", text: $spotifyCookie)
         } header: {
             Text("Miscellaneous")
         } footer: {
-            Text("When enabled, closing the app from the recent apps screen will also stop music playback.")
+            // The cookie is edited in Spotify Canvas above, where its screen
+            // lives; a second raw field here edited the same binding and read
+            // as a second place to set it.
+            Text("With “Stop When Backgrounded” on, playback pauses when you leave the app — on Mac, closing the last window counts too.")
         }
     }
 
