@@ -52,36 +52,6 @@ fn parse_track_number(value: Option<&str>) -> u32 {
         .unwrap_or(0)
 }
 
-/// Writes a track number onto the file's own tag, so a scan answers "3" for
-/// the third track of a tag-derived album instead of its filename's place.
-pub fn write_track_number(path: &str, number: u32) -> bool {
-    let mut tagged = match Probe::open(path).and_then(|p| p.read()) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("track number write: open {path}: {e}");
-            return false;
-        }
-    };
-    let tag = if let Some(existing) = tagged.primary_tag_mut() {
-        existing
-    } else {
-        let tag_type = tagged.primary_tag_type();
-        tagged.insert_tag(Tag::new(tag_type));
-        match tagged.primary_tag_mut() {
-            Some(t) => t,
-            None => return false,
-        }
-    };
-    tag.insert_text(ItemKey::TrackNumber, number.to_string());
-    match tagged.save_to_path(path, WriteOptions::default()) {
-        Ok(()) => true,
-        Err(e) => {
-            log::warn!("track number write: save {path}: {e}");
-            false
-        }
-    }
-}
-
 /// Write ID3/Vorbis/MP4 tags onto a downloaded file (spec §4).
 pub fn write_track_tags(
     path: &str,
@@ -209,10 +179,9 @@ impl ReplayGain {
 mod track_number_tests {
     use super::*;
 
-    /// The scanner's album order is the tag's track number: write one onto a
-    /// copy of the fixture and read it back, "3/12" style included.
+    /// The scanner's album order is the tag's track number, not the filename.
     #[test]
-    fn a_written_track_number_reads_back() {
+    fn a_tagged_track_number_reads_back() {
         let mut source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         source.push("tests/fixtures/seek-tone.m4a");
         let dir = std::env::temp_dir().join("bitchord-track-number-test");
@@ -220,7 +189,13 @@ mod track_number_tests {
         let path = dir.join("numbered.m4a");
         std::fs::copy(&source, &path).unwrap();
 
-        assert!(write_track_number(path.to_str().unwrap(), 3));
+        let mut tagged = Probe::open(&path).and_then(|p| p.read()).unwrap();
+        if tagged.primary_tag().is_none() {
+            let tag_type = tagged.primary_tag_type();
+            tagged.insert_tag(Tag::new(tag_type));
+        }
+        tagged.primary_tag_mut().unwrap().insert_text(ItemKey::TrackNumber, "3".to_owned());
+        tagged.save_to_path(&path, WriteOptions::default()).unwrap();
         let meta = read_track_metadata(path.to_str().unwrap()).unwrap();
         assert_eq!(meta.track_number, 3);
         std::fs::remove_file(&path).ok();

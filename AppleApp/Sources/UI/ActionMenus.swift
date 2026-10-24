@@ -82,6 +82,21 @@ struct SongActionButtons: View {
         if !entry.isLocal {
             downloadRow(entry)
         }
+        if WebDavStore.shared.canUpload(path: entry.source, id: entry.id) {
+            Button("Upload to WebDAV", systemImage: "arrow.up.doc") {
+                toast.show("Uploading \(entry.title)…", kind: .info)
+                Task {
+                    do {
+                        let fileName = try await WebDavStore.shared.upload(
+                            path: entry.source, title: entry.title, artist: entry.artist
+                        )
+                        toast.show("Uploaded \(fileName)", kind: .success)
+                    } catch {
+                        toast.show(error.localizedDescription, kind: .failure)
+                    }
+                }
+            }
+        }
         if let albumId = entry.albumId {
             Button("Open Album") {
                 appModel.pendingDetail = .detail(browseId: albumId, title: entry.albumName ?? "Album")
