@@ -120,6 +120,7 @@ struct BitChordApp: App {
                     // written by the activity's own save hook, immediately before
                     // the system sends it to the other device.
                     PlaybackHandoff.shared.refresh(controller: controller)
+                    AppShortcutRefresh.schedule()
                     // What is on disk decides what the analyzer gets. Refreshed first
                     // so a resumed or already-downloaded graph is visible, and loaded
                     // in the background: 123 MB of ONNX is seconds of work and the
@@ -213,6 +214,9 @@ struct BitChordApp: App {
                 // view hierarchy is complete.
                 .onChange(of: controller.current?.id) { _, _ in
                     PlaybackHandoff.shared.refresh(controller: controller)
+                    // What Siri may match a song title against has changed with
+                    // the queue. Throttled inside.
+                    AppShortcutRefresh.schedule()
                 }
                 .onChange(of: controller.isPlaying) { _, _ in
                     PlaybackHandoff.shared.refresh(controller: controller)

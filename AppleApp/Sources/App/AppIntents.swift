@@ -134,9 +134,41 @@ struct SongQuery: EntityStringQuery {
             .map { SongEntity(videoId: $0.id, title: $0.title, artist: $0.resolvedArtist) }
     }
 
-    /// No suggestions: an empty list is better than a made-up one, and the
-    /// listener is about to name a song anyway.
-    func suggestedEntities() async throws -> [SongEntity] { [] }
+    /// What Siri matches a spoken title against.
+    ///
+    /// An App Shortcut's phrase parameter is matched against the values the app
+    /// *suggests*, not against free text — an empty list leaves Siri asking
+    /// "Which song?" no matter what was said. These are the rows already on disk
+    /// (the last queue, i.e. the most recent plays), so the call stays free of
+    /// network and is cheap enough for the system to run while somebody types.
+    func suggestedEntities() async throws -> [SongEntity] {
+        await CachedSongs.suggestions()
+    }
+}
+
+/// The songs this device can name without asking the network.
+///
+/// The last queue is the only cached list that carries both a catalogue id and a
+/// title: a downloaded track is a file with no id, and a liked id carries no
+/// title. That makes it the honest half of "recent plays plus the library" —
+/// the other half would be a network fetch, which this call must not do.
+@MainActor
+private enum CachedSongs {
+    private static let limit = 50
+
+    static func suggestions() -> [SongEntity] {
+        var seen = Set<String>()
+        var songs: [SongEntity] = []
+        for entry in LastPlayed.load()?.tracks ?? [] {
+            guard let videoId = entry.videoId,
+                  !videoId.isEmpty,
+                  !entry.title.isEmpty,
+                  seen.insert(videoId).inserted else { continue }
+            songs.append(SongEntity(videoId: videoId, title: entry.title, artist: entry.artist))
+            if songs.count == limit { break }
+        }
+        return songs
+    }
 }
 
 // MARK: - The verbs
@@ -390,5 +422,24 @@ struct BitChordShortcuts: AppShortcutsProvider {
             shortTitle: "Add to Queue",
             systemImageName: "text.badge.plus"
         )
+    }
+}
+
+/// Ask the system to re-read what Siri may match against.
+///
+/// The suggestion list is resolved when a shortcut runs, and the system caches it
+/// until the app says otherwise. Throttled: a track change is not worth a
+/// parameter update each time, and what the list says changes only as the queue
+/// does.
+@MainActor
+enum AppShortcutRefresh {
+    private static var lastUpdate = Date.distantPast
+    private static let interval: TimeInterval = 300
+
+    static func schedule() {
+        let now = Date()
+        guard now.timeIntervalSince(lastUpdate) >= interval else { return }
+        lastUpdate = now
+        BitChordShortcuts.updateAppShortcutParameters()
     }
 }
