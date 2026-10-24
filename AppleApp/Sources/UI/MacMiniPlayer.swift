@@ -37,6 +37,29 @@ struct MiniPlayerView: View {
                     .accessibilityLabel(controller.isLiked ? "Remove from Liked" : "Like")
                 }
             }
+            if compact {
+                // N2: the line being sung, under the title. The menu bar is where
+                // somebody glances at the app rather than opening it, and a title
+                // without the words is the one thing they came to the menu bar for
+                // and did not get. On the lyrics pane's clock, so the offset moves
+                // this line with everything else.
+                TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+                    if let line = CurrentLyricLine.line(
+                        in: controller.displayedLyrics,
+                        at: controller.livePosition(at: timeline.date),
+                        offsetMs: LyricsOffsetBridge.offsetMs()
+                    ) {
+                        Text(line)
+                            .font(.subheadline)
+                            .italic()
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityLabel("Now singing: \(line)")
+                    }
+                }
+            }
             progress
             HStack(spacing: 28) {
                 transportButton("backward.fill", help: "Previous") { controller.previous() }

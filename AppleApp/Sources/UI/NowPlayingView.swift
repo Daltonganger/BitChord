@@ -963,11 +963,11 @@ struct NowPlayingView: View {
     /// the same adjusted clock — the offset applies to both, since they are
     /// showing the same thing in two sizes.
     private var currentLyric: String? {
-        let lines = controller.displayedLyrics
-        guard !lines.isEmpty else { return nil }
-        let ms = max(0, Int64(controller.position * 1000) - Int64(lyricsOffsetMs))
-        guard let index = lines.lastIndex(where: { $0.timeMs <= ms }) else { return nil }
-        return lines[index].text
+        CurrentLyricLine.line(
+            in: controller.displayedLyrics,
+            at: controller.position,
+            offsetMs: lyricsOffsetMs
+        )
     }
 
     /// Title and artist, with the like and the overflow menu beside them.
