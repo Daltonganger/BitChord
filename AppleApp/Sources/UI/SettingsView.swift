@@ -762,7 +762,7 @@ struct SettingsView: View {
             SettingsToggleLine(
                 glyph: .video,
                 title: "Show Music Videos",
-                subtitle: "Plays the picture with the song when a music video exists. Off by default; nothing loads while the player is closed.",
+                subtitle: "Shows the music video while the player is open. Off at the start of every session; the Now Playing pill turns it on too.",
                 isOn: $showMusicVideos
             )
         }

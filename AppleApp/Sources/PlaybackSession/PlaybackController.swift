@@ -988,6 +988,45 @@ final class PlaybackController {
         restartCurrent(keepingPosition: smartVersionAlignment)
     }
 
+    /// Song entries the video toggle replaced with their music-video upload,
+    /// keyed by that upload's id, so turning the toggle off can put each back.
+    @ObservationIgnored private var songVersions: [String: QueueEntry] = [:]
+
+    /// The video toggle's other half: when a song's music video is a different
+    /// cut (an intro, a skit, a longer ending), the picture cannot be laid over
+    /// the song's audio, so the music-video upload plays instead — picture and
+    /// sound from one file, always in step. YouTube Music's Song/Video switch
+    /// and upstream's version swap do the same.
+    ///
+    /// The upload is pinned for as long as it plays: the catalogue substitution
+    /// would otherwise send a music video straight back to the audio release.
+    func playVideoVersion(videoId: String, durationText: String?) {
+        guard let entry = current, entry.source.hasPrefix("yt:"), entry.videoId != videoId,
+              queue.indices.contains(playingIndex) else { return }
+        var version = QueueEntry.youtube(
+            videoId: videoId, title: entry.title, artist: entry.artist,
+            thumbnailUrl: entry.thumbnailUrl, durationText: durationText, albumName: entry.albumName,
+            artistId: entry.artistId, albumId: entry.albumId, fromAutoplay: entry.fromAutoplay
+        )
+        version.contextOrder = entry.contextOrder
+        songVersions[videoId] = entry
+        OriginalVersion.shared.pin(videoId: videoId)
+        queue[playingIndex] = version
+        debugLog.record("video toggle: the music video \(videoId) plays in place of the song", about: entry.id)
+        restartCurrent(keepingPosition: smartVersionAlignment)
+    }
+
+    /// Puts the song back where the video toggle had swapped in its music video.
+    /// Does nothing when the playing entry is the song itself.
+    func playSongVersion() {
+        guard let entry = current, let song = songVersions.removeValue(forKey: entry.id),
+              queue.indices.contains(playingIndex) else { return }
+        OriginalVersion.shared.unpin(videoId: entry.id)
+        queue[playingIndex] = song
+        debugLog.record("video toggle: the song plays again in place of \(entry.id)", about: song.id)
+        restartCurrent(keepingPosition: smartVersionAlignment)
+    }
+
     /// Releases the hold and asks again, by hand, for a better copy.
     ///
     /// "By hand" is the load-bearing word: the automatic path may already have
