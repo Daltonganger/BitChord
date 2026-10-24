@@ -948,20 +948,32 @@ impl Voice {
         // The incoming's own normalization also ramps for 50 ms inside
         // `mix_into`; the first audible frame must already carry it.
         self.smoothed_normalization = normalization_gain(self, normalization).0;
-        let Some(outgoing) = outgoing else { return };
-        let Some(db) = DeckLoudness::match_gain_db(
-            self.deck_loudness(normalization),
-            outgoing.deck_loudness(normalization),
-        ) else {
-            return;
-        };
-        if db.abs() < 0.05 {
-            return;
+        let db = outgoing.and_then(|outgoing| {
+            DeckLoudness::match_gain_db(
+                self.deck_loudness(normalization),
+                outgoing.deck_loudness(normalization),
+            )
+        });
+        match db.filter(|db| db.abs() >= 0.05) {
+            Some(db) => {
+                if (db as f32 - self.match_db).abs() >= 0.05 || self.match_releasing {
+                    log::info!(
+                        "transition loudness match: {db:+.1} dB (applied before the first frame)"
+                    );
+                }
+                self.match_db = db as f32;
+                self.smoothed_match = db_to_gain(db) as f32;
+                self.match_releasing = false;
+            }
+            None => {
+                if self.match_db.abs() >= 0.05 {
+                    log::info!("transition loudness match: cleared before the first frame");
+                }
+                self.match_db = 0.0;
+                self.smoothed_match = 1.0;
+                self.match_releasing = false;
+            }
         }
-        self.match_db = db as f32;
-        self.smoothed_match = db_to_gain(db) as f32;
-        self.match_releasing = false;
-        log::info!("transition loudness match: {db:+.1} dB (applied before the first frame)");
     }
 
     /// Walks the correction back to none after the blend.
@@ -2794,6 +2806,14 @@ impl MixerState {
         log::info!("fade start + handoff: {}", info.title);
         self.duration_ms
             .store((info.duration_seconds * 1000.0) as u64, Ordering::Relaxed);
+        // G's open point: a route or loudness-mode change between arm and
+        // fade re-arms the match here, while the incoming is still silent, so
+        // the first frame is never corrected after it is audible.
+        voice.normalization_mode = self.loudness_mode;
+        voice.arm_transition_match(
+            self.current.as_ref(),
+            self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
+        );
         self.incoming = Some(voice);
         let device_rate = self.device_rate;
         if let Some(t) = &mut self.transition {
