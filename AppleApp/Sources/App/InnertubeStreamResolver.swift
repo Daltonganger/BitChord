@@ -43,6 +43,16 @@ struct ResolvedVideoSide: Sendable {
     /// A square picture is an art track, not a music video (upstream's
     /// `MIN_VIDEO_ASPECT = 1.2`, engine.ts:47).
     var looksLikeMusicVideo: Bool { (aspectRatio ?? 0) >= 1.2 }
+    /// A 16:9 upload that is one picture for the whole song ("Official Audio",
+    /// a visualiser): it is wide, so the aspect test passes, but it barely
+    /// moves, and AVC spends almost nothing on a picture that does not change.
+    /// Measured at 1080p: "Money"'s still upload 679 kbps (328 per megapixel);
+    /// real music videos 2,837 and 4,357 kbps (1,370 and 2,100 per megapixel).
+    var isStillImage: Bool {
+        guard let bitrate, let width, let height, width > 0, height > 0 else { return false }
+        let kbpsPerMegapixel = Double(bitrate) / 1000 / (Double(width * height) / 1_000_000)
+        return kbpsPerMegapixel < 700
+    }
     /// AVC in MP4 is the only container/codec pair AVFoundation decodes here.
     var isAVCInMP4: Bool {
         let mime = mimeType?.lowercased() ?? ""
