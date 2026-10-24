@@ -1278,6 +1278,11 @@ struct DownloadsView: View {
     @State private var selectedTab: Tab = .songs
     @State private var searchQuery: String = ""
     @State private var sort: SortOption = .titleAsc
+    /// Hold-to-select multi-delete (upstream's selection mode): a tap on a row
+    /// while selecting toggles it instead of playing.
+    @State private var selecting = false
+    @State private var selectedPaths: Set<String> = []
+    @State private var confirmDelete = false
 
     enum Tab: String, CaseIterable, Identifiable {
         case songs = "Songs"
@@ -1440,9 +1445,34 @@ struct DownloadsView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
+
+            if selectedTab == .songs, !filteredAndSortedTracks.isEmpty {
+                Button {
+                    selecting = true
+                } label: {
+                    Label("Select", systemImage: "checkmark.circle")
+                        .labelStyle(.iconOnly)
+                        .scaledFont(size: 13, weight: .medium)
+                        .foregroundStyle(.primary)
+                        .frame(width: 32, height: 32)
+                        .background(.quaternary, in: Circle())
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .accessibilityLabel("Select downloads")
+            }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 4)
+    }
+
+    private func toggleSelection(_ path: String) {
+        if selectedPaths.contains(path) {
+            selectedPaths.remove(path)
+        } else {
+            selectedPaths.insert(path)
+        }
+        Haptics.play(.select)
     }
 
     private var playShuffleRow: some View {
@@ -1476,23 +1506,64 @@ struct DownloadsView: View {
 
     private var songsContent: some View {
         VStack(spacing: 0) {
-            if !filteredAndSortedTracks.isEmpty {
+            if !filteredAndSortedTracks.isEmpty, !selecting {
                 playShuffleRow
+            }
+            if selecting {
+                // Upstream's selection bar (LocalFolder.kt:687): count, select
+                // all, delete. Upload rides I8b with the WebDAV store work.
+                HStack(spacing: 12) {
+                    Button("Done") {
+                        selecting = false
+                        selectedPaths = []
+                    }
+                    .buttonStyle(.bordered)
+                    Text(selectedPaths.count == 1 ? "1 selected" : "\(selectedPaths.count) selected")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 8)
+                    Button("Select All") {
+                        selectedPaths = Set(filteredAndSortedTracks.map(\.path))
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Delete", role: .destructive) {
+                        confirmDelete = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selectedPaths.isEmpty)
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 8)
             }
             List {
                 ForEach(Array(filteredAndSortedTracks.enumerated()), id: \.element.id) { index, track in
                     SongRow(
                         entry: QueueEntry.from(track),
                         play: {
-                            controller.play(filteredAndSortedTracks.map(QueueEntry.from), at: index, context: "Downloads", contextID: "downloads:songs")
+                            if selecting {
+                                toggleSelection(track.path)
+                            } else {
+                                controller.play(filteredAndSortedTracks.map(QueueEntry.from), at: index, context: "Downloads", contextID: "downloads:songs")
+                            }
                         },
                         playNext: { controller.playNext(QueueEntry.from(track)) },
                         addToQueue: { controller.addToQueue(QueueEntry.from(track)) }
                     )
+                    .opacity(selectedPaths.contains(track.path) ? 0.55 : 1)
                     .listRowInsets(EdgeInsets(top: 2, leading: 24, bottom: 2, trailing: 24))
                 }
             }
             .listStyle(.plain)
+        }
+        .confirmationDialog("Delete the selected downloads?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete \(selectedPaths.count) download\(selectedPaths.count == 1 ? "" : "s")", role: .destructive) {
+                let doomed = selectedPaths
+                selectedPaths = []
+                selecting = false
+                for path in doomed { DownloadStore.shared.delete(path) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("They will download again when played.")
         }
     }
 
