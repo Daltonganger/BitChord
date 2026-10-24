@@ -5,6 +5,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 
 /**
@@ -45,6 +47,10 @@ object LyricsBridge {
      * also arrives through [callback], so the lyrics pane and the picker
      * cannot disagree about who won. Both passes of a romanised retry report
      * into the same stream, each source once per state.
+     *
+     * [onSourceState] fires from the repository's provider jobs — background,
+     * concurrently — so the host must hop to its main actor before touching
+     * UI state. (The events of one source arrive in order; sources overlap.)
      */
     fun fetchWithSourceStates(
         title: String,
@@ -58,31 +64,31 @@ object LyricsBridge {
     ) {
         scope.launch {
             // The repository fires started and result from the provider job
-            // itself, and a romanised retry runs the race twice; each source
-            // is reported once per state, first answer wins.
+            // itself — concurrently, on Dispatchers.Default — so the dedupe
+            // books sit behind a mutex; each source is reported once per
+            // state, first answer wins.
+            val lock = Mutex()
             val started = mutableSetOf<String>()
             val settled = mutableSetOf<String>()
-            fun report(source: LyricsSource, state: LyricsProviderState, lines: List<LyricLineDto> = emptyList()) {
-                when (state) {
-                    LyricsProviderState.FETCHING -> if (!started.add(source.name)) return
-                    LyricsProviderState.FOUND, LyricsProviderState.NOT_FOUND ->
-                        if (!settled.add(source.name)) return
-                    LyricsProviderState.NOT_FETCHED -> { }
+            suspend fun report(source: LyricsSource, state: LyricsProviderState, lines: List<LyricLineDto> = emptyList()) {
+                val fresh = lock.withLock {
+                    when (state) {
+                        LyricsProviderState.FETCHING -> started.add(source.name)
+                        LyricsProviderState.FOUND, LyricsProviderState.NOT_FOUND -> settled.add(source.name)
+                        LyricsProviderState.NOT_FETCHED -> false
+                    }
                 }
-                onSourceState.onSourceState(source.name, source.label, state, lines)
+                if (fresh) onSourceState.onSourceState(source.name, source.label, state, lines)
             }
-            val onStarted: (LyricsSource) -> Unit = { report(it, LyricsProviderState.FETCHING) }
-            val onResult: (LyricsSource, LyricsRepository.Result?) -> Unit = { source, result ->
-                if (result != null) report(source, LyricsProviderState.FOUND, result.lines)
-                else report(source, LyricsProviderState.NOT_FOUND)
-            }
-            val onCancelled: (LyricsSource) -> Unit = { report(it, LyricsProviderState.NOT_FETCHED) }
             val (source, lines) = runCatching {
                 lookup(
                     title, artist, durationMs, album, videoId, localPath,
-                    onSourceStarted = onStarted,
-                    onSourceResult = onResult,
-                    onSourceCancelled = onCancelled,
+                    onSourceStarted = { report(it, LyricsProviderState.FETCHING) },
+                    onSourceResult = { source, result ->
+                        if (result != null) report(source, LyricsProviderState.FOUND, result.lines)
+                        else report(source, LyricsProviderState.NOT_FOUND)
+                    },
+                    onSourceCancelled = { report(it, LyricsProviderState.NOT_FETCHED) },
                 )
             }.getOrElse { null to emptyList() }
             callback.onResult(source?.name.orEmpty(), source?.label.orEmpty(), lines)
@@ -156,9 +162,9 @@ object LyricsBridge {
         album: String?,
         videoId: String?,
         localPath: String?,
-        onSourceStarted: ((LyricsSource) -> Unit)? = null,
-        onSourceResult: ((LyricsSource, LyricsRepository.Result?) -> Unit)? = null,
-        onSourceCancelled: ((LyricsSource) -> Unit)? = null,
+        onSourceStarted: (suspend (LyricsSource) -> Unit)? = null,
+        onSourceResult: (suspend (LyricsSource, LyricsRepository.Result?) -> Unit)? = null,
+        onSourceCancelled: (suspend (LyricsSource) -> Unit)? = null,
     ): Pair<LyricsSource?, List<LyricLineDto>> {
         if (!localPath.isNullOrBlank()) {
             EmbeddedLyrics.forPath(localPath)?.let { return null to it }

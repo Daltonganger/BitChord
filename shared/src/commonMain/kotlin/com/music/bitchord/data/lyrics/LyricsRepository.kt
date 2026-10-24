@@ -81,14 +81,14 @@ object LyricsRepository {
         prioritizeSyllableSync: Boolean = true,
         isrc: String? = null,
         /** Called from the provider job itself, including for lazily-started ones. */
-        onSourceStarted: ((LyricsSource) -> Unit)? = null,
+        onSourceStarted: (suspend (LyricsSource) -> Unit)? = null,
         /**
          * Reports a completed provider attempt. A null result is a genuine miss; a
          * cancelled race loser is deliberately not reported as one.
          */
-        onSourceResult: ((LyricsSource, Result?) -> Unit)? = null,
+        onSourceResult: (suspend (LyricsSource, Result?) -> Unit)? = null,
         /** Lets callers turn a cancelled race loser back into "not fetched". */
-        onSourceCancelled: ((LyricsSource) -> Unit)? = null,
+        onSourceCancelled: (suspend (LyricsSource) -> Unit)? = null,
     ): Result? = coroutineScope {
         val configuredSequence = order.filter { it in sources } +
             LyricsSource.entries.filter { it in sources && it !in order }
