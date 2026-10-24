@@ -189,7 +189,13 @@ final class InnertubeSearch: Sendable {
         }
     }
 
-    struct SearchError: Error { let message: String }
+    /// A bridge failure. `LocalizedError` so `localizedDescription` carries the
+    /// store's text — the session-expiry check reads it, and a plain `Error`
+    /// would report "couldn't be completed… (SearchError error 1.)".
+    struct SearchError: Error, LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
 }
 
 private final class BridgeCallbackAdapter: SearchBridgeSearchCallback {

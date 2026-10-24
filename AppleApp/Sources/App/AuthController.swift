@@ -213,11 +213,10 @@ final class AuthController {
     }
 
     /// Whether a bridge's failure message is the store's "session is gone"
-    /// refusal (`Innertube.AuthenticationException`), as opposed to a screen
-    /// that merely failed to load.
+    /// refusal (`Innertube.AuthenticationException`). Asked of the shared
+    /// matcher so the text lives in one place.
     static func isSessionExpired(_ message: String?) -> Bool {
-        guard let message else { return false }
-        return message.localizedCaseInsensitiveContains("session has expired")
+        AuthBridge.shared.isSessionExpired(message: message)
     }
 
     /// Posts `.sessionExpired` when [error] is the store's session-gone refusal,

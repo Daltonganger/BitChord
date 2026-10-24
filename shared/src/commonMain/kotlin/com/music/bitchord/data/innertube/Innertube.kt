@@ -110,9 +110,15 @@ object Innertube {
         PlaybackTracker.onSessionChanged()
     }
     class SessionUnavailableException : IllegalStateException("Your saved session could not be verified. Try again when connected.")
-    class AuthenticationException : IllegalStateException("Your YouTube Music session has expired. Sign in again.")
+    class AuthenticationException : IllegalStateException(SESSION_EXPIRED_MESSAGE)
     class PlayerAuthenticationException : IllegalStateException("This playback client rejected authentication")
     class SessionChangedException : CancellationException("Account changed during request")
+
+    /**
+     * The one text the store uses for "the session itself is gone", so the host
+     * never keeps a hand-copied version of it — see [AuthBridge.isSessionExpired].
+     */
+    internal const val SESSION_EXPIRED_MESSAGE = "Your YouTube Music session has expired. Sign in again."
 
     internal class RequestSession(
         val generation: Long,

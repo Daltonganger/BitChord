@@ -67,6 +67,17 @@ object AuthBridge {
     fun hasApiSid(cookieHeader: String): Boolean = Innertube.hasApiSid(cookieHeader)
 
     /**
+     * Whether a bridge's failure message is the store's "session is gone"
+     * refusal ([Innertube.AuthenticationException]), as opposed to a screen
+     * that merely failed to load.
+     *
+     * Matched in the shared layer so the host matches the same text the store
+     * throws, rather than a hand-copied version of it.
+     */
+    fun isSessionExpired(message: String?): Boolean =
+        message?.contains(Innertube.SESSION_EXPIRED_MESSAGE, ignoreCase = true) == true
+
+    /**
      * Install or clear the in-memory session.
      *
      * @return false for a jar with no signing secret, which is refused rather than
