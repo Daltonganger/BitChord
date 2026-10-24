@@ -336,6 +336,57 @@ struct SkeletonBlock: View {
     }
 }
 
+/// One loading song row: the 44pt art and the two text lines a `SongRow`
+/// draws (upstream's `songRowSkeleton`), so a list keeps the shape it is
+/// about to have instead of a spinner standing where content will be.
+struct SkeletonSongRow: View {
+    var showArt = true
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if showArt {
+                SkeletonBlock(height: 44, cornerRadius: 8)
+                    .frame(width: 44)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                SkeletonBlock(height: 12)
+                    .frame(maxWidth: 190, alignment: .leading)
+                SkeletonBlock(height: 10)
+                    .frame(maxWidth: 128, alignment: .leading)
+            }
+        }
+        .padding(.vertical, 3)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A loading list: enough placeholder rows to fill a screen, so the page is
+/// already the shape it will be when the content lands. Upstream never shows
+/// a bare full-screen spinner where list content is coming.
+struct SkeletonRows: View {
+    var count = 8
+    var showArt = true
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ForEach(0..<max(0, count), id: \.self) { _ in
+                SkeletonSongRow(showArt: showArt)
+            }
+        }
+    }
+}
+
+/// One loading shelf card, square like the artwork cards it stands in for.
+struct SkeletonShelfCard: View {
+    var side: CGFloat = Theme.Metrics.shelfCard
+    var cornerRadius: CGFloat = 12
+
+    var body: some View {
+        SkeletonBlock(height: side, cornerRadius: cornerRadius)
+            .frame(width: side)
+    }
+}
+
 /// Music's centered empty state: glyph, bold title, subtitle, one bordered button.
 ///
 /// The copy is `LocalizedStringKey`, not `String`: a call site passing a UI
