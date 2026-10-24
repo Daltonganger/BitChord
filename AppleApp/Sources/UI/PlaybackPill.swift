@@ -57,6 +57,11 @@ struct PlaybackPill: View {
         .overlay(alignment: .bottom) { progressHairline.clipShape(Capsule()) }
         .contentShape(.rect)
         .modifier(NowPlayingZoomSource())
+        // Long press: what is coming next. Upstream's mini player answers a long
+        // press with the queue, and on a phone the pill has no queue button beside
+        // the transport — this is the way to reach the next few tracks without
+        // opening the player first.
+        .contextMenu { quickQueueMenu }
         // Horizontal swipe to skip, matching upstream MiniPlayer's 72dp fling:
         // left for next, right for previous.
         // `minimumDistance: 20` keeps ordinary taps on the tap-to-expand path.
@@ -293,6 +298,62 @@ struct PlaybackPill: View {
     #endif
 
     #if os(iOS)
+    /// The pill's long-press menu: up next, then the two panes the pill does not
+    /// otherwise reach.
+    ///
+    /// Only a handful of rows: a menu is a glance, and the queue pane is one
+    /// button away at the bottom of it. Jumps go through `playQueueItem`, which is
+    /// what the queue pane's own rows use, so a jump from here and a jump from
+    /// there cannot mean different things.
+    @ViewBuilder
+    private var quickQueueMenu: some View {
+        let start = controller.playingIndex + 1
+        let upcoming: [(offset: Int, entry: QueueEntry)] = controller.queue.indices.contains(start)
+            ? Array(controller.queue[start...].prefix(4).enumerated()).map { (offset: $0.offset, entry: $0.element) }
+            : []
+
+        if upcoming.isEmpty {
+            Button("Nothing Queued") {}.disabled(true)
+        } else {
+            ForEach(upcoming, id: \.entry.id) { item in
+                Button {
+                    Haptics.play(.tap)
+                    controller.playQueueItem(at: start + item.offset)
+                } label: {
+                    Text(item.entry.artist.isEmpty
+                         ? item.entry.title
+                         : "\(item.entry.title) — \(item.entry.artist)")
+                }
+            }
+            Button("Clear Up Next") {
+                Haptics.play(.tap)
+                controller.clearUpcoming()
+            }
+        }
+
+        Divider()
+
+        Button {
+            PlatformSettings.shared.putString(key: "last_player_screen", value: "QUEUE")
+            appModel.nowPlayingPresented = true
+        } label: {
+            Label("Queue", systemImage: "list.bullet")
+        }
+
+        Button {
+            PlatformSettings.shared.putString(key: "last_player_screen", value: "LYRICS")
+            appModel.nowPlayingPresented = true
+        } label: {
+            Label("Lyrics", systemImage: "quote.bubble")
+        }
+
+        Button {
+            appModel.nowPlayingPresented = true
+        } label: {
+            Label("Open Player", systemImage: "arrow.up.left.and.arrow.down.right")
+        }
+    }
+
     private var buttons: some View {
         HStack(spacing: 8) {
             Button {
