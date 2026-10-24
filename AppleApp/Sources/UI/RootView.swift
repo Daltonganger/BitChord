@@ -361,6 +361,16 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .libraryPlaylistsChanged)) { _ in
             Task { await loadMacPlaylists() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .playlistDeleted)) { note in
+            // A deleted playlist's detail page cannot dismiss itself here — the
+            // split view's detail column is not a stack — so the shell moves the
+            // sidebar to Playlists, where the deletion is visible.
+            guard let deleted = note.userInfo?["browseId"] as? String else { return }
+            if case .playlist(let shown, _) = macSide, shown == deleted {
+                macSide = .playlists
+                selection = MacSide.playlists.tab.rawValue
+            }
+        }
         .onAppear {
             // Reopen the row the window was left on.
             macSide = MacSide(tab: resolvedTab(AppModel.Tab(rawValue: selection) ?? .home))
