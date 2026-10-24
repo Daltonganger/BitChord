@@ -4374,6 +4374,41 @@ mod tests {
     }
 
     #[test]
+    fn a_planned_cue_inside_a_quiet_lead_in_starts_at_the_audible_edge() {
+        let dir = std::env::temp_dir().join(format!("bitchord-mixer-cue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cue-lead.wav");
+        noise_wav(&path, 1.5, 4.0, 0.2, 0xDEAD_BEEF);
+        crate::playback_regions::put(
+            path.display().to_string(),
+            crate::PlaybackRegions {
+                audible_start_seconds: 1.5,
+                audible_end_seconds: None,
+                excluded: Vec::new(),
+            },
+        );
+        let mut request = transition_source(&path);
+        // The planner's cue lands inside the quiet lead-in; the audible edge
+        // has to win, not the raw cue.
+        request.plan.cue_seconds = 0.5;
+        request.plan.playback_rate = 1.0;
+        let mut voice =
+            Voice::open(&request, false, 0.0, 48_000, 1.0, false, true).unwrap();
+        let pcm = voice.pull(512, 48_000);
+        let rms = (pcm.iter().map(|s| (*s as f64).powi(2)).sum::<f64>()
+            / (pcm.len() / 2).max(1) as f64)
+            .sqrt();
+        assert!(rms > 0.01, "the cue started inside the quiet lead-in ({rms})");
+        assert!(
+            voice.emitted_position_seconds() > 1.45,
+            "the audible position is {:.2}s, not the trimmed edge",
+            voice.emitted_position_seconds()
+        );
+        drop(voice);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn mix_into_ramps_between_chunk_targets() {
         let dir = std::env::temp_dir().join(format!("bitchord-mixer-ramp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -426,6 +426,8 @@ final class PlaybackController {
     private var regionTasks: [String: Task<Void, Never>] = [:]
     private var resolvedVideoIds: [String: String] = [:]
     private var preparedRegionSources: Set<String> = []
+    /// The last detected edges per source, for C's no-tail instrumentation.
+    private var regionEdgesBySource: [String: (start: Double, end: Double?)] = [:]
     private var loudnessMeasurementTask: Task<Void, Never>?
     private var loadedSourcePath: String? {
         didSet { if oldValue != loadedSourcePath {
@@ -1696,6 +1698,7 @@ final class PlaybackController {
                 let regions = await PlaybackRegionStore.shared.regions(path: source, videoId: videoId, trimEdges: trim, skipSegments: skip)
                 guard !Task.isCancelled, let self, self.playGeneration == generation,
                       self.loadedSourcePath == source || self.queueNextRevision == revision else { break }
+                self.regionEdgesBySource[source] = (regions.audibleStartSeconds, regions.audibleEndSeconds)
                 try? engine.setPlaybackRegions(source: source, regions: regions)
                 let complete = !FileManager.default.fileExists(atPath: source + ".grow") || FileManager.default.fileExists(atPath: source + ".complete")
                 if complete || !trim {
@@ -3093,6 +3096,24 @@ final class PlaybackController {
                             && self.queueNextRevision == revision
                     }
                     guard stillPlanning else { return }
+                    // C's instrumentation: a transition is being armed against
+                    // an outgoing track whose analysed tail is unknown. One line
+                    // per transition says how often that happens and whether the
+                    // file was still growing, which decides whether the tail
+                    // ever arrives before the blend needs it.
+                    if attempt == 0 {
+                        await MainActor.run { [weak self] in
+                            guard let self,
+                                  let edges = self.regionEdgesBySource[currentSource],
+                                  edges.end == nil else { return }
+                            let partial = FileManager.default.fileExists(atPath: currentSource + ".grow")
+                                && !FileManager.default.fileExists(atPath: currentSource + ".complete")
+                            self.debugLog.record(
+                                "automix: no analysed tail when the transition arms\(partial ? " (file still growing)" : " (file complete)")",
+                                about: outgoingId
+                            )
+                        }
+                    }
                     // Music Understanding (OS 27+): seed rhythm/key/structure
                     // overlays once per pair before the first plan. Sequential
                     // so we never run two Metal sessions at once (background

@@ -38,6 +38,13 @@ handover="$(cargo test --lib mixer::tests::every_style_has_no_hole_at_the_handov
 echo "$handover" | grep -E '^(EchoOut|LoopRoll|ReverbWash|DropCut|EqualPower|DjBlend|DjFilter):'
 echo "ok   every style holds the +/−200 ms floor and the 3 s level"
 
+# C: the edge detector reads the recording's own level, not digital silence.
+regions="$(cargo test --lib playback_regions::tests 2>&1)" || {
+  echo "$regions" | tail -20
+  exit 1
+}
+echo "ok   edge detection trims a relative fade tail and keeps quiet music"
+
 corpus="${AUTOMIX_CORPUS:-$HOME/Library/Caches/BitChord/audio}"
 if [ ! -d "$corpus" ]; then
   echo "automix: plan-order checks passed; no corpus at $corpus"
