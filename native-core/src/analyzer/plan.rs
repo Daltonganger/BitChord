@@ -678,6 +678,30 @@ fn log_plan(outgoing: &Analysis, incoming: &Analysis, plan: &TransitionPlan, tie
             a.key_confidence,
         )
     };
+    // What the plan could see about the voice, beside the whole-track scalar
+    // the effect rule used to read. `vocal_p` is one number for the record; the
+    // tail and the head are the two windows an actual handover covers.
+    let window_vocal = |a: &Analysis, from: f64, to: f64| {
+        vocal_activity_between(a, from, to)
+            .map(|value| format!("{value:.2}"))
+            .unwrap_or_else(|| "-".into())
+    };
+    let out_beat = if outgoing.beat_interval > 0.0 {
+        outgoing.beat_interval
+    } else {
+        0.5
+    };
+    let in_beat = if incoming.beat_interval > 0.0 {
+        incoming.beat_interval
+    } else {
+        0.5
+    };
+    let out_end = if outgoing.content_end > 0.0 {
+        outgoing.content_end
+    } else {
+        outgoing.duration
+    };
+    let in_start = incoming.audible_start_time.max(0.0);
     log::info!(
         "automix plan [{}] style={:?} cue={:.2}s fade={:.2}s end={:.1}s rate={:.4} \
          bed={:.2}@{:.0}dB dip={:.2} glide={:.1}s vocal_overlap={:.2} bass_swap={}@{:.2}",
@@ -696,22 +720,24 @@ fn log_plan(outgoing: &Analysis, incoming: &Analysis, plan: &TransitionPlan, tie
         plan.bass_swap_fraction,
     );
     log::info!(
-        "automix out [{}]: {}",
+        "automix out [{}]: {} vocal_tail={}",
         if outgoing.analysis_source.is_empty() {
             "dsp"
         } else {
             &outgoing.analysis_source
         },
-        grid(outgoing)
+        grid(outgoing),
+        window_vocal(outgoing, out_end - 8.0 * out_beat, out_end)
     );
     log::info!(
-        "automix in [{}]: {}",
+        "automix in [{}]: {} vocal_head={}",
         if incoming.analysis_source.is_empty() {
             "dsp"
         } else {
             &incoming.analysis_source
         },
-        grid(incoming)
+        grid(incoming),
+        window_vocal(incoming, in_start, in_start + 8.0 * in_beat)
     );
     last_sources::set(&outgoing.analysis_source, &incoming.analysis_source);
 }
@@ -1527,7 +1553,13 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
     } else {
         1.0
     };
-    let vocal_conflict = outgoing.vocal_probability >= 0.62 && incoming.vocal_probability >= 0.62;
+    // The whole-track vocal probability cannot answer "does this handover put
+    // two singers together": it sits at 0.82–0.86 on all thirteen corpus
+    // tracks, sung or not. The windows the handover actually covers do
+    // discriminate — 0.28 through an instrumental outro, 0.91 through a sung
+    // one — so the clash is read there.
+    let (anchor, _) = resolve_mix_out_anchor(outgoing);
+    let vocal_conflict = handover_vocal_clash(outgoing, incoming, anchor, entry);
     // A confident beat match with both voices out of the way earns the long
     // blend. Two singers, or a weak grid, stays inside upstream's 8–16 beats.
     let long = long_blend_allowed(outgoing, incoming) && !vocal_conflict;
@@ -1561,7 +1593,6 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
     // Where the outgoing record should be gone: its mix-out anchor, pulled
     // forward by an arrangement overlap when that anchor is just the content
     // end (upstream `outgoingArrangementOverlap`).
-    let (anchor, _) = resolve_mix_out_anchor(outgoing);
     let content_end = if outgoing.content_end > 0.0 {
         outgoing.content_end
     } else {
@@ -1698,7 +1729,11 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
     // its own. The corpus firing rates will decide whether that should earn an
     // effect or a shorter filtered blend.
     let key_clash = key_distance.is_some_and(|distance| distance > 3);
-    if effect_earned(key_clash, tempo_gap, vocal_conflict, vocal_overlap) {
+    log::info!(
+        "automix clash check [{:?}]: key_clash={key_clash} tempo_gap={tempo_gap:.3}          vocal_conflict={vocal_conflict} vocal_overlap={vocal_overlap:.3}",
+        tier
+    );
+    if effect_earned(key_clash, tempo_gap) {
         if let Some(plan) =
             technique_plan(outgoing, incoming, tier, entry, Some((transition_start, fade_seconds, cue)))
         {
@@ -1727,7 +1762,15 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
         post_glide_seconds: shape.post_glide_seconds,
         outgoing_duration_seconds: outgoing.duration,
         beat_seconds: 0.0,
-        reason: String::new(),
+        reason: if vocal_conflict {
+            format!(
+                "blend: both records sing through the handover; mids ducked {:.0}% for {:.0}% of it",
+                shape.dip_depth * 100.0,
+                vocal_overlap * 100.0
+            )
+        } else {
+            String::new()
+        },
     }
 }
 
@@ -1824,10 +1867,18 @@ fn pair_salt(outgoing: &Analysis, incoming: &Analysis) -> usize {
 }
 
 /// Whether a pair's blend is a clash an effect should season. The 4–7 %
-/// DjFilter band is still a usable blend; only a gap past seven percent, a key
-/// the stretch cannot reconcile, or an unshortened vocal clash earns an effect.
-fn effect_earned(key_clash: bool, tempo_gap: f64, vocal_conflict: bool, vocal_overlap: f64) -> bool {
-    key_clash || tempo_gap > 0.07 || (vocal_conflict && vocal_overlap > 0.15)
+/// DjFilter band is still a usable blend; only a gap past seven percent or a key
+/// the stretch cannot reconcile earns an effect.
+///
+/// A vocal overlap is deliberately *not* on this list. Two records singing at
+/// once is what a filter blend and the mid duck are for — `mix_shape` deepens
+/// the dip with the overlap, and the style falls to DjFilter — so the answer is
+/// a ducked blend rather than an effect that throws the outgoing record away.
+/// The overlap measured by `simultaneous_vocal_fraction` runs 0.0–1.0 across the
+/// corpus, so it can tell a real one from silence; it is simply not evidence
+/// that a blend is impossible.
+fn effect_earned(key_clash: bool, tempo_gap: f64) -> bool {
+    key_clash || tempo_gap > 0.07
 }
 
 fn technique_plan(
@@ -2346,6 +2397,34 @@ fn is_vocal_clash(outgoing_activity: Option<f64>, incoming_activity: Option<f64>
         (Some(out), Some(inc)) if out >= VOCAL_ACTIVE_THRESHOLD && inc >= VOCAL_ACTIVE_THRESHOLD)
 }
 
+/// Do both records sing through the handover itself?
+///
+/// The two windows are the outgoing's last two bars before its mix-out anchor
+/// and the incoming's first two bars from its cue — the audio that will
+/// actually be heard together. A record that ends on an instrumental outro
+/// reads 0.28 here while its whole-track probability said 0.85, which is why
+/// the whole-track number could not be the trigger.
+fn handover_vocal_clash(
+    outgoing: &Analysis,
+    incoming: &Analysis,
+    mix_out_anchor: f64,
+    incoming_cue: f64,
+) -> bool {
+    let out_beats = beat_seconds_of(outgoing).max(0.25);
+    let in_beats = beat_seconds_of(incoming).max(0.25);
+    let out_end = if mix_out_anchor > 0.0 {
+        mix_out_anchor
+    } else if outgoing.content_end > 0.0 {
+        outgoing.content_end
+    } else {
+        outgoing.duration
+    };
+    let in_start = incoming_cue.max(0.0);
+    let out_tail = vocal_activity_between(outgoing, out_end - 8.0 * out_beats, out_end);
+    let in_head = vocal_activity_between(incoming, in_start, in_start + 8.0 * in_beats);
+    is_vocal_clash(out_tail, in_head)
+}
+
 /// The fraction of a planned overlap where **both** tracks sing at the same
 /// instant (upstream `simultaneousVocalFraction`), mapping the outgoing
 /// energy-curve samples onto the incoming timeline through `rate`.
@@ -2655,7 +2734,13 @@ fn plan_wsola_transition(outgoing: &Analysis, incoming: &Analysis) -> Option<Tra
         stretch_ratio,
     );
 
-    let vocal_conflict = outgoing.vocal_probability >= 0.62 && incoming.vocal_probability >= 0.62;
+    // The whole-track vocal probability cannot answer "does this handover put
+    // two singers together": it sits at 0.82–0.86 on all thirteen corpus
+    // tracks, sung or not. The windows the handover actually covers do
+    // discriminate — 0.28 through an instrumental outro, 0.91 through a sung
+    // one — so the clash is read there.
+    let (anchor, _) = resolve_mix_out_anchor(outgoing);
+    let vocal_conflict = handover_vocal_clash(outgoing, incoming, anchor, entry);
     let style = TransitionStyle::DjBlend;
     let playback_rate = stretch_ratio;
     let fade_seconds = transition_end - transition_start;
@@ -2771,6 +2856,77 @@ mod tests {
         }
     }
 
+    /// An energy curve and a vocal mask at 0.5 s resolution, so the vocal
+    /// windows a handover reads have something to read.
+    fn with_vocal_curve(a: &mut Analysis, seconds: f64, mask: f64) {
+        let points = (0..((seconds / 0.5) as usize))
+            .map(|index| audio_analysis::EnergyPoint {
+                time: index as f64 * 0.5,
+                energy: 0.8,
+            })
+            .collect::<Vec<_>>();
+        a.vocal_activity_mask = vec![mask; points.len()];
+        a.energy_curve = points;
+    }
+
+    #[test]
+    fn a_vocal_handover_ducks_the_blend_instead_of_earning_an_effect() {
+        // 100 against 106 BPM is a 6 % gap — inside the filter band — and both
+        // records sing through the handover, which used to fire the effect rule
+        // through the whole-track vocal probability. The answer is a filtered,
+        // ducked blend, not an EchoOut that throws the outgoing record away.
+        let mut out = analysis(0.0, 205.0, vec![0.0, 2.0, 4.0]);
+        out.bpm = 100.0;
+        out.beat_interval = 0.6;
+        out.beat_confidence = 0.8;
+        out.content_end = 200.0;
+        out.vocal_probability = 0.85;
+        with_vocal_curve(&mut out, 205.0, 0.85);
+        let mut inc = analysis(0.0, 200.0, vec![0.0, 2.0, 4.0]);
+        inc.bpm = 106.0;
+        inc.beat_interval = 60.0 / 106.0;
+        inc.beat_confidence = 0.8;
+        inc.vocal_probability = 0.85;
+        with_vocal_curve(&mut inc, 200.0, 0.85);
+        let plan = plan_from(&out, &inc, 8.0);
+        assert!(!plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
+        assert!(plan.vocal_overlap > 0.0, "the clash must still be measured");
+        assert!(plan.dip_depth > 0.0, "the mids are ducked");
+        assert!(
+            plan.reason.contains("ducked"),
+            "the reason names the duck: {}",
+            plan.reason
+        );
+    }
+
+    #[test]
+    fn an_instrumental_outro_is_not_a_vocal_clash() {
+        // The outgoing's whole-track probability is 0.85, but its last two bars
+        // are instrumental: the handover windows say so and the blend is not
+        // reported as a vocal clash.
+        let mut out = analysis(0.0, 205.0, vec![0.0, 2.0, 4.0]);
+        out.bpm = 100.0;
+        out.beat_interval = 0.6;
+        out.beat_confidence = 0.8;
+        out.content_end = 200.0;
+        out.vocal_probability = 0.85;
+        with_vocal_curve(&mut out, 205.0, 0.85);
+        let tail_from = ((200.0 - 8.0 * 0.6) / 0.5) as usize;
+        for value in out.vocal_activity_mask.iter_mut().skip(tail_from) {
+            *value = 0.15;
+        }
+        let mut inc = analysis(0.0, 200.0, vec![0.0, 2.0, 4.0]);
+        inc.bpm = 106.0;
+        inc.beat_interval = 60.0 / 106.0;
+        inc.beat_confidence = 0.8;
+        inc.vocal_probability = 0.85;
+        with_vocal_curve(&mut inc, 200.0, 0.85);
+        let plan = plan_from(&out, &inc, 8.0);
+        assert!(!plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
+        assert!(plan.reason.is_empty(), "no vocal clash to report: {}", plan.reason);
+        assert_eq!(plan.vocal_overlap, 0.0);
+    }
+
     /// The pairs an autoplay run is made of — different tempos, a confident
     /// grid — used to fall to a fade. They now get a named technique whose
     /// landing sits on a downbeat inside the outgoing record.
@@ -2811,15 +2967,15 @@ mod tests {
 
     #[test]
     fn effect_earned_only_for_a_real_clash() {
-        assert!(!effect_earned(false, 0.0, false, 0.0));
+        assert!(!effect_earned(false, 0.0));
         // The 4–7 % DjFilter band is still a blend.
-        assert!(!effect_earned(false, 0.049, false, 0.0));
-        assert!(!effect_earned(false, 0.069, true, 0.10));
-        // A key the stretch cannot reconcile, a gap past the filter band, or a
-        // vocal overlap that stayed above the threshold.
-        assert!(effect_earned(true, 0.0, false, 0.0));
-        assert!(effect_earned(false, 0.071, false, 0.0));
-        assert!(effect_earned(false, 0.01, true, 0.16));
+        assert!(!effect_earned(false, 0.049));
+        assert!(!effect_earned(false, 0.069));
+        // A key the stretch cannot reconcile, or a gap past the filter band,
+        // earns an effect; a vocal overlap never does on its own — the blend
+        // ducks it instead.
+        assert!(effect_earned(true, 0.0));
+        assert!(effect_earned(false, 0.071));
     }
 
     #[test]
@@ -2845,8 +3001,8 @@ mod tests {
         // ratio folds by an octave and the gap that decides an effect is ~0.
         let ratio = normalized_tempo_ratio(198.2, 99.0);
         assert!((ratio - 1.0).abs() < 0.01, "ratio {ratio}");
-        assert!(!effect_earned(false, (1.0 - ratio).abs(), false, 0.0));
-        assert!(!effect_earned(false, (1.0 - normalized_tempo_ratio(99.0, 198.2)).abs(), false, 0.0));
+        assert!(!effect_earned(false, (1.0 - ratio).abs()));
+        assert!(!effect_earned(false, (1.0 - normalized_tempo_ratio(99.0, 198.2)).abs()));
         // …and the log says so instead of printing a raw 2:1 beside "clash".
         let summary = tempo_summary(198.2, 99.0);
         assert!(summary.contains("2×"), "{summary}");
@@ -2861,7 +3017,7 @@ mod tests {
         for (out, inc) in [(120.0, 180.0), (180.0, 120.0)] {
             let gap = (1.0 - normalized_tempo_ratio(out, inc)).abs();
             assert!(gap > 0.07, "{out}→{inc} gap {gap}");
-            assert!(effect_earned(false, gap, false, 0.0));
+            assert!(effect_earned(false, gap));
         }
     }
 
