@@ -71,7 +71,14 @@ struct DetailView: View {
     var body: some View {
         Group {
             if loading {
-                ScrollView { FeedSkeleton() }
+                // The page as it is about to be, from the id alone — the same
+                // kind fallback `kind(of:)` uses when the payload is absent —
+                // so opening a detail moves nothing but the artwork and words
+                // arriving (upstream `detailSkeleton(isArtist:)`).
+                DetailSkeleton(
+                    isArtist: preLoadKind == .artist,
+                    wide: isWide
+                )
             } else if let error {
                 EmptyStateView(icon: Image(.bchMusicNote), title: "Couldn't load", subtitle: error, buttonTitle: "Retry") {
                     Task { await load() }
@@ -112,6 +119,14 @@ struct DetailView: View {
             pinned = PlaylistPinning.pinnedIds().contains(browseId)
             await load()
         }
+    }
+
+    /// The kind before the page loads, from the id alone.
+    private var preLoadKind: Kind {
+        if browseId.hasPrefix("UC") { return .artist }
+        if browseId.hasPrefix("MPREb") || browseId.hasPrefix("OLAK") { return .album }
+        if browseId.hasPrefix("VL") || browseId.hasPrefix("PL") { return .playlist }
+        return .other
     }
 
     private func loadedPage(_ page: DetailPageModel) -> some View {
@@ -1220,6 +1235,60 @@ private final class DetailCanvasCB: CanvasBridgeCanvasCallback {
     let handler: (String?) -> Void
     init(_ handler: @escaping (String?) -> Void) { self.handler = handler }
     func onResult(json: String?) { handler(json) }
+}
+
+/// The loading detail page, shaped like the one coming (upstream
+/// `detailSkeleton(isArtist:)`): the sleeve or hero block at its real size
+/// (`releaseSleeve`'s and the artist hero's own formulas), the title lines,
+/// the action row's controls and the song rows beneath.
+private struct DetailSkeleton: View {
+    var isArtist: Bool
+    var wide: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            let sleeve = isArtist
+                ? min(width / 0.95, geo.size.height * 0.55)
+                : (wide ? 240 : min(210, max(140, width * 0.5)))
+            ScrollView {
+                VStack(spacing: 18) {
+                    SkeletonBlock(height: sleeve, cornerRadius: isArtist ? 0 : 12)
+                        .frame(width: isArtist ? width : sleeve)
+                        .padding(.top, wide ? 24 : 10)
+
+                    VStack(spacing: 10) {
+                        SkeletonBlock(height: 20)
+                            .frame(maxWidth: width * 0.6, alignment: .center)
+                        SkeletonBlock(height: 12)
+                            .frame(maxWidth: width * 0.35, alignment: .center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 24)
+
+                    HStack(spacing: 14) {
+                        if wide {
+                            SkeletonBlock(height: 44, cornerRadius: 22).frame(width: 150)
+                            SkeletonBlock(height: 44, cornerRadius: 22).frame(width: 150)
+                        } else {
+                            SkeletonBlock(height: 44, cornerRadius: 22).frame(width: 92)
+                            SkeletonBlock(height: 44, cornerRadius: 22).frame(width: 44)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    VStack(spacing: 6) {
+                        ForEach(0..<8, id: \.self) { _ in
+                            SkeletonSongRow()
+                                .padding(.horizontal, 24)
+                        }
+                    }
+                    .padding(.bottom, 22)
+                }
+            }
+        }
+        .accessibilityLabel("Loading")
+    }
 }
 
 // MARK: - Circular Action Buttons
