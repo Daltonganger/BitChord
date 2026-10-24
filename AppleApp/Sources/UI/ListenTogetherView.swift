@@ -51,6 +51,11 @@ struct ListenTogetherView: View {
     /// Set by a link, so the code cell is pre-filled rather than the sheet opening blank.
     @State private var codeFromLink: String?
     @State private var serverEditorPresented = false
+    /// Sign-in, presented here rather than through the root's sheet: this
+    /// screen is usually already a sheet, and SwiftUI will not raise a second
+    /// sheet on the same presenter — the root's "Sign in" button would sit
+    /// there doing nothing.
+    @State private var signInPresented = false
 
     /// How long the newly made party sits on screen before the invite rises over it.
     ///
@@ -97,6 +102,25 @@ struct ListenTogetherView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Listen together")
+        .sheet(isPresented: $signInPresented) {
+            // The same presentation RootView mounts, moved to the screen that
+            // asks for it, so it works inside this sheet, in iOS Settings and
+            // in the Mac Settings window alike.
+            NavigationStack {
+                YtMusicLoginView(
+                    onCaptured: { session, done in
+                        auth.accept(session) { accepted in
+                            if accepted { signInPresented = false }
+                            done(accepted)
+                        }
+                    },
+                    onDismiss: { signInPresented = false }
+                )
+            }
+            #if os(macOS)
+            .frame(minWidth: 720, minHeight: 640)
+            #endif
+        }
         #if os(macOS)
         .frame(minWidth: 520, idealWidth: 600)
         #endif
@@ -167,7 +191,7 @@ struct ListenTogetherView: View {
     private var signInSection: some View {
         Section {
             Button {
-                auth.loginPresented = true
+                signInPresented = true
             } label: {
                 Label {
                     VStack(alignment: .leading, spacing: 2) {
