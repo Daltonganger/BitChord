@@ -51,6 +51,20 @@ cold="$(cargo test --lib mixer::tests::a_cold_ending -- --nocapture 2>&1)" || {
 echo "$cold" | grep -E '^ColdEnd:'
 echo "ok   a cold ending holds its chord at unity with the incoming underneath"
 
+# G: the match is applied before the incoming's first audible frame, and a
+# correlated DjBlend (same kicks, independent noise) keeps the 3 s gate.
+match="$(cargo test --lib mixer::tests::a_transition_match_is_settled -- --nocapture 2>&1)" || {
+  echo "$match" | tail -20
+  exit 1
+}
+echo "ok   the transition match is settled before the first audible frame"
+correlated="$(cargo test --lib mixer::tests::a_correlated_dj_blend -- --nocapture 2>&1)" || {
+  echo "$correlated" | tail -25
+  exit 1
+}
+echo "$correlated" | grep -E '^DjBlend correlated:'
+echo "ok   a correlated DjBlend stays inside the 3 s level gate"
+
 # C: the edge detector reads the recording's own level, not digital silence.
 regions="$(cargo test --lib playback_regions::tests 2>&1)" || {
   echo "$regions" | tail -20
