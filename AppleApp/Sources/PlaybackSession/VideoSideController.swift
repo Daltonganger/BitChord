@@ -48,6 +48,8 @@ final class VideoSideController {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var statusObservation: NSKeyValueObservation?
     @ObservationIgnored private var failedObserver: NSObjectProtocol?
+    /// The asset's resource loader holds its delegate weakly.
+    @ObservationIgnored private var loader: ChunkedVideoLoader?
     @ObservationIgnored private var isSeeking = false
     @ObservationIgnored private var lastSeekAt: CFTimeInterval = 0
     /// How long a seek on this picture takes to land, averaged: the policy
@@ -104,11 +106,17 @@ final class VideoSideController {
         self.side = side
         state = .loading
 
-        // The CDN expects the headers its resolving client sent (its user
-        // agent above all); without them a picture can sit in "loading".
-        let asset = side.headers.isEmpty
-            ? AVURLAsset(url: url)
-            : AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": side.headers])
+        // Bounded ranges, with the headers the resolving client sent: the
+        // player's own open-ended requests are slowed to playback speed.
+        let loader = ChunkedVideoLoader(source: url, headers: side.headers)
+        let asset: AVURLAsset
+        if let chunked = loader.assetURL {
+            asset = AVURLAsset(url: chunked)
+            asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+            self.loader = loader
+        } else {
+            asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": side.headers])
+        }
         let item = AVPlayerItem(asset: asset)
         let attachedAt = CACurrentMediaTime()
         PlaybackDebugLog.shared.record(
@@ -252,6 +260,7 @@ final class VideoSideController {
         timer = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
+        loader = nil
         isSeeking = false
         lastSeekAt = 0
     }
