@@ -45,32 +45,29 @@ struct SpotifyImportSheet: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if auth.signedIn {
-                    content
-                } else {
-                    EmptyStateView(
-                        icon: Image(.bchMusicNote),
-                        title: "Sign in to import",
-                        subtitle: "A Spotify import becomes a playlist on your YouTube Music account, so it needs a signed-in account.",
-                        buttonTitle: nil,
-                        action: nil
-                    )
+            content
+                .navigationTitle("Import from Spotify")
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(.inline)
+                #endif
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        // Signed in, the import creates the playlist on the
+                        // account. Signed out, matching still works and the
+                        // save is device-local — upstream's "saved on this
+                        // device" (spotify_import_description_local).
+                        if auth.signedIn {
+                            Button(createTitle) { Task { await create() } }
+                                .disabled(matchedRows.isEmpty || creating || phase == .matching)
+                        } else {
+                            Button(saveTitle) { saveLocally() }
+                                .disabled(matchedRows.isEmpty || phase == .matching)
+                        }
+                    }
                 }
-            }
-            .navigationTitle("Import from Spotify")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(createTitle) { Task { await create() } }
-                        .disabled(matchedRows.isEmpty || creating || phase == .matching)
-                }
-            }
         }
         .task { await loadPlaylistsIfPossible() }
         #if os(macOS)
@@ -81,6 +78,10 @@ struct SpotifyImportSheet: View {
     private var createTitle: String {
         if creating { return "Creating…" }
         return matchedRows.count == 1 ? "Create Playlist (1)" : "Create Playlist (\(matchedRows.count))"
+    }
+
+    private var saveTitle: String {
+        matchedRows.count == 1 ? "Save on This Device (1)" : "Save on This Device (\(matchedRows.count))"
     }
 
     // MARK: - Content
@@ -153,6 +154,21 @@ struct SpotifyImportSheet: View {
             if let error {
                 Section {
                     Text(error).foregroundStyle(.red)
+                }
+            }
+
+            // The deliberate local save, next to the account create: upstream's
+            // local-fallback as a choice rather than an accident.
+            if auth.signedIn, !rows.isEmpty {
+                Section {
+                    Button {
+                        saveLocally()
+                    } label: {
+                        Label("Save on This Device Instead", systemImage: "internaldrive")
+                    }
+                    .disabled(matchedRows.isEmpty || phase == .matching)
+                } footer: {
+                    Text("Kept in this app only — not created on your YouTube Music account.")
                 }
             }
         }
@@ -286,6 +302,42 @@ struct SpotifyImportSheet: View {
             toast.show("Imported “\(name)” with \(ids.count) of \(rows.count) tracks")
             dismiss()
         }
+    }
+
+    /// The device-local save, on the same store the file import writes. The
+    /// Spotify row keeps its own title and artist as the source the card was
+    /// matched from; the matched copy becomes the row itself.
+    private func saveLocally() {
+        guard let playlist else { return }
+        let tracks = rows.map { row in
+            ImportedPlaylistTrack(
+                id: row.id,
+                title: row.matchedTitle ?? row.title,
+                artist: row.matchedArtist ?? row.artists,
+                sourceTitle: row.title,
+                sourceArtist: row.artists,
+                album: nil,
+                durationText: Self.durationText(row.durationMs),
+                videoId: row.videoId,
+                thumbnailUrl: nil
+            )
+        }
+        do {
+            _ = try ImportedPlaylistStore.shared.save(
+                title: playlist.name, sourceName: "Spotify", tracks: tracks
+            )
+            NotificationCenter.default.post(name: .libraryPlaylistsChanged, object: nil)
+            toast.show("Saved “\(playlist.name)” on this device with \(matchedRows.count) of \(rows.count) tracks")
+            dismiss()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private static func durationText(_ ms: Int64) -> String? {
+        guard ms > 0 else { return nil }
+        let totalSeconds = Int(ms / 1000)
+        return String(format: "%d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 
     // MARK: - Bridge

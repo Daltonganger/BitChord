@@ -376,6 +376,7 @@ struct PlaylistImportReviewView: View {
                                 sourceName: draft.sourceName,
                                 tracks: tracks
                             )
+                            NotificationCenter.default.post(name: .libraryPlaylistsChanged, object: nil)
                             onSaved(nil)
                             dismiss()
                         } catch {
