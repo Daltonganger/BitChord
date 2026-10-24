@@ -358,6 +358,12 @@ object SourceResolverBridge {
     fun rankOf(kind: String): Int =
         SourceKind.entries.firstOrNull { it.name == kind }?.rank ?: Int.MAX_VALUE
 
+    /**
+     * How many addons are enabled. YouTube is always active and is not an addon,
+     * so a search screen can say "no addons yet" before a query fails.
+     */
+    fun addonCount(): Int = SourceRegistry.active().count { it.kind != SourceKind.YOUTUBE }
+
     fun setEnabled(configId: String, enabled: Boolean, callback: ActionCallback) {
         SourceRegistry.setEnabled(configId, enabled)
         callback.onResult(true, null)
