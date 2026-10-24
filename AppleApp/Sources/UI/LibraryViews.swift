@@ -481,72 +481,69 @@ struct ExploreView: View {
         }
     }
 
+    @State private var gridWidth: CGFloat = 0
+
     @ViewBuilder
     private var moodGrid: some View {
         switch moods.phase {
         case .loading:
-            // A grid of placeholder squares sized as real tiles to avoid layout jumping.
-            VStack(alignment: .leading, spacing: 14) {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(.quaternary)
-                    .frame(width: 140, height: 22)
-                LazyVGrid(columns: moodColumns, spacing: 14) {
-                    ForEach(0..<10, id: \.self) { _ in
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(.quaternary)
-                            .frame(height: 100)
-                    }
+            // Column-aware placeholder rows at the real tile aspect, so the
+            // grid keeps the shape it is about to have.
+            LazyVGrid(columns: moodColumns, spacing: 12) {
+                ForEach(0..<(moodColumnCount * 6), id: \.self) { _ in
+                    MoodTileSkeleton()
                 }
             }
         case .failed:
             EmptyView()
         case .loaded(let sections):
-            ForEach(sections) { section in
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(section.title)
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(.primary)
-                    LazyVGrid(columns: moodColumns, spacing: 14) {
-                        ForEach(section.items) { item in
-                            NavigationLink {
-                                MoodGenrePlaylistsView(category: item)
-                            } label: {
-                                MoodTile(category: item)
-                            }
-                            .buttonStyle(.plain)
-                        }
+            // One flat grid, not one grid per section: upstream flattened the
+            // page in 3d2b35ce and dedupes by (browseId, params) — the same
+            // pair a tile's id is built from — because a category that the
+            // server lists twice would paint twice.
+            let tiles = sections.flatMap(\.items).dedupedById()
+            LazyVGrid(columns: moodColumns, spacing: 12) {
+                ForEach(tiles) { item in
+                    NavigationLink {
+                        MoodGenrePlaylistsView(category: item)
+                    } label: {
+                        MoodTile(category: item)
                     }
+                    .buttonStyle(.plain)
                 }
-                .padding(.bottom, 12)
             }
         }
     }
 
-    /// Two across on iPhone like upstream's `MoodGenreGrid`; adaptive on iPad and Mac
-    /// where wide windows comfortably host 4 to 6 categories across.
+    /// Upstream's `moodColumns`: as many 220pt-minimum columns as the row
+    /// fits, between two and six, so a phone still gets its two and a wide
+    /// window stops growing at six.
+    private var moodColumnCount: Int {
+        let row = gridWidth - 48
+        let count = Int((row + 12) / (220 + 12))
+        return min(6, max(2, count))
+    }
+
     private var moodColumns: [GridItem] {
-        #if os(macOS)
-        [GridItem(.adaptive(minimum: 180, maximum: 260), spacing: 14)]
-        #else
-        if sizeClass == .regular {
-            return [GridItem(.adaptive(minimum: 180, maximum: 260), spacing: 14)]
-        } else {
-            return [
-                GridItem(.flexible(), spacing: 14),
-                GridItem(.flexible(), spacing: 14),
-            ]
-        }
-        #endif
+        Array(repeating: GridItem(.flexible(), spacing: 12), count: moodColumnCount)
     }
 }
 
-/// One category button: a 100pt gradient card with a rotated sleeve cropped
-/// past the bottom-end corner and the title at the top-start — upstream's
-/// `MoodGenreCard` (16° rotation, 82pt art, bold white title).
+/// One category tile: a solid stripe down the left and the category's cover
+/// filling the rest, redrawn as a duotone of the stripe's colour so the tile
+/// reads as one tinted sleeve rather than a photo pasted onto a swatch —
+/// upstream's `MoodGenreSleeve` (1.72 aspect, 18pt corners, title over a
+/// legibility wash at the top-start).
 private struct MoodTile: View {
     let category: MoodGenre
 
-    /// Kotlin String.hashCode uses UTF-16 units and a 31 multiplier.
+    /// How much of the tile the solid stripe covers before the artwork starts.
+    private let stripeFraction: CGFloat = 0.28
+
+    // MARK: Tone (upstream `moodTone`)
+
+    /// Kotlin String.hashCode uses UTF-16 units and a 31 multiplier — the same
+    /// hash picks the fallback for the same title on every platform.
     private var colorIndex: Int {
         let hash = category.title.utf16.reduce(Int32(0)) { value, unit in
             value &* 31 &+ Int32(unit)
@@ -554,67 +551,113 @@ private struct MoodTile: View {
         return Int((UInt32(bitPattern: hash) & 0x7fff_ffff) % 8)
     }
 
+    private func argb(_ value: Int64) -> Color {
+        Color(.sRGB,
+              red: Double((value >> 16) & 0xFF) / 255,
+              green: Double((value >> 8) & 0xFF) / 255,
+              blue: Double(value & 0xFF) / 255,
+              opacity: Double((value >> 24) & 0xFF) / 255)
+    }
+
+    private func lerp(_ from: (Double, Double, Double), to: (Double, Double, Double), _ t: Double) -> (Double, Double, Double) {
+        (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t, from.2 + (to.2 - from.2) * t)
+    }
+
     private var baseRGB: (Double, Double, Double) {
+        if let stripeColor = category.stripeColor {
+            let value = UInt64(bitPattern: stripeColor)
+            return (Double((value >> 16) & 0xFF) / 255, Double((value >> 8) & 0xFF) / 255, Double(value & 0xFF) / 255)
+        }
+        // For a button that came without YouTube's colour: muted, never neon.
         let colors: [(Int, Int, Int)] = [
-            (0xE6, 0x4A, 0x19), (0xEC, 0x0B, 0x65),
-            (0x86, 0x64, 0xAC), (0x6B, 0x4E, 0xFF),
-            (0xBE, 0x61, 0x00), (0x23, 0x3C, 0x78),
-            (0x4D, 0x97, 0xE5), (0xAA, 0x26, 0x7E),
+            (0xCC, 0x6A, 0x55), (0xC0, 0x7A, 0x92), (0x9C, 0x8A, 0xC0), (0x80, 0x90, 0xC8),
+            (0xD0, 0xA0, 0x60), (0x6A, 0x88, 0xB0), (0x7A, 0xAE, 0xD0), (0x86, 0xB8, 0x90),
         ]
         let (r, g, b) = colors[colorIndex]
         return (Double(r) / 255, Double(g) / 255, Double(b) / 255)
     }
 
+    private var stripeRGB: (Double, Double, Double) {
+        // YouTube's palette is already pastel; a touch of black keeps it from
+        // glowing against the page.
+        lerp(baseRGB, to: (0, 0, 0), 0.08)
+    }
+
+    private var shadowRGB: (Double, Double, Double) {
+        lerp(baseRGB, to: (0, 0, 0), 0.68)
+    }
+
+    private var highlightRGB: (Double, Double, Double) {
+        lerp(baseRGB, to: (1, 1, 1), 0.32)
+    }
+
+    private var placeholderRGB: (Double, Double, Double) {
+        lerp(shadowRGB, to: highlightRGB, 0.45)
+    }
+
+    private func rgbColor(_ rgb: (Double, Double, Double)) -> Color {
+        Color(red: rgb.0, green: rgb.1, blue: rgb.2)
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
-            let (r, g, b) = baseRGB
-            LinearGradient(
-                colors: [
-                    Color(red: r, green: g, blue: b),
-                    Color(red: r * 0.68, green: g * 0.68, blue: b * 0.68),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            // A rotated sleeve cropped past the corner, like a cropped album
-            // sleeve rather than a floating rectangle.
-            GeometryReader { _ in
-                Color.clear
-            }
-            .overlay(alignment: .bottomTrailing) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.white.opacity(0.22))
-                    if let url = category.thumbnailUrl {
-                        ArtworkView(url: url, data: nil, side: 82)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
+            rgbColor(stripeRGB)
+            // The duotone: a grayscale cover multiplied by the ramp's span and
+            // added over the shadow tone is exactly the luminance ramp
+            // upstream's ColorMatrix maps, composed from two blend modes.
+            ZStack {
+                rgbColor(placeholderRGB)
+                if let url = category.thumbnailUrl {
+                    // The ramp's span: highlight minus shadow, per channel,
+                    // which the grayscale cover's luminance walks.
+                    let span = (
+                        max(0, highlightRGB.0 - shadowRGB.0),
+                        max(0, highlightRGB.1 - shadowRGB.1),
+                        max(0, highlightRGB.2 - shadowRGB.2)
+                    )
+                    ArtworkView(url: url, data: nil, side: 200)
+                        .grayscale(1)
+                        .colorMultiply(rgbColor(span))
+                        .blendMode(.plusLighter)
                 }
-                .frame(width: 82, height: 82)
-                .rotationEffect(.degrees(16))
-                .offset(x: 10, y: 12)
-                .shadow(color: .black.opacity(0.25), radius: 5, x: 2, y: 2)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(.leading, stripeFraction * 300)
+            // Pale stripes would swallow white type; a soft wash under the
+            // title keeps it legible.
+            LinearGradient(
+                colors: [.black.opacity(0.24), .clear],
+                startPoint: .top,
+                endPoint: .init(x: 0.5, y: 0.62)
+            )
             Text(category.title)
-                .font(.headline.weight(.bold))
+                .font(.callout.weight(.bold))
                 .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
+                .shadow(color: .black.opacity(0.35), radius: 6, x: 0, y: 1)
                 .lineLimit(2)
-                .padding(12)
-                .padding(.trailing, 48)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
         }
-        .frame(height: 100)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.08), radius: 4, x: 0, y: 2)
+        .aspectRatio(1.72, contentMode: .fit)
+        .clipShape(.rect(cornerRadius: 18, style: .continuous))
+        .contentShape(.rect(cornerRadius: 18, style: .continuous))
         .accessibilityLabel(category.title)
+    }
+}
+
+/// The loading tile: the real aspect, the real corner, the shared pulse.
+private struct MoodTileSkeleton: View {
+    var body: some View {
+        SkeletonBlock(height: 400, cornerRadius: 18)
+            .aspectRatio(1.72, contentMode: .fit)
+    }
+}
+
+private extension Array where Element == MoodGenre {
+    /// First occurrence wins, keyed the way a tile identifies itself.
+    func dedupedById() -> [MoodGenre] {
+        var seen = Set<String>()
+        return filter { seen.insert($0.id).inserted }
     }
 }
 
