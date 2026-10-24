@@ -14,16 +14,28 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$here/.." && pwd)"
 port="${WEBDAV_PORT:-8081}"
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/bitchord-webdav-check.XXXXXX")"
+fixture_root="$scratch/root"
+request_log="$scratch/requests.log"
+upload_source="$scratch/upload.flac"
 server_pid=""
 
 cleanup() {
-  if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || true; fi
+  if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
+  rm -rf "$scratch"
 }
 trap cleanup EXIT
 
-if [[ -d /tmp/bitchord-webdav ]]; then rm -rf /tmp/bitchord-webdav; fi
-python3 "$here/webdav-fixture.py" "$port" >/tmp/bitchord-webdav.log 2>&1 &
+export WEBDAV_FIXTURE_ROOT="$fixture_root"
+export WEBDAV_REQUEST_LOG="$request_log"
+python3 "$here/webdav-fixture.py" "$port" "$fixture_root" >"$scratch/server.log" 2>&1 &
 server_pid=$!
+
+python3 - "$upload_source" <<'PY'
+import sys
+with open(sys.argv[1], "wb") as audio:
+    audio.write(bytes(range(256)) * 64)
+PY
 
 # Wait for it to answer rather than sleeping a fixed amount: a slow start should
 # not read as a failure.
@@ -37,11 +49,14 @@ bin="$(mktemp -d)/webdav-verify"
 xcrun swiftc -O -o "$bin" \
   -F "$fw" -framework BitChordShared \
   -Xlinker -rpath -Xlinker "$fw/BitChordShared.framework/Versions/A" \
+  "$repo/AppleApp/Sources/UI/WebDavStore.swift" \
   "$here/webdav-verify/main.swift"
 
-: >/tmp/bitchord-webdav-requests.log
-WEBDAV_URL="http://localhost:$port/Music" "$bin"
+WEBDAV_URL="http://localhost:$port/Music" WEBDAV_UPLOAD_SOURCE="$upload_source" "$bin"
+cmp "$upload_source" "$fixture_root/Music/Björk - Upload Test.flac"
+cmp "$upload_source" "$fixture_root/Music/Björk - Upload Test (1).flac"
+echo "  ok  streamed upload bytes are unchanged and conflicts keep both files"
 
 echo ""
 echo "requests, with how each was answered:"
-awk '{print $1, $2, $3}' /tmp/bitchord-webdav-requests.log | sort | uniq -c | sed 's/^/  /'
+awk '{print $1, $2, $3}' "$request_log" | sort | uniq -c | sed 's/^/  /'

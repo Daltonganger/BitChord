@@ -3095,13 +3095,6 @@ pub fn read_track_metadata(path: String) -> Option<TrackMetadata> {
     metadata::read_track_metadata(&path)
 }
 
-/// Writes a track number onto the file's own tag. Exported for the download
-/// store, which knows the release's track order better than any filename.
-#[uniffi::export]
-pub fn write_track_number(path: String, number: u32) -> bool {
-    metadata::write_track_number(&path, number)
-}
-
 /// Write title/artist/album/artwork onto a downloaded file.
 #[uniffi::export]
 pub fn write_track_tags(
