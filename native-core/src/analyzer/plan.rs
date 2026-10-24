@@ -100,7 +100,7 @@ const ARRANGEMENT_OVERLAP_BEATS: f64 = 8.0;
 const MIN_CLEARANCE_SECONDS: f64 = 5.0;
 const VOCAL_CLASH_TOLERANCE: f64 = 0.05;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Analysis {
     bpm: f64,
     beat_interval: f64,
@@ -179,13 +179,17 @@ enum Tier {
 mod analysis_cache {
     use super::Analysis;
     use std::collections::{HashMap, VecDeque};
+    use std::io::Write;
     use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::UNIX_EPOCH;
 
     /// Enough for the head and tail of a queue; beyond that, re-decoding costs
     /// less than holding it. Each entry is tens to hundreds of kilobytes.
     const CAPACITY: usize = 6;
+    const DISK_LIMIT_BYTES: u64 = 50 * 1024 * 1024;
+    const SCHEMA_VERSION: u32 = 1;
 
-    type Key = (String, u64, u64, bool);
+    pub(super) type Key = (String, u64, u64, u64, String, bool);
 
     #[derive(Default)]
     struct Cache {
@@ -212,8 +216,91 @@ mod analysis_cache {
     /// to under a stable path. Duration is part too: URL sources can start with
     /// no usable duration and acquire one from the playback/catalogue metadata
     /// later, which changes whether whole-track analysis can run.
-    fn len_of(path: &str) -> u64 {
-        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    pub(super) fn file_identity(path: &str) -> (u64, u64) {
+        std::fs::metadata(path)
+            .map(|meta| {
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos() as u64)
+                    .unwrap_or(0);
+                (meta.len(), modified)
+            })
+            .unwrap_or((0, 0))
+    }
+
+    fn disk_dir() -> Option<std::path::PathBuf> {
+        #[cfg(test)]
+        {
+            // Unit tests must opt into an isolated directory; never fall back
+            // to the developer's real application cache.
+            return TEST_DISK_DIR.with(|value| value.borrow().clone());
+        }
+        #[cfg(not(test))]
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|home| home.join("Library/Caches/BitChord/Analysis"))
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        #[cfg(test)]
+        static TEST_DISK_DIR: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_disk_dir(dir: std::path::PathBuf) {
+        TEST_DISK_DIR.with(|value| *value.borrow_mut() = Some(dir));
+    }
+
+    pub(super) fn disk_key(key: &Key) -> String {
+        let mut hasher = sha2::Sha256::new();
+        use sha2::Digest;
+        hasher.update(SCHEMA_VERSION.to_le_bytes());
+        hasher.update(serde_json::to_vec(key).unwrap_or_default());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn read_disk(key: &Key) -> Option<Analysis> {
+        let path = disk_dir()?.join(format!("{}.json", disk_key(key)));
+        let bytes = std::fs::read(path).ok()?;
+        let value = serde_json::from_slice(&bytes).ok()?;
+        // Updating the access time makes filesystem modification time the LRU
+        // signal used by the size cap.
+        if let Ok(file) = std::fs::File::options().append(true).open(disk_dir()?.join(format!("{}.json", disk_key(key)))) {
+            let _ = file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()));
+        }
+        Some(value)
+    }
+
+    fn write_disk(key: &Key, analysis: &Analysis) {
+        let Some(dir) = disk_dir() else { return };
+        if std::fs::create_dir_all(&dir).is_err() { return; }
+        let path = dir.join(format!("{}.json", disk_key(key)));
+        let temp = dir.join(format!("{}.tmp", disk_key(key)));
+        let Ok(bytes) = serde_json::to_vec(analysis) else { return };
+        if let Ok(mut file) = std::fs::File::create(&temp) {
+            if file.write_all(&bytes).is_ok() && std::fs::rename(&temp, &path).is_ok() {
+                trim_disk(&dir);
+                return;
+            }
+        }
+        let _ = std::fs::remove_file(temp);
+    }
+
+    fn trim_disk(dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut files: Vec<_> = entries.flatten().filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            meta.is_file().then(|| (entry.path(), meta.len(), meta.modified().ok()))
+        }).collect();
+        let mut total: u64 = files.iter().map(|(_, size, _)| *size).sum();
+        files.sort_by_key(|(_, _, modified)| *modified);
+        for (path, size, _) in files {
+            if total <= DISK_LIMIT_BYTES { break; }
+            if std::fs::remove_file(path).is_ok() { total = total.saturating_sub(size); }
+        }
     }
 
     pub(super) fn get_or_compute(
@@ -222,10 +309,23 @@ mod analysis_cache {
         duration: f64,
         compute: impl FnOnce() -> Analysis,
     ) -> Arc<Analysis> {
+        get_or_compute_for_identity(path, skip_vocals, duration, super::super::models::analysis_identity(), compute)
+    }
+
+    pub(super) fn get_or_compute_for_identity(
+        path: &str,
+        skip_vocals: bool,
+        duration: f64,
+        model_identity: String,
+        compute: impl FnOnce() -> Analysis,
+    ) -> Arc<Analysis> {
+        let (size, modified) = file_identity(path);
         let key: Key = (
             path.to_string(),
-            len_of(path),
+            size,
+            modified,
             duration.to_bits(),
+            model_identity,
             skip_vocals,
         );
         // A panic while analysing must not poison the cache for the session.
@@ -235,7 +335,18 @@ mod analysis_cache {
         if let Some(hit) = guard.entries.get(&key) {
             return hit.clone();
         }
+        if let Some(hit) = read_disk(&key) {
+            let hit = Arc::new(hit);
+            guard.entries.insert(key.clone(), hit.clone());
+            guard.order.push_back(key);
+            return hit;
+        }
         let analysis = Arc::new(compute());
+        // A transient decode failure or a short/incomplete file can produce a
+        // default analysis. Keep it only in memory so a later call can retry.
+        if duration > 0.0 && (analysis.bpm > 0.0 || !analysis.beats.is_empty()) {
+            write_disk(&key, &analysis);
+        }
         guard.entries.insert(key.clone(), analysis.clone());
         guard.order.push_back(key);
         while guard.order.len() > CAPACITY {
@@ -254,7 +365,7 @@ mod analysis_cache {
         let doomed: Vec<Key> = guard
             .entries
             .keys()
-            .filter(|(p, _, _, _)| {
+            .filter(|(p, _, _, _, _, _)| {
                 let p_norm = p.strip_prefix("file://").unwrap_or(p);
                 p_norm == norm
             })
@@ -3664,6 +3775,70 @@ mod tests {
         // The vocal-model switch is part of the identity too.
         let _ = analysis_cache::get_or_compute(&key, true, 90.0, &mut compute);
         assert_eq!(computed.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn disk_cache_hit_skips_compute_and_corrupt_entry_is_rewritten() {
+        let dir = std::env::temp_dir().join(format!("bitchord-analysis-disk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        analysis_cache::set_test_disk_dir(dir.clone());
+        let source = dir.join("source-audio");
+        std::fs::write(&source, b"audio identity").unwrap();
+        let path = source.to_string_lossy().to_string();
+        let calls = AtomicUsize::new(0);
+        let first = analysis_cache::get_or_compute(&path, false, 120.0, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Analysis { bpm: 123.0, ..Analysis::default() }
+        });
+        analysis_cache::clear();
+        let second = analysis_cache::get_or_compute(&path, false, 120.0, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Analysis::default()
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "disk hit skips analysis/decode");
+        assert_eq!(second.bpm, first.bpm);
+
+        analysis_cache::clear();
+        let after_model_change = analysis_cache::get_or_compute_for_identity(&path, false, 120.0, "changed-model".into(), || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Analysis { bpm: 125.0, ..Analysis::default() }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "model digest change must miss");
+        assert_eq!(after_model_change.bpm, 125.0);
+
+        let (size, modified) = analysis_cache::file_identity(&path);
+        let key = (path.clone(), size, modified, 120.0f64.to_bits(), super::super::models::analysis_identity(), false);
+        std::fs::write(dir.join(format!("{}.json", analysis_cache::disk_key(&key))), b"{").unwrap();
+        analysis_cache::clear();
+        let repaired = analysis_cache::get_or_compute(&path, false, 120.0, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Analysis { bpm: 124.0, ..Analysis::default() }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "corruption must miss and recompute");
+        assert_eq!(repaired.bpm, 124.0);
+        assert!(serde_json::from_slice::<Analysis>(&std::fs::read(dir.join(format!("{}.json", analysis_cache::disk_key(&key)))).unwrap()).is_ok());
+
+        let degraded_source = dir.join("degraded-source");
+        std::fs::write(&degraded_source, b"temporary short read").unwrap();
+        let degraded_path = degraded_source.to_string_lossy().to_string();
+        analysis_cache::clear();
+        let degraded = analysis_cache::get_or_compute(&degraded_path, false, 120.0, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Analysis::default()
+        });
+        assert_eq!(degraded.bpm, 0.0);
+        let (size, modified) = analysis_cache::file_identity(&degraded_path);
+        let degraded_key = (degraded_path.clone(), size, modified, 120.0f64.to_bits(), super::super::models::analysis_identity(), false);
+        assert!(!dir.join(format!("{}.json", analysis_cache::disk_key(&degraded_key))).exists(), "degraded results are memory-only");
+        analysis_cache::clear();
+        let retried = analysis_cache::get_or_compute(&degraded_path, false, 120.0, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Analysis { bpm: 127.0, ..Analysis::default() }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 5, "a degraded result must be recomputed next time");
+        assert_eq!(retried.bpm, 127.0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A track whose music starts at `first_beat`, on a 120 BPM grid. The

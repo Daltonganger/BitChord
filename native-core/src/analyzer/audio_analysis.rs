@@ -18,13 +18,13 @@ use super::{fft, Complex, PI};
 /// whole-track mono to this before analysis.
 pub(crate) const ANALYSIS_RATE: f64 = 11_025.0;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct EnergyPoint {
     pub(crate) time: f64,
     pub(crate) energy: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MixCuePoint {
     pub(crate) time: f64,
     pub(crate) score: f64,

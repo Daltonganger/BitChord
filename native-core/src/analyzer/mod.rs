@@ -34,6 +34,8 @@ pub use smoothness::{score_plan, SmoothnessReport};
 /// the model arrives during the same listening session.
 pub fn configure(beat_path: &str, vocal_path: &str) -> bool {
     let ready = models::configure(beat_path, vocal_path);
+    // A reconfigured graph set must not serve stale in-memory results. Disk
+    // entries remain and are naturally separated by their model digests.
     plan::clear_analysis_cache();
     ready
 }

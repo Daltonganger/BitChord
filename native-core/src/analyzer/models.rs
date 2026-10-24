@@ -2,9 +2,13 @@ use std::sync::Mutex;
 
 use rten::Model;
 use rten_tensor::prelude::*;
+use sha2::{Digest, Sha256};
 
 static BEAT: Mutex<Option<Model>> = Mutex::new(None);
 static VOCAL: Mutex<Option<Model>> = Mutex::new(None);
+/// A digest of the two graphs this process actually loaded. The analysis cache
+/// keys on it, so a model change cannot reuse an Analysis made by the old one.
+static IDENTITY: Mutex<String> = Mutex::new(String::new());
 
 /// Load ONNX graphs from paths the Swift side resolved out of the app bundle.
 /// Empty paths unload that model. Returns whether the beat tracker is ready
@@ -44,7 +48,35 @@ pub fn configure(beat_path: &str, vocal_path: &str) -> bool {
             }
         };
     }
+    let identity = format!(
+        "beat={};vocal={}",
+        digest(beat_path),
+        digest(vocal_path)
+    );
+    *IDENTITY.lock().unwrap() = identity;
     analyzer_ready()
+}
+
+/// The digest of the two graphs the caller asked for (not whether they loaded):
+/// a path that failed to load is still a different model set from another path,
+/// and the analysis cache should not cross them.
+fn digest(path: &str) -> String {
+    if path.is_empty() {
+        return "none".into();
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            format!("{:x}", hasher.finalize())
+        }
+        Err(_) => "missing".into(),
+    }
+}
+
+/// The model set the current analyses were made with, for the disk cache key.
+pub(crate) fn analysis_identity() -> String {
+    IDENTITY.lock().unwrap().clone()
 }
 
 pub fn analyzer_ready() -> bool {
