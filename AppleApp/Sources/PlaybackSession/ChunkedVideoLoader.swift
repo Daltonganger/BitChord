@@ -13,6 +13,7 @@ import UniformTypeIdentifiers
 final class ChunkedVideoLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
     static let scheme = "bitchord-chunked"
     private static let chunkBytes: Int64 = 1 << 20
+    private static let parallel: Int64 = 4
 
     let queue = DispatchQueue(label: "app.bitchord.video-loader")
     private let source: URL
@@ -64,16 +65,41 @@ final class ChunkedVideoLoader: NSObject, AVAssetResourceLoaderDelegate, @unchec
                 info.isByteRangeAccessSupported = true
             }
             if let data = request.dataRequest {
-                var offset = data.currentOffset
+                let started = Date()
+                let first = data.currentOffset
+                var offset = first
                 let end = data.requestsAllDataToEndOfResource
                     ? total
                     : min(total, data.requestedOffset + Int64(data.requestedLength))
+                // Logged on the way out, cancelled or not: how fast the picture fills is
+                // the one number that says why it took long to show.
+                defer {
+                    if offset - first >= Self.chunkBytes {
+                        PlaybackDebugLog.shared.record(String(
+                            format: "video load: %.1f MB from %.1f MB in %.1fs (of %.1f MB)",
+                            Double(offset - first) / 1_048_576, Double(first) / 1_048_576,
+                            Date().timeIntervalSince(started), Double(total) / 1_048_576
+                        ))
+                    }
+                }
+                // A few ranges in flight at once, answered in order: one range
+                // at a time leaves most of the line idle between round trips.
                 while offset < end {
                     try Task.checkCancellation()
-                    let bytes = try await fetch(from: offset, through: min(end, offset + Self.chunkBytes) - 1)
-                    guard !bytes.isEmpty else { break }
-                    data.respond(with: bytes)
-                    offset += Int64(bytes.count)
+                    let starts = stride(from: offset, to: min(end, offset + Self.chunkBytes * Self.parallel), by: Int(Self.chunkBytes))
+                    let pieces = try await withThrowingTaskGroup(of: (Int64, Data).self) { group in
+                        for start in starts {
+                            group.addTask { (start, try await self.fetch(from: start, through: min(end, start + Self.chunkBytes) - 1)) }
+                        }
+                        var pieces: [(Int64, Data)] = []
+                        for try await piece in group { pieces.append(piece) }
+                        return pieces.sorted { $0.0 < $1.0 }
+                    }
+                    for (_, bytes) in pieces {
+                        guard !bytes.isEmpty else { offset = end; break }
+                        data.respond(with: bytes)
+                        offset += Int64(bytes.count)
+                    }
                 }
             }
             if !Task.isCancelled { request.finishLoading() }
