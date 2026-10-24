@@ -576,6 +576,7 @@ pub fn plan_pair(
     incoming_duration_hint: f64,
     skip_vocals: bool,
     tier_label: &str,
+    allow_effects: bool,
     decode: impl Fn(&str, f64, f64, bool) -> Option<(Vec<f32>, u32, f64)>,
     duration_of: impl Fn(&str) -> f64,
 ) -> TransitionPlan {
@@ -648,7 +649,8 @@ pub fn plan_pair(
 
     // The most ambitious move: a beat-matched, harmonically-compatible pair gets
     // a WSOLA phrase-switch before the adaptive overlap (upstream `phraseSwitch`).
-    let plan = phrase_switch(&out, &inc).unwrap_or_else(|| plan_from(&out, &inc, fade));
+    let plan = phrase_switch(&out, &inc)
+        .unwrap_or_else(|| plan_from(&out, &inc, fade, allow_effects));
     log_plan(&out, &inc, &plan, tier_label);
     plan
 }
@@ -1513,7 +1515,12 @@ fn harmonically_compatible(left: &str, right: &str) -> bool {
     distance <= 2 || distance == 5
 }
 
-fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionPlan {
+fn plan_from(
+    outgoing: &Analysis,
+    incoming: &Analysis,
+    fade: f64,
+    allow_effects: bool,
+) -> TransitionPlan {
     let entry = incoming_entry(incoming);
     // Upstream `MIN_SMART_DURATION_SECONDS`: a track too short to spend a smart
     // transition on gets a plain crossfade (TransitionPlanner.kt:880-882).
@@ -1530,8 +1537,10 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
         return plan;
     }
     if matches!(tier, Tier::Plain) {
-        if let Some(plan) = technique_plan(outgoing, incoming, tier, entry, None) {
-            return plan;
+        if allow_effects {
+            if let Some(plan) = technique_plan(outgoing, incoming, tier, entry, None) {
+                return plan;
+            }
         }
         let mut plan = plain_fallback(fade, outgoing);
         plan.cue_seconds = entry;
@@ -1742,17 +1751,20 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
          out_busy={out_busy} in_busy={in_busy}",
         tier
     );
-    if effect_earned(key_clash, tempo_gap) && (key_clash || !falls_away(out_busy, in_busy)) {
+    let effect_wanted =
+        effect_earned(key_clash, tempo_gap) && (key_clash || !falls_away(out_busy, in_busy));
+    if effect_wanted && allow_effects {
         if let Some(plan) =
             technique_plan(outgoing, incoming, tier, entry, Some((transition_start, fade_seconds, cue)))
         {
             return plan;
         }
     }
-    if !key_clash && tempo_gap > 0.07 {
+    if !key_clash && tempo_gap > 0.07 && falls_away(out_busy, in_busy) {
         // The tempo gap is the only reason an effect was on the table, and the
         // outgoing record falls away: cross over where it does, for as long as
-        // it takes, at the rate the record already plays.
+        // it takes, at the rate the record already plays. Both sides busy is
+        // the one case with nowhere to cross, so it is not offered here.
         if let Some(plan) = clean_crossfade(outgoing, mix_end, entry) {
             return plan;
         }
@@ -1779,7 +1791,11 @@ fn plan_from(outgoing: &Analysis, incoming: &Analysis, fade: f64) -> TransitionP
         post_glide_seconds: shape.post_glide_seconds,
         outgoing_duration_seconds: outgoing.duration,
         beat_seconds: 0.0,
-        reason: if vocal_conflict {
+        reason: if effect_wanted && !allow_effects {
+            // The pair earned a technique by the planner's own rules and the
+            // session's pacing budget said no.
+            "pacing: effect budget spent, so the pair is blended".to_string()
+        } else if vocal_conflict {
             format!(
                 "blend: both records sing through the handover; mids ducked {:.0}% for {:.0}% of it",
                 shape.dip_depth * 100.0,
@@ -3074,7 +3090,7 @@ mod tests {
         // equal-power crossfade placed on the fall, at the record's own rate.
         let (mut out, inc) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
         with_falling_tail(&mut out, 205.0, 12.0);
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         assert_eq!(plan.style, TransitionStyle::EqualPower);
         assert_eq!(plan.playback_rate, 1.0, "an unmatched pair is not stretched");
         assert!(plan.effect_seconds == 0.0);
@@ -3089,11 +3105,23 @@ mod tests {
     }
 
     #[test]
+    fn a_spent_effect_budget_keeps_the_blend() {
+        // The same pair that earns a technique with the budget available gets
+        // the analysed blend when the session's last four transitions already
+        // used one, and says why.
+        let (out, inc) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
+        assert!(plan_from(&out, &inc, 8.0, true).style.is_effect());
+        let paced = plan_from(&out, &inc, 8.0, false);
+        assert!(!paced.style.is_effect(), "got {:?}", paced.style);
+        assert!(paced.reason.contains("pacing"), "{}", paced.reason);
+    }
+
+    #[test]
     fn a_busy_handover_earns_the_technique() {
         // The same 8 % gap, but both records are still at full energy across
         // the join: there is nowhere to cross over, so the technique stands.
         let (out, inc) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         assert!(plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
         assert!(!plan.reason.is_empty());
     }
@@ -3110,7 +3138,7 @@ mod tests {
         inc.key_confidence = 0.35;
         with_falling_tail(&mut out, 205.0, 12.0);
         assert!(keys_clash(&out.key, out.key_confidence, &inc.key, inc.key_confidence));
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         assert!(plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
     }
 
@@ -3154,7 +3182,7 @@ mod tests {
         inc.beat_confidence = 0.8;
         inc.vocal_probability = 0.85;
         with_vocal_curve(&mut inc, 200.0, 0.85);
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         assert!(!plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
         assert!(plan.vocal_overlap > 0.0, "the clash must still be measured");
         assert!(plan.dip_depth > 0.0, "the mids are ducked");
@@ -3187,7 +3215,7 @@ mod tests {
         inc.beat_confidence = 0.8;
         inc.vocal_probability = 0.85;
         with_vocal_curve(&mut inc, 200.0, 0.85);
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         assert!(!plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
         assert!(plan.reason.is_empty(), "no vocal clash to report: {}", plan.reason);
         assert_eq!(plan.vocal_overlap, 0.0);
@@ -3208,7 +3236,7 @@ mod tests {
         inc.bpm = 92.0;
         inc.beat_interval = 60.0 / 92.0;
         inc.beat_confidence = 0.8;
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         assert!(plan.style.is_effect(), "got {:?}: {}", plan.style, plan.reason);
         assert!(!plan.reason.is_empty());
         assert!(plan.transition_end_seconds <= 205.0 + 1e-6);
@@ -3310,7 +3338,7 @@ mod tests {
         inc.beat_confidence = 0.9;
         inc.key = "C major".into();
         inc.key_confidence = 0.9;
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         assert!(!plan.style.is_effect(), "a 5 % gap got {:?}: {}", plan.style, plan.reason);
         assert!(plan.fade_seconds >= AUTO_MIN_SECONDS - 1e-6);
     }
@@ -3324,7 +3352,7 @@ mod tests {
         out.beat_confidence = 0.9;
         let mut inc = analysis(0.0, 210.0, grid);
         inc.beat_confidence = 0.9;
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         assert!(!plan.style.is_effect(), "got {:?}", plan.style);
     }
 
@@ -3361,6 +3389,7 @@ mod tests {
             91.0,
             true,
             "test",
+            true,
             |_, _, _, _| None,
             |_| 0.0,
         );
@@ -3458,7 +3487,7 @@ mod tests {
         inc.beat_interval = 60.0 / 126.0;
         inc.beat_confidence = 0.4;
         assert_eq!(assess(&out, &inc), Tier::DjAssisted);
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         assert!(
             (plan.playback_rate - 1.0).abs() < 1e-9,
             "DjAssisted stretched to {}",
@@ -3599,7 +3628,7 @@ mod tests {
         long.bpm = 120.0;
         long.beat_confidence = 0.8;
 
-        let plan = plan_from(&long, &short, 8.0);
+        let plan = plan_from(&long, &short, 8.0, true);
         assert_eq!(plan.style, TransitionStyle::EqualPower);
         assert!(!plan.bass_swap);
     }
@@ -3614,7 +3643,7 @@ mod tests {
         long.bpm = 90.0;
         long.beat_confidence = 0.8;
         // Without the cap, 16 beats at 90 BPM is ~10.7 s.
-        let plan = plan_from(&long, &short, 8.0);
+        let plan = plan_from(&long, &short, 8.0, true);
         assert!(
             plan.fade_seconds <= 30.0 * 0.4 + 1e-6,
             "fade {}",
@@ -3837,7 +3866,7 @@ mod tests {
             score: 0.95,
             kind: "main_drop".into(),
         }];
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         let entry = incoming_entry(&inc);
         assert!(
             plan.cue_seconds <= entry + MAX_CUE_SECONDS + 1e-6,
@@ -3853,7 +3882,7 @@ mod tests {
         out.beat_interval = 0.0;
         out.content_end = 170.0;
         let inc = analysis(0.5, 200.0, vec![]);
-        let plan = plan_from(&out, &inc, 8.0);
+        let plan = plan_from(&out, &inc, 8.0, true);
         // No tempo is no longer a fade: the record washes out instead, and the
         // wash still ends where the music does.
         assert_eq!(plan.style, TransitionStyle::ReverbWash, "{}", plan.reason);

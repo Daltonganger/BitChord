@@ -47,6 +47,10 @@ pub fn rank_candidates(
             0.0,
             skip_vocals,
             "sequencer",
+            // Ranking is a cost comparison, not a session: it asks what each
+            // candidate *would* plan, so the pacing window must not hide the
+            // technique a candidate would earn.
+            true,
             decode,
             duration_of,
         );
