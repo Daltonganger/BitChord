@@ -188,6 +188,8 @@ data class MoodGenre(
     val browseId: String,
     val params: String? = null,
     val thumbnailUrl: String? = null,
+    /** YouTube Music's own stripe colour for the button, as ARGB; null when the button carries none. */
+    val stripeColor: Long? = null,
 )
 
 /** A browsed album / artist / playlist page. */
