@@ -14,33 +14,28 @@ struct ResolvedYouTubeStream {
     let loudnessDb: Double?
 }
 
-/// What the extraction stack could see of a track's video side.
-///
-/// This is the O9 spike's answer, not the playback path: `wantVideo` stays
-/// false in `extract`, and only this method asks for video formats. A thrown
-/// error from the bridge means the progressive stack would not deliver a
-/// video-only stream at all; a successful one is the extractor's own fields.
-struct ResolvedVideoProbe: Sendable {
+/// The track's video side: one AVC/MP4 rendition the picture player can
+/// decode, or nil fields when the track has none (an art track, or a video
+/// that only exists as VP9/WebM — see O9's decisions).
+struct ResolvedVideoSide: Sendable {
     /// Signed and short-lived: report whether it exists, never print it.
-    let videoUrl: String?
+    let url: String?
     let width: Int?
     let height: Int?
     let itag: Int?
     let mimeType: String?
     let codecs: String?
     let bitrate: Int?
+    let headers: [String: String]
     let availableVideoHeights: [Int]
     /// The extractor's readiness rule rejects a URL carrying YouTube's `n`
-    /// throttle parameter; the probe reports it instead of hiding the reason.
+    /// throttle parameter; the side reports it instead of hiding the reason.
     let hasNParameter: Bool
     let clientName: String
     let profileId: String
     let musicVideoType: String?
-    /// Which ask produced this answer: the audio path's own direct profile
-    /// (by override) or the automatic video selection.
-    let selection: String
 
-    var hasVideoURL: Bool { !(videoUrl ?? "").isEmpty }
+    var hasVideoURL: Bool { !(url ?? "").isEmpty }
     var aspectRatio: Double? {
         guard let width, let height, height > 0 else { return nil }
         return Double(width) / Double(height)
@@ -48,9 +43,15 @@ struct ResolvedVideoProbe: Sendable {
     /// A square picture is an art track, not a music video (upstream's
     /// `MIN_VIDEO_ASPECT = 1.2`, engine.ts:47).
     var looksLikeMusicVideo: Bool { (aspectRatio ?? 0) >= 1.2 }
+    /// AVC in MP4 is the only container/codec pair AVFoundation decodes here.
+    var isAVCInMP4: Bool {
+        let mime = mimeType?.lowercased() ?? ""
+        return mime.contains("video/mp4") && !mime.contains("mp4a")
+            && (codecs?.lowercased().contains("avc1") ?? false)
+    }
 }
 
-struct VideoProbeError: Error, LocalizedError {
+struct VideoSideError: Error, LocalizedError {
     let message: String
     var errorDescription: String? { message }
 }
@@ -95,35 +96,36 @@ final class InnertubeStreamResolver: Sendable {
         return payload
     }
 
-    /// Ask the shared extractor what the video side of a track is, without
-    /// changing what playback resolves (the O9 spike).
-    func probeVideo(videoId: String) async throws -> ResolvedVideoProbe {
+    /// The track's AVC/MP4 video side, or a side whose `url` is nil when the
+    /// track has none. The audio path is untouched: this is its own request,
+    /// through the same direct profile the audio resolved with.
+    func resolveVideo(videoId: String) async throws -> ResolvedVideoSide {
         try await withCheckedThrowingContinuation { continuation in
-            PlayerBridge.shared.probeVideo(
+            PlayerBridge.shared.resolveVideo(
                 videoId: videoId,
-                callback: VideoProbeCallbackAdapter { json, message in
+                callback: VideoCallbackAdapter { json, message in
                     guard let json else {
-                        continuation.resume(throwing: VideoProbeError(
-                            message: message ?? "Video probe failed"
+                        continuation.resume(throwing: VideoSideError(
+                            message: message ?? "Video side lookup failed"
                         ))
                         return
                     }
                     do {
-                        let payload = try JSONDecoder().decode(VideoProbePayload.self, from: Data(json.utf8))
-                        continuation.resume(returning: ResolvedVideoProbe(
-                            videoUrl: payload.videoUrl,
-                            width: payload.videoWidth,
-                            height: payload.videoHeight,
-                            itag: payload.videoItag,
-                            mimeType: payload.videoMimeType,
-                            codecs: payload.videoCodecs,
-                            bitrate: payload.videoBitrate,
+                        let payload = try JSONDecoder().decode(VideoSidePayload.self, from: Data(json.utf8))
+                        continuation.resume(returning: ResolvedVideoSide(
+                            url: payload.url,
+                            width: payload.width,
+                            height: payload.height,
+                            itag: payload.itag,
+                            mimeType: payload.mimeType,
+                            codecs: payload.codecs,
+                            bitrate: payload.bitrate,
+                            headers: payload.headers ?? [:],
                             availableVideoHeights: payload.availableVideoHeights ?? [],
-                            hasNParameter: payload.videoUrlHasNParameter ?? false,
+                            hasNParameter: payload.urlHasNParameter ?? false,
                             clientName: payload.clientName,
                             profileId: payload.profileId,
-                            musicVideoType: payload.musicVideoType,
-                            selection: payload.selection
+                            musicVideoType: payload.musicVideoType
                         ))
                     } catch {
                         continuation.resume(throwing: error)
@@ -222,24 +224,24 @@ private final class ResolveCallbackAdapter: PlayerBridgeResolveCallback {
     }
 }
 
-private struct VideoProbePayload: Decodable {
-    let videoUrl: String?
-    let videoWidth: Int?
-    let videoHeight: Int?
-    let videoItag: Int?
-    let videoMimeType: String?
-    let videoCodecs: String?
-    let videoBitrate: Int?
-    /// Kotlin omits an empty default list.
+private struct VideoSidePayload: Decodable {
+    let url: String?
+    let width: Int?
+    let height: Int?
+    let itag: Int?
+    let mimeType: String?
+    let codecs: String?
+    let bitrate: Int?
+    /// Kotlin omits an empty default map and list.
+    let headers: [String: String]?
     let availableVideoHeights: [Int]?
-    let videoUrlHasNParameter: Bool?
+    let urlHasNParameter: Bool?
     let clientName: String
     let profileId: String
     let musicVideoType: String?
-    let selection: String
 }
 
-private final class VideoProbeCallbackAdapter: PlayerBridgeProbeCallback {
+private final class VideoCallbackAdapter: PlayerBridgeVideoCallback {
     private let onResult: (String?, String?) -> Void
 
     init(onResult: @escaping (String?, String?) -> Void) {
