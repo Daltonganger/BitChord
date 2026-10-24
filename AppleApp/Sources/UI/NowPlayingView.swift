@@ -759,7 +759,7 @@ struct NowPlayingView: View {
             }
             .accessibilityLabel(controller.current?.title ?? "Nothing playing")
         } else {
-            VideoSurface(cornerRadius: 12) {
+            VideoSurface(cornerRadius: 12, announcesLoading: true) {
                 SleeveArt(
                     entry: controller.current,
                     canvasURL: controller.canvasURL,
@@ -2144,7 +2144,7 @@ private struct HeroArtwork: View {
                 }
                 // The full-bleed hero keeps its artwork and mask; the picture
                 // is an overlay inside that mask, not a black card on top.
-                VideoSurface(cornerRadius: 0, fillSlot: false) { Color.clear }
+                VideoSurface(cornerRadius: 0, fillSlot: false, announcesLoading: true) { Color.clear }
             }
             .compositingGroup()
             .mask {
