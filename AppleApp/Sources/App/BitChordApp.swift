@@ -114,6 +114,12 @@ struct BitChordApp: App {
                     controller.onLocalIntent = { [weak binding] in
                         binding?.onLocalIntent()
                     }
+                    // Offer what is playing to the listener's other devices. Handoff
+                    // reads the activity when the other device asks for it, so the
+                    // offer is refreshed at the moments the answer can change — a
+                    // new track, a play/pause, leaving the app — rather than
+                    // tracked continuously.
+                    PlaybackHandoff.shared.refresh(controller: controller)
                     // What is on disk decides what the analyzer gets. Refreshed first
                     // so a resumed or already-downloaded graph is visible, and loaded
                     // in the background: 123 MB of ONNX is seconds of work and the
@@ -156,6 +162,9 @@ struct BitChordApp: App {
                         // and serves Automix from its disk cache instead.
                         MusicUnderstandingAnalyzer.noteBackground()
                         controller.persistSession()
+                        // The position at the moment the listener leaves is the
+                        // one "continue where you left off" needs.
+                        PlaybackHandoff.shared.refresh(controller: controller)
                         if PlatformSettings.shared.getBoolean(key: "stop_when_backgrounded", default: false) {
                             controller.pauseForBackground()
                         }
@@ -196,6 +205,20 @@ struct BitChordApp: App {
                     }
                     _ = MusicLink.shared.submitUrl(url: url.absoluteString)
                     consumeMusicLink(appModel: appModel, controller: controller)
+                }
+                // Handoff: the receiving half, plus the two changes that keep the
+                // offer current. At the scene for the same reason the URL intake
+                // is — a track can start, or an activity can arrive, before the
+                // view hierarchy is complete.
+                .onChange(of: controller.current?.id) { _, _ in
+                    PlaybackHandoff.shared.refresh(controller: controller)
+                }
+                .onChange(of: controller.isPlaying) { _, _ in
+                    PlaybackHandoff.shared.refresh(controller: controller)
+                }
+                .onContinueUserActivity(PlaybackHandoffPayload.activityType) { activity in
+                    guard let payload = PlaybackHandoffPayload(userInfo: activity.userInfo) else { return }
+                    PlaybackHandoff.shared.continuePlayback(payload: payload, controller: controller)
                 }
         }
 #if os(macOS)

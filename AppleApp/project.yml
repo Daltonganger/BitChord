@@ -111,6 +111,12 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: app.bitchord.BitChord
             CFBundleURLSchemes: [bitchord]
+        # Handoff of playback: the activity type the payload is carried in. The
+        # system only launches this app for an activity it has been told about,
+        # so the type is declared here as well as written in
+        # `PlaybackHandoffPayload.activityType`.
+        NSUserActivityTypes:
+          - app.bitchord.playback
         UIBackgroundModes:
           - audio
         UISupportedInterfaceOrientations:
