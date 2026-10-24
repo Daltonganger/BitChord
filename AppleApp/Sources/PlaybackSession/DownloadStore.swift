@@ -341,6 +341,21 @@ final class DownloadStore {
         return .started
     }
     func hasCollection(_ browseId: String) -> Bool { index.owners[collectionId(browseId)] != nil }
+
+    /// The saved entries of a downloaded collection, in the order the download
+    /// recorded them. The offline stand-in for a page whose network copy has
+    /// not arrived (upstream's `downloadedCopyOf`).
+    func savedEntries(for browseId: String) -> [QueueEntry] {
+        guard let owner = index.owners[collectionId(browseId)] else { return [] }
+        return owner.requests.compactMap { request in
+            index.bindings[request].flatMap { index.assets[$0]?.entry }
+        }
+    }
+
+    /// The title the download recorded, for the offline page's header.
+    func savedTitle(for browseId: String) -> String? {
+        index.owners[collectionId(browseId)]?.title
+    }
     private func collectionId(_ browseId: String) -> String { Self.digest(accountId + "|" + browseId) }
     func syncIfOwned(browseId: String) async {
         await waitUntilReady()
