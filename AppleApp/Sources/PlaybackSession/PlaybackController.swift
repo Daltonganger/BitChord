@@ -4089,14 +4089,7 @@ final class PlaybackController {
         }
     }
 
-    /// Automix ordering for a *new* batch of recommendations only, once.
-    ///
-    /// It used to re-rank every upcoming list row and recommendation on every
-    /// queue change — twice, by taste and then by analysis — so a song the
-    /// listener had spotted two places down could move or vanish because they
-    /// liked something else. List order is the list's (Automix orders a list once,
-    /// when it is chosen), the next couple of rows are committed, and each batch
-    /// of recommendations is settled after its single analysis pass.
+    /// Re-sequence one bounded list window and settle each recommendation batch.
     private func scheduleSequencing() {
         sequencingTask?.cancel()
         sequencingGeneration &+= 1
@@ -4109,18 +4102,75 @@ final class PlaybackController {
         let currentPath = loadedSourcePath
         let fade = Double(PlatformSettings.shared.getInt(key: "crossfade_seconds", default: 0))
         let skipVocals = automixPerformanceMode == "EFFICIENT"
-        let listPositions: [Int] = []
+        let listPositions = PlaybackQueuePolicy.rollingListWindow(snapshot, after: index)
         let autoplayPositions = PlaybackQueuePolicy.autoplayIndices(snapshot, after: index).filter {
             $0 > index + PlaybackQueuePolicy.committedRows && !settledAutoplayIds.contains(snapshot[$0].id)
         }
-        guard autoplayPositions.count > 1 else { return }
-        // Taste/freshness gives every candidate an order immediately. Decode and
-        // analyse only a bounded window of audio already available on this device.
+        guard listPositions.count > 1 || autoplayPositions.count > 1 else { return }
+        // Taste/freshness is the fallback and stable tie-break. Sequencing never
+        // resolves a stream: it analyzes only local or completed cached files.
         let fallback = tasteScores(snapshot)
         sequencingTask = Task(priority: .utility) { [weak self] in
             var transitionFits: [Int: Double] = [:]
+            var analyzedChain: [Int] = []
+            var analyzedTracks = 0
+            var analyzedBytes: Int64 = 0
+            var skippedForBudget = 0
+            let analysisByteBudget: Int64 = 512 * 1024 * 1024
+
+            if let currentPath, FileManager.default.fileExists(atPath: currentPath), listPositions.count > 1 {
+                var candidates: [(position: Int, path: String, text: String)] = []
+                for position in PlaybackQueuePolicy.ranked(listPositions, scores: fallback) {
+                    if Task.isCancelled { return }
+                    let entry = snapshot[position]
+                    let path: String?
+                    if entry.isLocal, FileManager.default.fileExists(atPath: entry.source) {
+                        path = entry.source
+                    } else if entry.source.hasPrefix("yt:"), let id = entry.videoId {
+                        path = await StreamFileCache.shared.path(for: id, allowGrowing: false)
+                    } else {
+                        path = nil
+                    }
+                    guard let path, FileManager.default.fileExists(atPath: path),
+                          let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber else { continue }
+                    let bytes = size.int64Value
+                    guard bytes > 0, bytes <= analysisByteBudget - analyzedBytes else {
+                        skippedForBudget += 1
+                        continue
+                    }
+                    analyzedBytes += bytes
+                    candidates.append((position, path, entry.itemText))
+                }
+
+                analyzedTracks = candidates.count
+                var remaining = candidates
+                var previousPath = currentPath
+                var previousText = current.itemText
+                while !remaining.isEmpty {
+                    if Task.isCancelled { return }
+                    let ranked = await AutomixQueueRanker.shared.rank(
+                        currentPath: previousPath,
+                        candidatePaths: remaining.map(\.path),
+                        currentText: previousText,
+                        candidateTexts: remaining.map(\.text),
+                        crossfadeSeconds: fade, skipVocals: skipVocals
+                    )
+                    var rankOrder: [Int] = []
+                    for raw in ranked {
+                        let candidateIndex = Int(raw)
+                        guard remaining.indices.contains(candidateIndex) else { continue }
+                        rankOrder.append(candidateIndex)
+                    }
+                    guard let selectedIndex = rankOrder.first else { break }
+                    let selected = remaining.remove(at: selectedIndex)
+                    analyzedChain.append(selected.position)
+                    previousPath = selected.path
+                    previousText = selected.text
+                }
+            }
+
             if let currentPath, FileManager.default.fileExists(atPath: currentPath) {
-                for positions in [Array(listPositions.prefix(12)), Array(autoplayPositions.prefix(12))] {
+                for positions in [Array(autoplayPositions.prefix(12))] {
                     var paths: [String] = []
                     var texts: [String] = []
                     var available: [Int] = []
@@ -4155,6 +4205,11 @@ final class PlaybackController {
                     }
                 }
             }
+            if !listPositions.isEmpty {
+                PlaybackDebugLog.shared.record(
+                    "AutoMix list window rows=\(listPositions.count) analyzedTracks=\(analyzedTracks) candidateBytes=\(analyzedBytes) networkBytes=0 budgetSkipped=\(skippedForBudget)"
+                )
+            }
             guard let self, !Task.isCancelled, self.sequencingGeneration == generation,
                   self.automixSequencingEnabled, self.queue == snapshot, self.playingIndex == index,
                   self.playGeneration == playbackGeneration, self.current?.id == current.id,
@@ -4162,12 +4217,14 @@ final class PlaybackController {
             self.settledAutoplayIds.formUnion(autoplayPositions.map { snapshot[$0].id })
             let scores = transitionFits.isEmpty ? fallback : self.tasteScores(snapshot, transitionFits: transitionFits)
             var ordered = snapshot
-            for positions in [listPositions, autoplayPositions] {
-                ordered = PlaybackQueuePolicy.replacing(
-                    ordered, at: positions,
-                    with: PlaybackQueuePolicy.ranked(positions, scores: scores).map { snapshot[$0] }
-                )
-            }
+            let analyzedPositions = analyzedChain.sorted()
+            ordered = PlaybackQueuePolicy.replacing(
+                ordered, at: analyzedPositions, with: analyzedChain.map { snapshot[$0] }
+            )
+            ordered = PlaybackQueuePolicy.replacing(
+                ordered, at: autoplayPositions,
+                with: PlaybackQueuePolicy.ranked(autoplayPositions, scores: scores).map { snapshot[$0] }
+            )
             guard ordered != self.queue else { return }
             self.queue = ordered
             self.persistSession()

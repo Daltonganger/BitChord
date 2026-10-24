@@ -45,8 +45,8 @@ actor StreamFileCache {
 
     var folder: URL { DiskCache.cachesSubfolder("audio") }
 
-    func path(for videoId: String, maxKbps: Int = Int.max, requireLossless: Bool = false) -> String? {
-        if let active = inFlight[videoId], active.quality == Self.qualityIdentity,
+    func path(for videoId: String, maxKbps: Int = Int.max, requireLossless: Bool = false, allowGrowing: Bool = true) -> String? {
+        if allowGrowing, let active = inFlight[videoId], active.quality == Self.qualityIdentity,
            FileManager.default.fileExists(atPath: active.path),
            !requireLossless, active.kbps <= maxKbps { return active.path }
         for ext in Self.extensions {
