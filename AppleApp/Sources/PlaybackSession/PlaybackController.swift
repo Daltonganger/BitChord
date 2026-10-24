@@ -3309,6 +3309,17 @@ final class PlaybackController {
         return nil
     }
 
+    /// The provider picker's model, upstream's `lyricsProviderStates`: every
+    /// enabled source's state for the current track, plus the lines a FOUND
+    /// source already returned, so tapping it applies them from memory instead
+    /// of asking again. Keyed by source name.
+    private(set) var lyricsProviderStates: [String: LyricsSourceState] = [:]
+    private(set) var lyricsProviderResults: [String: [LyricLineDto]] = [:]
+    /// The provider the listener chose for this track, remembered across
+    /// fetches and across devices (iCloud key-value store). When the race's
+    /// winner and the choice both have lines, the choice wins.
+    private(set) var lyricsProviderChoice: String?
+
     private func fetchLyrics(for entry: QueueEntry) {
         lyricsAlignmentTask?.cancel()
         lyricsAlignmentTask = nil
@@ -3318,6 +3329,11 @@ final class PlaybackController {
         lyricsNeedsDurationRefresh = false
         lyrics = []
         lyricsSourceLabel = nil
+        // The picker starts from zero with the track: upstream resets the state
+        // map whenever a new lookup begins.
+        lyricsProviderStates = [:]
+        lyricsProviderResults = [:]
+        lyricsProviderChoice = Self.storedProviderChoice(for: entry.id)
         // Cleared rather than set: a new track has not been looked up yet, and a
         // stale "there are none" from the previous one would say so about this
         // one before anyone had asked.
@@ -3347,7 +3363,7 @@ final class PlaybackController {
         let knownDuration = duration > 0 ? duration : entry.durationSeconds
         let durationMs = Swift.Int64(knownDuration * 1000)
         lyricsNeedsDurationRefresh = durationMs <= 0
-        LyricsBridge.shared.fetchAttributed(
+        LyricsBridge.shared.fetchWithSourceStates(
             title: entry.title,
             artist: entry.artist,
             durationMs: durationMs,
@@ -3360,20 +3376,103 @@ final class PlaybackController {
                           self.current?.id == entry.id,
                           self.lyricsRequestGeneration == requestGeneration
                     else { return }
-                    self.lyrics = lines
-                    self.lyricsSourceLabel = label.isEmpty ? nil : label
-                    self.lyricsLoading = false
-                    // The search finished either way, which is what the deck's
-                    // strip reads to tell "none" apart from "looking".
-                    self.attemptedLyrics = true
-                    self.alignFetchedLyricsIfNeeded(
-                        lines,
-                        for: entry,
-                        requestGeneration: requestGeneration
-                    )
+                    // The listener's choice outranks the race: when both the
+                    // winner and the chosen source have lines, the chosen one
+                    // is what this track sings.
+                    let chosen = self.lyricsProviderChoice
+                    if let chosen, chosen != label,
+                       let chosenLines = self.lyricsProviderResults[chosen], !chosenLines.isEmpty {
+                        self.applyLyrics(chosenLines, label: chosen, entry: entry, generation: requestGeneration)
+                        return
+                    }
+                    self.applyLyrics(lines, label: label, entry: entry, generation: requestGeneration)
+                }
+            },
+            onSourceState: SourceStateAdapter { [weak self] source, label, state, lines in
+                Task { @MainActor in
+                    guard let self,
+                          self.current?.id == entry.id,
+                          self.lyricsRequestGeneration == requestGeneration
+                    else { return }
+                    self.lyricsProviderStates[source] = LyricsSourceState(state)
+                    if let lines, !lines.isEmpty {
+                        self.lyricsProviderResults[source] = lines
+                    }
                 }
             }
         )
+    }
+
+    /// One place for what a finished lookup does, so the race's winner and the
+    /// listener's choice land the same way.
+    private func applyLyrics(
+        _ lines: [LyricLineDto],
+        label: String,
+        entry: QueueEntry,
+        generation: UInt64
+    ) {
+        lyrics = lines
+        lyricsSourceLabel = label.isEmpty ? nil : label
+        lyricsLoading = false
+        // The search finished either way, which is what the deck's
+        // strip reads to tell "none" apart from "looking".
+        attemptedLyrics = true
+        alignFetchedLyricsIfNeeded(
+            lines,
+            for: entry,
+            requestGeneration: generation
+        )
+    }
+
+    /// Applies a FOUND source the listener tapped, instantly, from the lines
+    /// the race already brought back — upstream's `showLyricsResult` — and
+    /// remembers the choice for this track across devices.
+    func selectLyricsProvider(named source: String) {
+        guard let lines = lyricsProviderResults[source], !lines.isEmpty,
+              let entry = current else { return }
+        lyricsProviderChoice = source
+        Self.storeProviderChoice(source, for: entry.id)
+        lyricsRequestGeneration &+= 1
+        applyLyrics(lines, label: source, entry: entry, generation: lyricsRequestGeneration)
+    }
+
+    // MARK: Per-track provider choice (O1)
+
+    /// The choices ride the iCloud key-value store, so the provider a track
+    /// sings from on this device is the one it sings from everywhere. The
+    /// entitlement is what makes it sync; without it the store still answers
+    /// locally, which keeps the picker honest on this device alone.
+    private static let providerChoicesKey = "lyrics_provider_choices"
+    private static let providerChoicesLimit = 300
+
+    private struct ProviderChoice: Codable {
+        let track: String
+        let source: String
+    }
+
+    private static func storedProviderChoices() -> [ProviderChoice] {
+        guard let json = NSUbiquitousKeyValueStore.default.string(forKey: providerChoicesKey),
+              let data = json.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([ProviderChoice].self, from: data) else { return [] }
+        return decoded
+    }
+
+    private static func storedProviderChoice(for videoId: String) -> String? {
+        storedProviderChoices().first { $0.track == videoId }?.source
+    }
+
+    private static func storeProviderChoice(_ source: String, for videoId: String) {
+        var choices = storedProviderChoices()
+        choices.removeAll { $0.track == videoId }
+        choices.insert(ProviderChoice(track: videoId, source: source), at: 0)
+        // One small dict carries every device's choices; the newest win.
+        if choices.count > providerChoicesLimit {
+            choices = Array(choices.prefix(providerChoicesLimit))
+        }
+        guard let data = try? JSONEncoder().encode(choices),
+              let json = String(data: data, encoding: .utf8) else { return }
+        NSUbiquitousKeyValueStore.default.set(json, forKey: providerChoicesKey)
+        NSUbiquitousKeyValueStore.default.synchronize()
     }
 
     /// Fill in missing word timestamps in the background. The fetched text stays
@@ -4592,6 +4691,35 @@ private final class AttributedLyricsAdapter: LyricsBridgeAttributedLyricsCallbac
     }
     func onResult(source: String, sourceLabel: String, lines: [LyricLineDto]) {
         handler(source, sourceLabel, lines)
+    }
+}
+
+/// What the provider picker knows about one source for the current track —
+/// the Swift mirror of the shared bridge's `LyricsBridge.LyricsProviderState`.
+enum LyricsSourceState {
+    case notFetched
+    case fetching
+    case found
+    case notFound
+
+    init(_ shared: LyricsBridge.LyricsProviderState) {
+        switch shared {
+        case .fetching: self = .fetching
+        case .found: self = .found
+        case .notFound: self = .notFound
+        default: self = .notFetched
+        }
+    }
+}
+
+/// Bridge callback adapter for LyricsBridge.fetchWithSourceStates.
+private final class SourceStateAdapter: LyricsBridgeSourceStateCallback {
+    private let handler: (String, String, LyricsBridge.LyricsProviderState, [LyricLineDto]?) -> Void
+    init(_ handler: @escaping (String, String, LyricsBridge.LyricsProviderState, [LyricLineDto]?) -> Void) {
+        self.handler = handler
+    }
+    func onSourceState(source: String, sourceLabel: String, state: LyricsBridge.LyricsProviderState, lines: [LyricLineDto]) {
+        handler(source, sourceLabel, state, lines.isEmpty ? nil : lines)
     }
 }
 
