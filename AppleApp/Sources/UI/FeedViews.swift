@@ -272,7 +272,7 @@ struct ShelfCardTap<Content: View>: View {
             if preferTrack, let videoId = card.videoId, !videoId.isEmpty {
                 trackButton(videoId)
             } else if let browseId = card.browseId, !browseId.isEmpty {
-                NavigationLink(destination: DetailView(browseId: browseId, initialTitle: card.title)) {
+                PushLink(destination: DetailView(browseId: browseId, initialTitle: card.title)) {
                     content
                 }
                 .buttonStyle(.plain)

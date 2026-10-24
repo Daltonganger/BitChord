@@ -216,7 +216,7 @@ struct SearchView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        PageStack {
             resultsColumn
                 .navigationTitle("Search")
                 .toolbar {
@@ -684,7 +684,7 @@ struct SearchView: View {
     private func searchHitRow(_ hit: SearchHitDTO) -> some View {
         Group {
             if hit.isBrowse, let browseId = hit.browseId {
-                NavigationLink(destination: DetailView(browseId: browseId, initialTitle: hit.title)) {
+                PushLink(destination: DetailView(browseId: browseId, initialTitle: hit.title)) {
                     browseRow(hit)
                 }
                 .buttonStyle(.plain)
@@ -736,7 +736,7 @@ struct SearchView: View {
     private func typeaheadRow(_ hit: SearchHitDTO) -> some View {
         Group {
             if hit.isBrowse, let browseId = hit.browseId {
-                NavigationLink(destination: DetailView(browseId: browseId, initialTitle: hit.title)) {
+                PushLink(destination: DetailView(browseId: browseId, initialTitle: hit.title)) {
                     browseRow(hit)
                 }
                 .buttonStyle(.plain)
@@ -1096,7 +1096,7 @@ struct SearchView: View {
                 } else {
                     LazyVGrid(columns: categoryColumns, spacing: 12) {
                         ForEach(items) { category in
-                            NavigationLink {
+                            PushLink {
                                 MoodGenrePlaylistsView(category: category)
                             } label: {
                                 SearchCategoryTile(category: category)

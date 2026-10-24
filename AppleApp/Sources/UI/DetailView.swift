@@ -479,7 +479,7 @@ struct DetailView: View {
 
                 if !credit.isEmpty {
                     if let artistId {
-                        NavigationLink(destination: DetailView(browseId: artistId, initialTitle: credit)) {
+                        PushLink(destination: DetailView(browseId: artistId, initialTitle: credit)) {
                             Text(credit)
                                 .font(.title3)
                                 .foregroundStyle(tint.accent)
@@ -952,7 +952,7 @@ struct DetailView: View {
     private func latestReleaseCard(_ card: ShelfCard) -> some View {
         HStack(spacing: 14) {
             if let id = card.browseId, !id.isEmpty {
-                NavigationLink(destination: DetailView(browseId: id, initialTitle: card.title)) {
+                PushLink(destination: DetailView(browseId: id, initialTitle: card.title)) {
                     latestReleaseBody(card)
                 }
                 .buttonStyle(.plain)
