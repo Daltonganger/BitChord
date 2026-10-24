@@ -603,9 +603,7 @@ struct DetailView: View {
     private func releaseMoreMenu(_ page: DetailPageModel) -> some View {
         CircleMenuButton(label: "More actions") {
             Button("Play Next") {
-                for entry in page.songs.map({ toEntry($0, fallbackArt: fallbackArt(page)) }) {
-                    controller.playNext(entry)
-                }
+                controller.playNext(page.songs.map { toEntry($0, fallbackArt: fallbackArt(page)) })
                 toast.queueNotice("Playing next: \(page.title)")
             }
             .disabled(page.songs.isEmpty)

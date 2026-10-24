@@ -1007,14 +1007,33 @@ final class PlaybackController {
     }
 
     func playNext(_ entry: QueueEntry) {
+        playNext([entry])
+    }
+
+    /// A collection's "play next": the batch inserts once, in order — looping
+    /// the single-entry form would insert each song in front of the one before
+    /// it and the album would play next backwards.
+    ///
+    /// On an idle player this is still a request to play, and it starts with
+    /// the collection's first track: the array lands whole at the playing
+    /// slot, so `loadCurrent` picks index 0 of it.
+    func playNext(_ entries: [QueueEntry]) {
+        guard !entries.isEmpty else { return }
         noteLocalIntent()
         let wasEmpty = queue.isEmpty
-        var entry = entry
-        entry.contextOrder = nil
-        entry.fromAutoplay = false
-        removeAutoplayDuplicate(of: entry)
+        let prepared = entries.map { entry -> QueueEntry in
+            var entry = entry
+            entry.contextOrder = nil
+            entry.fromAutoplay = false
+            return entry
+        }
+        // Each entry must not displace an autoplay entry another one just
+        // added; dedupe against the queue once for the batch.
+        for entry in prepared {
+            removeAutoplayDuplicate(of: entry)
+        }
         let at = min(playingIndex + 1, queue.count)
-        queue.insert(entry, at: at)
+        queue.insert(contentsOf: prepared, at: at)
         queueEditRevision &+= 1
         persistSession()
         // As `addToQueue`: "play next" on an idle player is a request to play.
