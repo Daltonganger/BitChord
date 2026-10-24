@@ -62,6 +62,12 @@ struct DetailView: View {
     @State private var latestReleaseLibraryId: String?
     @State private var latestReleaseSaved = false
     @State private var savingLatestRelease = false
+    /// The artist shelf whose "Show all" grid is pushed, if any. A stored value
+    /// rather than a NavigationLink in the header, because the header's button
+    /// is shared with Library rows that don't push (upstream's
+    /// `onActiveShelfChange`). The pushed grid keeps its own scroll state, and
+    /// popping back restores this page's shelf run underneath it.
+    @State private var showAllShelf: FeedShelf?
 
     /// Whether the window is wide enough for the roomier header controls.
     ///
@@ -125,6 +131,12 @@ struct DetailView: View {
             saving = false; subscribing = false; subscriptionOverride = nil
             pinned = PlaylistPinning.pinnedIds().contains(browseId)
             await load()
+        }
+        // The shelf's "Show all" grid is a normal push, so the grid keeps its
+        // own scroll state and popping back restores this page's carousels
+        // underneath it (upstream's `parentShelf` restore).
+        .navigationDestination(item: $showAllShelf) { shelf in
+            LibraryGridView(title: shelf.title, items: shelf.items)
         }
     }
 
@@ -235,9 +247,18 @@ struct DetailView: View {
                         ForEach(page.sections) { shelf in
                             let cards = carouselItems(shelf, page: page)
                             if !cards.isEmpty {
-                                ShelfCarousel(shelf: shelf, items: cards, inset: 28)
-                                    .padding(.horizontal, 28)
-                                    .padding(.top, 28)
+                                // An artist shelf stops at five cards and offers
+                                // the rest as a grid (upstream ARTIST_ROW_MAX_ITEMS);
+                                // a release page has no such shelf to cap.
+                                let canShowAll = isArtist && cards.count > 5
+                                ShelfCarousel(
+                                    shelf: shelf,
+                                    items: canShowAll ? Array(cards.prefix(5)) : cards,
+                                    onShowAll: canShowAll ? { showAllShelf = shelf } : nil,
+                                    inset: 28
+                                )
+                                .padding(.horizontal, 28)
+                                .padding(.top, 28)
                             }
                         }
                     }
