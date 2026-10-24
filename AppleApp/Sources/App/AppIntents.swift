@@ -68,6 +68,77 @@ enum BitChordIntentError: LocalizedError {
     }
 }
 
+// MARK: - A song, for Siri and Shortcuts
+
+/// A song as Siri and Shortcuts see it.
+///
+/// The identifier is the whole entity rather than the video id, because a resolved
+/// entity has to survive being saved in a shortcut and resolved again in a later
+/// process. The query keeps no cache to look a bare id up in, so a title known
+/// when the shortcut was made would otherwise be lost — and a queue row showing an
+/// opaque id is worse than no shortcut at all.
+struct SongEntity: AppEntity {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "Song"
+    static var defaultQuery = SongQuery()
+
+    var videoId: String
+    var title: String
+    var artist: String
+
+    var id: String {
+        let parts = [videoId, title, artist]
+        guard let data = try? JSONEncoder().encode(parts),
+              let encoded = String(data: data, encoding: .utf8) else { return videoId }
+        return encoded
+    }
+
+    var displayRepresentation: DisplayRepresentation {
+        artist.isEmpty
+            ? DisplayRepresentation(title: "\(title)")
+            : DisplayRepresentation(title: "\(title)", subtitle: "\(artist)")
+    }
+
+    init(videoId: String, title: String, artist: String) {
+        self.videoId = videoId
+        self.title = title
+        self.artist = artist
+    }
+
+    /// Rebuilds an entity from one of its identifiers. Nil for anything that is
+    /// not one, so a shortcut saved against another app cannot be misread.
+    init?(id: String) {
+        guard let data = id.data(using: .utf8),
+              let parts = try? JSONDecoder().decode([String].self, from: data),
+              parts.count == 3, !parts[0].isEmpty else { return nil }
+        self.init(videoId: parts[0], title: parts[1], artist: parts[2])
+    }
+}
+
+/// How Siri and Shortcuts find a song: the app's own search, and nothing more.
+///
+/// Deliberately cheap — no stream resolution, no player access — because the
+/// system may run this while somebody is still typing, to offer completions.
+struct SongQuery: EntityStringQuery {
+    func entities(for identifiers: [SongEntity.ID]) async throws -> [SongEntity] {
+        identifiers.compactMap { SongEntity(id: $0) }
+    }
+
+    func entities(matching string: String) async throws -> [SongEntity] {
+        let term = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return [] }
+        let hits = try await InnertubeSearch.shared.search(term, scope: "songs")
+        var seen = Set<String>()
+        return hits
+            .filter { $0.isTrack && !$0.id.isEmpty && seen.insert($0.id).inserted }
+            .prefix(10)
+            .map { SongEntity(videoId: $0.id, title: $0.title, artist: $0.resolvedArtist) }
+    }
+
+    /// No suggestions: an empty list is better than a made-up one, and the
+    /// listener is about to name a song anyway.
+    func suggestedEntities() async throws -> [SongEntity] { [] }
+}
+
 // MARK: - The verbs
 
 /// What the intents do, on the main actor because the player and the navigation
@@ -89,15 +160,29 @@ enum AppIntentActions {
         return wasPlaying ? "Paused \(current.title)" : "Playing \(current.title)"
     }
 
-    /// Search and play the best match, with the rest of the page queued behind it
-    /// so Next has somewhere to go.
-    static func play(song: String) async throws -> String {
-        let term = try cleaned(song)
+    /// Play the song Siri resolved, with the search page it came from as the
+    /// queue.
+    ///
+    /// The entity is one row and a queue is a whole answer, so the page is asked
+    /// for again here rather than carried through the query. The page is only
+    /// used when it still contains the picked track — a remix title or an artist
+    /// spelled differently must play the track the listener picked, not the first
+    /// row that came back instead.
+    static func play(song: SongEntity) async throws -> String {
         await AppServices.shared.waitUntilReady()
-        let entries = try await tracks(matching: term)
-        guard let first = entries.first else { throw BitChordIntentError.noResults(term) }
-        AppServices.shared.controller.play(entries, at: 0, context: "Siri")
-        return first.title
+        let controller = AppServices.shared.controller
+        let entries = (try? await tracks(matching: "\(song.title) \(song.artist)")) ?? []
+        if let start = entries.firstIndex(where: { $0.id == song.videoId }) {
+            controller.play(entries, at: start, context: "Siri")
+        } else {
+            let entry = QueueEntry.youtube(
+                videoId: song.videoId,
+                title: song.title,
+                artist: song.artist
+            )
+            controller.play([entry], at: 0, context: "Siri")
+        }
+        return song.title
     }
 
     /// Open Search with the term already in the field — the same request shape a
@@ -126,17 +211,18 @@ enum AppIntentActions {
             : "Removed \(current.title) from Liked Music"
     }
 
-    /// Add the best match to the end of the queue without disturbing what is
+    /// Add the resolved song to the end of the queue without disturbing what is
     /// playing. With an idle player this also starts it, which is what an empty
     /// queue under "add to queue" has to mean.
-    static func addToQueue(song: String) async throws -> String {
-        let term = try cleaned(song)
+    static func addToQueue(song: SongEntity) async throws -> String {
         await AppServices.shared.waitUntilReady()
-        guard let entry = try await tracks(matching: term).first else {
-            throw BitChordIntentError.noResults(term)
-        }
+        let entry = QueueEntry.youtube(
+            videoId: song.videoId,
+            title: song.title,
+            artist: song.artist
+        )
         AppServices.shared.controller.addToQueue(entry)
-        return entry.title
+        return song.title
     }
 
     /// The playable rows for a term, deduped and capped at a queue's worth.
@@ -184,13 +270,9 @@ struct PlaySongIntent: AppIntent {
     static var openAppWhenRun = true
 
     @Parameter(title: "Song", requestValueDialog: "Which song?")
-    var song: String
+    var song: SongEntity
 
     init() {}
-
-    init(song: String) {
-        self.song = song
-    }
 
     static var parameterSummary: some ParameterSummary {
         Summary("Play \(\.$song)")
@@ -249,13 +331,9 @@ struct AddToQueueIntent: AppIntent {
     static var openAppWhenRun = true
 
     @Parameter(title: "Song", requestValueDialog: "Which song?")
-    var song: String
+    var song: SongEntity
 
     init() {}
-
-    init(song: String) {
-        self.song = song
-    }
 
     static var parameterSummary: some ParameterSummary {
         Summary("Add \(\.$song) to the queue")
@@ -279,8 +357,8 @@ struct BitChordShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: PlaySongIntent(),
             phrases: [
-                "Play a song in \(.applicationName)",
-                "Play some music in \(.applicationName)"
+                "Play \(\.$song) in \(.applicationName)",
+                "Play \(\.$song) on \(.applicationName)"
             ],
             shortTitle: "Play a Song",
             systemImageName: "play.fill"
@@ -308,7 +386,7 @@ struct BitChordShortcuts: AppShortcutsProvider {
         )
         AppShortcut(
             intent: AddToQueueIntent(),
-            phrases: ["Add a song to the queue in \(.applicationName)"],
+            phrases: ["Add \(\.$song) to the queue in \(.applicationName)"],
             shortTitle: "Add to Queue",
             systemImageName: "text.badge.plus"
         )
