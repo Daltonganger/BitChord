@@ -356,6 +356,17 @@ const MAX_CUE_FRACTION: f64 = 0.06;
 /// runs over. Long enough to hide a decoder swap, short enough that a
 /// same-timeline blend never reads as an edit.
 const SWAP_CROSSFADE_MS: f64 = 550.0;
+/// How much of an armed incoming to decode before the blend, so its decoder,
+/// resampler and handoff stretch are already primed when its first sample is
+/// due. The arm happens seconds ahead of the fade; doing the cold decode here
+/// moves that cost off the audible path.
+const NORMAL_PREROLL_SECONDS: f64 = 0.5;
+
+/// Prime an armed incoming's decoder and buffer without emitting a sample.
+fn prime_voice(voice: &mut Voice, device_rate: u32) {
+    let frames = (NORMAL_PREROLL_SECONDS * device_rate as f64).round().max(1.0) as usize;
+    voice.prime_for_fade(frames, device_rate);
+}
 
 const FILTER_ENTRY_HZ: f64 = 7_000.0;
 const FILTER_FLOOR_HZ: f64 = 300.0;
@@ -628,6 +639,9 @@ struct Voice {
     spatial: SpatialRenderer,
     filter: TransitionFilter,
     gain: f32,
+    /// The fade gain the last `mix_into` actually reached, so the next call can
+    /// ramp from it instead of stepping once per 512-frame chunk.
+    applied_gain: f32,
     /// Cue offset at open; zeroed by a seek (decoder position then runs from
     /// file start).
     base_position: f64,
@@ -790,6 +804,7 @@ impl Voice {
             spatial,
             filter: TransitionFilter::new(2, device_rate),
             gain: 1.0,
+            applied_gain: 1.0,
             base_position: 0.0,
             info: TrackInfo {
                 title: request.title.clone(),
@@ -897,13 +912,26 @@ impl Voice {
         let match_seconds = if self.match_releasing { 1.5 } else { 0.4 };
         let alpha_match = 1.0 - (-1.0 / (self.device_rate as f32 * match_seconds)).exp();
         let target_match = db_to_gain(self.match_db as f64) as f32;
-        for (source, mix) in samples.chunks_exact(2).zip(destination.chunks_exact_mut(2)) {
+        // The caller recomputes the fade target once per 512-frame chunk, so
+        // applying it flat makes a slow crossing a staircase (a zipper at the
+        // low end). Walk from the previous chunk's applied gain to this one
+        // across the samples; the next call starts where this one ended.
+        let start_gain = self.applied_gain;
+        self.applied_gain = fade_gain;
+        let frames = (samples.len() / 2).max(1) as f32;
+        for (index, (source, mix)) in samples
+            .chunks_exact(2)
+            .zip(destination.chunks_exact_mut(2))
+            .enumerate()
+        {
+            let progress = index as f32 / (frames - 1.0).max(1.0);
+            let fade = start_gain + (fade_gain - start_gain) * progress;
             self.smoothed_normalization += (target - self.smoothed_normalization) * alpha;
             if (target - self.smoothed_normalization).abs() < 1e-6 {
                 self.smoothed_normalization = target;
             }
             self.smoothed_match += (target_match - self.smoothed_match) * alpha_match;
-            let gain = fade_gain * self.smoothed_normalization * self.smoothed_match;
+            let gain = fade * self.smoothed_normalization * self.smoothed_match;
             mix[0] += source[0] * gain;
             mix[1] += source[1] * gain;
         }
@@ -1121,6 +1149,51 @@ impl Voice {
     fn remaining_seconds(&self) -> Option<f64> {
         let total = self.regions.effective_end(self.known_duration?);
         Some((total - self.decoder.position_seconds()).max(0.0))
+    }
+
+    /// Remaining audible seconds from the next served sample, so a pre-rolled
+    /// buffer counts as content ahead of the playhead rather than as already
+    /// played.
+    fn audible_remaining_seconds(&self) -> Option<f64> {
+        let total = self.regions.effective_end(self.known_duration?);
+        Some((total - self.emitted_position_seconds()).max(0.0))
+    }
+
+    /// Decode the first `frames` of an armed incoming into `pending_dev`
+    /// without emitting them. The decoder, resampler and stretch are primed,
+    /// and the buffer is what `pull` serves when the blend starts — so the
+    /// first fade chunk already holds the record's own cue instead of paying
+    /// for a cold decode while the outgoing has begun to fall.
+    ///
+    /// The audible timeline does not move: `emitted_position_seconds`
+    /// subtracts the buffer, and `emitted_dev_frames` is reset because none of
+    /// it has been heard.
+    fn prime_for_fade(&mut self, frames: usize, device_rate: u32) {
+        if frames == 0 || self.finished || !self.pending_dev.is_empty() {
+            return;
+        }
+        // The handoff stretch is engaged at the fade normally; engage it here
+        // so the pre-rolled samples are at the same rate the blend will use.
+        let planned_rate = self.base_plan_rate;
+        if (planned_rate - 1.0).abs() > 1e-4 {
+            self.set_plan_rate(planned_rate);
+        }
+        let prefetched = self.pull(frames, device_rate);
+        if prefetched.is_empty() {
+            return;
+        }
+        let rest = self.pending_dev.split_off(self.pending_dev_cursor);
+        self.pending_dev = prefetched;
+        self.pending_dev.extend_from_slice(&rest);
+        self.pending_dev_cursor = 0;
+        self.emitted_dev_frames = 0;
+        // A head-trim seek during the pull resets the processing chain; keep
+        // the planned rate if that happened.
+        if (planned_rate - 1.0).abs() > 1e-4
+            && (self.plan_rate - planned_rate).abs() > 1e-9
+        {
+            self.set_plan_rate(planned_rate);
+        }
     }
 
     /// Pulls up to `frames` device-domain interleaved stereo frames.
@@ -1666,7 +1739,8 @@ struct TransitionState {
     /// with one. Created when the window opens.
     fx: Option<fx::DeckFx>,
     /// When inside the transition the effect sub-window starts, in frames from
-    /// the blend start. Before it the outgoing plays dry at unity.
+    /// the blend start. Before it the outgoing plays dry on the blend's own
+    /// fall; after it the effect dresses that fall.
     effect_start_frame: u64,
 }
 
@@ -2028,6 +2102,7 @@ impl MixerState {
             false,
         )?;
         voice.gain = 0.0; // silent until the fade lifts it
+        voice.applied_gain = 0.0;
         let info = voice.info.clone();
         let seconds = if crossfade_seconds > 0.0 {
             crossfade_seconds
@@ -2160,6 +2235,9 @@ impl MixerState {
                     log::warn!("could not move the armed cue to {cue:.2}s: {e}");
                 }
             }
+            // A moved cue clears the primed buffer in `reset_processing`; fill
+            // it again so the first fade chunk is not a cold decode.
+            prime_voice(voice, self.device_rate);
         }
         log::info!("updated armed transition: fade={fade_s:.1}s cue={cue:.2}s rate={rate:.4}");
     }
@@ -2182,6 +2260,7 @@ impl MixerState {
         ) {
             Ok(mut voice) => {
                 voice.gain = 0.0;
+                voice.applied_gain = 0.0;
                 voice.normalization_mode = self.loudness_mode;
                 voice.arm_transition_match(
                     self.current.as_ref(),
@@ -2201,6 +2280,10 @@ impl MixerState {
                 voice.base_plan_rate = rate;
                 voice.plan_rate = rate;
                 voice.post_glide_seconds = request.plan.post_glide_seconds.max(0.0);
+                // Prime the replacement before it is needed: this voice is
+                // pulled for the first time at the fade, and a cold decode is
+                // the hole the blend cannot afford.
+                prime_voice(&mut voice, self.device_rate);
                 if let Some(transition) = &mut self.transition {
                     if fade_s > 0.0 {
                         transition.fade_frames = (fade_s * self.device_rate as f64) as u64;
@@ -2292,6 +2375,7 @@ impl MixerState {
         ) {
             Ok(mut voice) => {
                 voice.gain = 0.0; // silent until the fade lifts it
+                voice.applied_gain = 0.0;
                 // The match is measured after normalization, so the voice has to
                 // know what normalization it will get before the correction is
                 // worked out — a freshly opened voice is in `Off`.
@@ -2304,6 +2388,9 @@ impl MixerState {
                 if let Ok(mut nerd) = self.nerd.lock() {
                     nerd.transition_match_db = (match_db.abs() >= 0.05).then_some(match_db);
                 }
+                // Decode the cue now rather than at the fade: the arm is
+                // seconds ahead, and this is the only cold decode in the path.
+                prime_voice(&mut voice, self.device_rate);
                 log::info!("armed next track: {}", request.title);
                 self.incoming = Some(voice);
                 self.transition = Some(TransitionState {
@@ -2493,17 +2580,19 @@ impl MixerState {
         }
         if let Some(t) = self.transition.as_ref().filter(|t| t.fx.is_some()) {
             // The effect rides the blend: the incoming rises across the whole
-            // crossfade, and the outgoing stays at unity until the effect's
-            // own sub-window starts (the render loop switches it then).
+            // crossfade while the outgoing falls across the same span (an
+            // equal-power pair, so the sum never bumps as the two records add
+            // up). The effect only dresses the outgoing's last sub-window.
             let fade = t.fade_frames.max(1);
             let played = self
                 .incoming
                 .as_ref()
                 .map(|voice| voice.emitted_dev_frames)
                 .unwrap_or(0);
-            let rise = rise_gain((played as f64 / fade as f64).clamp(0.0, 1.0));
+            let (rise, fall) =
+                fade_gains((played as f64 / fade as f64).clamp(0.0, 1.0), false);
             if let Some(current) = &mut self.current {
-                current.gain = 1.0;
+                current.gain = fall;
                 current.filter.open();
             }
             if let Some(incoming) = &mut self.incoming {
@@ -2516,7 +2605,7 @@ impl MixerState {
             return false;
         };
         let incoming_cap_frames = incoming
-            .remaining_seconds()
+            .audible_remaining_seconds()
             .map(|remaining| {
                 let played = incoming.emitted_dev_frames as f64;
                 let total_from_cue = played + remaining * self.device_rate as f64;
@@ -4104,6 +4193,334 @@ mod tests {
         }
         mixed
     }
+
+    /// Deterministic white noise, so the effects add uncorrelated power instead
+    /// of cancelling a pure tone at one delay phase. `lead_seconds` of digital
+    /// silence at the head is the quiet lead-in the cue trim must skip.
+    fn noise_wav(
+        path: &std::path::Path,
+        lead_seconds: f32,
+        seconds: f32,
+        amplitude: f32,
+        seed: u32,
+    ) {
+        let rate = 44_100u32;
+        let frames = (rate as f32 * seconds) as usize;
+        let lead_frames = (rate as f32 * lead_seconds) as usize;
+        let data_len = frames * 4;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data_len as u32).to_le_bytes());
+        let mut state: u32 = seed.max(1);
+        for i in 0..frames {
+            let sample = if i < lead_frames {
+                0.0
+            } else {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = (state >> 8) as f32 / 16_777_216.0;
+                (unit * 2.0 - 1.0) * amplitude * i16::MAX as f32
+            };
+            let value = sample as i16;
+            bytes.extend_from_slice(&value.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn rms_window(samples: &[f32], start_frame: usize, frames: usize) -> f64 {
+        let start = (start_frame * 2).min(samples.len());
+        let end = ((start_frame + frames) * 2).min(samples.len());
+        if end <= start {
+            return 0.0;
+        }
+        let sum: f64 = samples[start..end].iter().map(|s| (*s as f64).powi(2)).sum();
+        (sum / ((end - start) / 2).max(1) as f64).sqrt()
+    }
+
+    struct RenderedTransition {
+        mixed: Vec<f32>,
+        outgoing: Vec<f32>,
+        incoming: Vec<f32>,
+        fade_frames: usize,
+        /// The technique's own landing, or the blend's midpoint.
+        land_frame: usize,
+    }
+
+    /// Render one transition the way `render_available` does: the outgoing
+    /// deck through the blend fall (and its effect in the last sub-window), the
+    /// pre-rolled incoming through the blend rise, both served in 512-frame
+    /// chunks. The arm-time prime is the production one.
+    fn render_transition_style(
+        style: TransitionStyle,
+        outgoing_path: &std::path::Path,
+        incoming_path: &std::path::Path,
+    ) -> RenderedTransition {
+        const RATE: u32 = 48_000;
+        const BLOCK: usize = 512;
+        const BEAT: f64 = 0.5;
+        const FADE_SECONDS: f64 = 8.0;
+        let fade_frames = (FADE_SECONDS * RATE as f64) as usize;
+        let technique_window = fx::window_seconds(style, BEAT).unwrap_or(0.0);
+        let plan = TransitionPlan {
+            style,
+            beat_seconds: BEAT,
+            fade_seconds: FADE_SECONDS,
+            effect_seconds: technique_window,
+            effect_start_seconds: FADE_SECONDS - technique_window,
+            transition_end_seconds: FADE_SECONDS,
+            bed_fraction: if matches!(
+                style,
+                TransitionStyle::DjBlend | TransitionStyle::DjFilter
+            ) {
+                0.45
+            } else {
+                0.0
+            },
+            bed_gain_db: -14.0,
+            dip_depth: 0.2,
+            dip_width: 0.1,
+            ..Default::default()
+        };
+        let mut outgoing = open_voice(outgoing_path);
+        let mut incoming = open_voice(incoming_path);
+        incoming.gain = 0.0;
+        incoming.applied_gain = 0.0;
+        prime_voice(&mut incoming, RATE);
+        let mut fx = if style.is_effect() {
+            fx::DeckFx::new(style, RATE, BEAT)
+        } else {
+            None
+        };
+        let effect_start_frame = ((FADE_SECONDS - technique_window) * RATE as f64) as u64;
+        let mut mixed = Vec::with_capacity(fade_frames * 2);
+        let mut out_raw = Vec::with_capacity(fade_frames * 2);
+        let mut in_raw = Vec::with_capacity(fade_frames * 2);
+        let mut emitted_in = 0u64;
+        let mut done = 0usize;
+        while done < fade_frames {
+            let p = done as f64 / fade_frames as f64;
+            let (rise, fall) = if style.is_effect() || style == TransitionStyle::EqualPower {
+                fade_gains(p, false)
+            } else {
+                automix_gains(p, &plan)
+            };
+            let a = outgoing.pull(BLOCK, RATE);
+            let mut out = vec![0.0f32; BLOCK * 2];
+            if fx.is_some() && emitted_in >= effect_start_frame {
+                let mut dry = vec![0.0f32; BLOCK * 2];
+                outgoing.mix_into(&a, &mut dry, fall, false);
+                fx.as_mut().unwrap().render(&dry, &mut out, BLOCK);
+            } else {
+                outgoing.mix_into(&a, &mut out, fall, false);
+            }
+            let b = incoming.pull(BLOCK, RATE);
+            emitted_in += (b.len() / 2) as u64;
+            incoming.mix_into(&b, &mut out, rise, false);
+            let mut a_pad = a;
+            a_pad.resize(BLOCK * 2, 0.0);
+            let mut b_pad = b;
+            b_pad.resize(BLOCK * 2, 0.0);
+            out_raw.extend_from_slice(&a_pad);
+            in_raw.extend_from_slice(&b_pad);
+            mixed.extend_from_slice(&out);
+            done += BLOCK;
+        }
+        let land_frame = match &fx {
+            Some(effect) => effect_start_frame as usize + effect.land_frame() as usize,
+            None => fade_frames / 2,
+        };
+        RenderedTransition {
+            mixed,
+            outgoing: out_raw,
+            incoming: in_raw,
+            fade_frames,
+            land_frame,
+        }
+    }
+
+    #[test]
+    fn priming_a_voice_does_not_advance_its_audible_position() {
+        let dir =
+            std::env::temp_dir().join(format!("bitchord-mixer-prime-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("prime.wav");
+        level_wav(&path, 2.0, 440.0, 0.2);
+        let mut voice = open_voice(&path);
+        // A beatmatched handoff runs the incoming slightly off unity; the
+        // pre-roll must be decoded at that rate, not at the rate of a fresh
+        // decoder.
+        voice.base_plan_rate = 1.03;
+        let before = voice.emitted_position_seconds();
+        prime_voice(&mut voice, 48_000);
+        assert_eq!(voice.emitted_dev_frames, 0, "pre-roll must not be audible yet");
+        assert!(
+            (voice.emitted_position_seconds() - before).abs() < 0.03,
+            "pre-roll moved the audible position from {before:.3}s to {:.3}s",
+            voice.emitted_position_seconds()
+        );
+        let first = voice.pull(512, 48_000);
+        assert!(!first.is_empty(), "the primed voice must serve its cue");
+    }
+
+    #[test]
+    fn mix_into_ramps_between_chunk_targets() {
+        let dir = std::env::temp_dir().join(format!("bitchord-mixer-ramp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ramp.wav");
+        level_wav(&path, 1.0, 440.0, 0.2);
+        let mut voice = open_voice(&path);
+        // A constant input makes the output the gain curve itself.
+        let source = vec![1.0f32; 512 * 2];
+        let mut out = vec![0.0f32; 512 * 2];
+        voice.mix_into(&source, &mut out, 0.0, false);
+        let left: Vec<f32> = out.chunks_exact(2).map(|frame| frame[0]).collect();
+        let step = left
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(step < 0.01, "max inter-sample gain step {step}");
+        assert!(left[0] > 0.99, "first sample {}", left[0]);
+        assert!(*left.last().unwrap() < 0.01, "last sample {}", left.last().unwrap());
+
+        // The next chunk starts where the previous one ended: no step at a
+        // 512-frame boundary even though the target jumped to 1.0.
+        let mut next = vec![0.0f32; 512 * 2];
+        voice.mix_into(&source, &mut next, 1.0, false);
+        let left: Vec<f32> = next.chunks_exact(2).map(|frame| frame[0]).collect();
+        assert!(left[0] < 0.01, "chunk boundary step {}", left[0]);
+        assert!(*left.last().unwrap() > 0.99, "last sample {}", left.last().unwrap());
+        let step = left
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(step < 0.01, "max inter-sample gain step {step}");
+    }
+
+    #[test]
+    fn every_style_has_no_hole_at_the_handover() {
+        let dir =
+            std::env::temp_dir().join(format!("bitchord-mixer-hole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let outgoing = dir.join("out.wav");
+        let incoming = dir.join("in.wav");
+        noise_wav(&outgoing, 0.0, 12.0, 0.5, 0x1234_5678);
+        // 1.5 s of quiet lead-in, long enough that the cue must trim it and
+        // short enough to sit inside the arming window.
+        noise_wav(&incoming, 1.5, 30.0, 0.5, 0x9E37_79B9);
+        crate::playback_regions::put(
+            incoming.display().to_string(),
+            crate::PlaybackRegions {
+                audible_start_seconds: 1.5,
+                audible_end_seconds: None,
+                excluded: Vec::new(),
+            },
+        );
+        for style in [
+            TransitionStyle::EchoOut,
+            TransitionStyle::LoopRoll,
+            TransitionStyle::ReverbWash,
+            TransitionStyle::DropCut,
+            TransitionStyle::EqualPower,
+            TransitionStyle::DjBlend,
+            TransitionStyle::DjFilter,
+        ] {
+            let rendered = render_transition_style(style, &outgoing, &incoming);
+            let frames = rendered.fade_frames;
+            let first_in = rms_window(&rendered.incoming, 0, 480);
+            assert!(
+                first_in > 0.05,
+                "{style:?}: the primed incoming is silent at the blend start ({first_in}) \
+                 — the lead-in was not trimmed or the buffer was not primed"
+            );
+
+            // B's floor: across the landing ±200 ms the summed output must
+            // never sit more than 6 dB below the quieter record.
+            let start = rendered.land_frame.saturating_sub(9_600);
+            let end = (rendered.land_frame + 9_600).min(frames);
+            let mut worst = f64::INFINITY;
+            let mut worst_at = start;
+            let mut hole = None;
+            let mut at = start;
+            while at + 480 <= end {
+                let m = rms_window(&rendered.mixed, at, 480);
+                let o = rms_window(&rendered.outgoing, at, 480);
+                let i = rms_window(&rendered.incoming, at, 480);
+                let reference = o.min(i);
+                if reference > 1e-6 && m > 0.0 {
+                    let ratio = 20.0 * (m / reference).log10();
+                    if ratio < worst {
+                        worst = ratio;
+                        worst_at = at;
+                    }
+                }
+                // A 20 ms run below −60 dBFS is a hole, not a quiet moment.
+                if hole.is_none() && at + 960 <= end && rms_window(&rendered.mixed, at, 960) < 0.001
+                {
+                    hole = Some(at);
+                }
+                at += 480;
+            }
+            let worst = if worst.is_finite() { worst } else { 0.0 };
+            assert!(
+                hole.is_none(),
+                "{style:?}: a 20 ms hole at frame {:?} (land {})",
+                hole,
+                rendered.land_frame
+            );
+            assert!(
+                worst > -6.0,
+                "{style:?}: dipped to {worst:.2} dB at frame {worst_at} (land {})",
+                rendered.land_frame
+            );
+
+            // Continuity of level, too: 3 s short-term RMS stays within 3 dB
+            // below the quieter neighbour and 2 dB above the louder one.
+            let window = 3 * 48_000usize;
+            let span = frames.saturating_sub(window);
+            let mut dip = 0.0f64;
+            let mut rise = 0.0f64;
+            let mut rise_at = 0usize;
+            let mut rise_values = (0.0f64, 0.0f64, 0.0f64);
+            let mut at = 0;
+            while at <= span {
+                let m = 20.0 * rms_window(&rendered.mixed, at, window).max(1e-9).log10();
+                let o = 20.0 * rms_window(&rendered.outgoing, at, window).max(1e-9).log10();
+                let i = 20.0 * rms_window(&rendered.incoming, at, window).max(1e-9).log10();
+                dip = dip.min(m - o.min(i));
+                if m - o.max(i) > rise {
+                    rise = m - o.max(i);
+                    rise_at = at;
+                    rise_values = (m, o, i);
+                }
+                at += 4_800;
+            }
+            println!(
+                "{style:?}: land {}f, floor {worst:.2} dB, 3s dip {dip:.2} dB, rise {rise:.2} dB \
+                 at {rise_at} (m/o/i {rise_values:?})",
+                rendered.land_frame
+            );
+            assert!(
+                dip > -3.0,
+                "{style:?}: the 3 s level dipped {dip:.2} dB below the quieter record"
+            );
+            assert!(
+                rise < 2.0,
+                "{style:?}: the 3 s level rose {rise:.2} dB above the louder record"
+            );
+        }
+    }
+
 
     /// How far the level moved from the first 100 ms window, and the peak.
     fn level_spread(samples: &[f32]) -> (f64, f32) {

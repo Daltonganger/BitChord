@@ -23,6 +23,21 @@ cargo test --lib analyzer::plan::tests::a_true_beatmatch_still_blends || exit 1
 cargo test --lib analyzer::plan::tests::mismatched_tempos_get_a_dj_technique_not_a_fade || exit 1
 cargo test --lib analyzer::plan::tests::a_spent_effect_budget_keeps_the_blend || exit 1
 
+# B: the rendered handover. Every style is mixed through the production gain
+# curves, the arm-time prime and the real effect, and the floor is checked in
+# numbers rather than left to a listen.
+ramp="$(cargo test --lib mixer::tests::mix_into_ramps_between_chunk_targets 2>&1)" || {
+  echo "$ramp" | tail -20
+  exit 1
+}
+echo "ok   the fade gain walks between chunk targets, no step"
+handover="$(cargo test --lib mixer::tests::every_style_has_no_hole_at_the_handover -- --nocapture 2>&1)" || {
+  echo "$handover" | tail -30
+  exit 1
+}
+echo "$handover" | grep -E '^(EchoOut|LoopRoll|ReverbWash|DropCut|EqualPower|DjBlend|DjFilter):'
+echo "ok   every style holds the +/−200 ms floor and the 3 s level"
+
 corpus="${AUTOMIX_CORPUS:-$HOME/Library/Caches/BitChord/audio}"
 if [ ! -d "$corpus" ]; then
   echo "automix: plan-order checks passed; no corpus at $corpus"
