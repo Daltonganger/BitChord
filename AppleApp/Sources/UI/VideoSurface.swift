@@ -34,6 +34,23 @@ final class VideoPlayback {
     var state: VideoSideController.State { controller.state }
     /// Whether a surface should draw the picture instead of the artwork.
     var showsVideo: Bool { side != nil && controller.state == .ready }
+    /// Until the picture is on screen, not just until it is chosen: the
+    /// player can still be filling its buffer after the map is ready.
+    var isLoading: Bool { preparing || (side != nil && controller.state == .loading) }
+    /// A short answer when the toggle found nothing, so it does not look dead.
+    private(set) var notice: String?
+    @ObservationIgnored private var noticeTask: Task<Void, Never>?
+
+    private func say(_ text: String?) {
+        noticeTask?.cancel()
+        notice = text
+        guard text != nil else { return }
+        noticeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.notice = nil
+        }
+    }
 
     /// What the picture needs from the player beyond its clock: the playing
     /// song's credits and length, to find its music video, and the way to put
@@ -112,6 +129,7 @@ final class VideoPlayback {
         resolvedId = nil
         side = nil
         preparing = true
+        say(nil)
         controller.detach()
 
         PlaybackDebugLog.shared.record("video: resolving (forceRefresh=\(forceRefresh))", about: id)
@@ -172,6 +190,7 @@ final class VideoPlayback {
                 self.preparing = false
                 guard let fallback else {
                     PlaybackDebugLog.shared.record("video: no music video for this song", about: id)
+                    self.say("No music video for this song")
                     self.side = nil
                     self.controller.detach()
                     return
@@ -192,6 +211,7 @@ final class VideoPlayback {
                 self.resolveTask = nil
                 self.side = nil
                 self.controller.detach()
+                self.say("The music video couldn’t be loaded")
             }
         }
     }
@@ -213,6 +233,7 @@ final class VideoPlayback {
         resolvedId = nil
         side = nil
         preparing = false
+        say(nil)
         controller.detach()
     }
 
@@ -267,6 +288,28 @@ struct VideoSurface<Fallback: View>: View {
     @AppStorage("show_music_videos") private var showMusicVideos = false
     @State private var registered = false
 
+    private func caption(_ text: String, loading: Bool) -> some View {
+        VStack {
+            Spacer()
+            HStack(spacing: 6) {
+                if loading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "video.slash")
+                        .font(.caption)
+                }
+                Text(text)
+                    .font(.caption.weight(.medium))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial, in: Capsule())
+            .padding(10)
+        }
+        .allowsHitTesting(false)
+        .transition(.opacity)
+    }
+
     var body: some View {
         ZStack {
             fallback()
@@ -277,26 +320,17 @@ struct VideoSurface<Fallback: View>: View {
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .allowsHitTesting(false)
                     .transition(.opacity)
-            } else if announcesLoading, showMusicVideos, VideoPlayback.shared.preparing {
-                VStack {
-                    Spacer()
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Loading music video")
-                            .font(.caption.weight(.medium))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(10)
-                }
-                .allowsHitTesting(false)
-                .transition(.opacity)
-                .accessibilityIdentifier("player.musicVideoLoading")
+            } else if announcesLoading, showMusicVideos, VideoPlayback.shared.isLoading {
+                caption("Loading music video", loading: true)
+                    .accessibilityIdentifier("player.musicVideoLoading")
+            } else if announcesLoading, showMusicVideos, let notice = VideoPlayback.shared.notice {
+                caption(notice, loading: false)
+                    .accessibilityIdentifier("player.musicVideoNotice")
             }
         }
         .animation(.easeInOut(duration: 0.25), value: VideoPlayback.shared.showsVideo)
-        .animation(.easeInOut(duration: 0.25), value: VideoPlayback.shared.preparing)
+        .animation(.easeInOut(duration: 0.25), value: VideoPlayback.shared.isLoading)
+        .animation(.easeInOut(duration: 0.25), value: VideoPlayback.shared.notice)
         .onAppear {
             guard !registered else { return }
             registered = true
