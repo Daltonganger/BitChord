@@ -109,12 +109,12 @@ object PlayerBridge {
      * Deliberately not cancellable: the host asks once per track and can ignore
      * a late answer.
      */
-    fun resolveVideo(videoId: String, callback: VideoCallback) {
+    fun resolveVideo(videoId: String, forceRefresh: Boolean = false, callback: VideoCallback) {
         val generation = Innertube.sessionGeneration
         bridgeScope.launch {
             try {
                 Innertube.checkSession(generation)
-                val side = coalescedVideoSide(videoId, generation)
+                val side = coalescedVideoSide(videoId, generation, forceRefresh)
                 Innertube.checkSession(generation)
                 callback.onResult(json.encodeToString(VideoSidePayload.serializer(), side.toPayload()), null)
             } catch (e: Throwable) {
@@ -135,10 +135,11 @@ object PlayerBridge {
     /** Test seam: the network call the coalescer shares. */
     internal var videoSideLoader: suspend (String) -> VideoSide? = { UpstreamPlaybackExtractor.videoSide(it) }
 
-    private suspend fun coalescedVideoSide(videoId: String, generation: Long): VideoSide? {
+    private suspend fun coalescedVideoSide(videoId: String, generation: Long, forceRefresh: Boolean): VideoSide? {
         val key = "$generation|$videoId"
         val flight = videoLock.withLock {
-            videoCache[key]?.takeIf { it.first.elapsedNow() < 5.minutes }?.let { return it.second }
+            if (forceRefresh) videoCache.remove(key)
+            else videoCache[key]?.takeIf { it.first.elapsedNow() < 5.minutes }?.let { return it.second }
             videoFlights[key] ?: bridgeScope.async(start = CoroutineStart.LAZY) {
                 val side = try {
                     videoSideLoader(videoId)

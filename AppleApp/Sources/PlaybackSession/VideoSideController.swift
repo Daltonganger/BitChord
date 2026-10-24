@@ -41,7 +41,7 @@ final class VideoSideController {
     private(set) var side: ResolvedVideoSide?
 
     @ObservationIgnored let player = AVPlayer()
-    @ObservationIgnored private let clock: VideoClock
+    @ObservationIgnored private var clock: VideoClock
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var statusObservation: NSKeyValueObservation?
     @ObservationIgnored private var failedObserver: NSObjectProtocol?
@@ -55,6 +55,9 @@ final class VideoSideController {
         player.volume = 0
         player.preventsDisplaySleepDuringVideoPlayback = false
         player.audiovisualBackgroundPlaybackPolicy = .pauses
+        // The picture never leaves for AirPlay: the engine owns the audio route,
+        // and a muted picture on a TV must not look like a route change.
+        player.allowsExternalPlayback = false
         player.actionAtItemEnd = .pause
         // The picture is not the point of the track: do not wait for a large
         // buffer before showing the frame the engine is already at.
@@ -66,6 +69,13 @@ final class VideoSideController {
         if let failedObserver {
             NotificationCenter.default.removeObserver(failedObserver)
         }
+    }
+
+    /// The clock can be supplied after construction (the surface owns the
+    /// environment player); every surface passes the same closures.
+    func setClock(_ clock: VideoClock) {
+        self.clock = clock
+        tick()
     }
 
     /// Attach the side for the current track, or nil to go back to the artwork.

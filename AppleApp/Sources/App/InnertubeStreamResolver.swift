@@ -99,10 +99,11 @@ final class InnertubeStreamResolver: Sendable {
     /// The track's AVC/MP4 video side, or a side whose `url` is nil when the
     /// track has none. The audio path is untouched: this is its own request,
     /// through the same direct profile the audio resolved with.
-    func resolveVideo(videoId: String) async throws -> ResolvedVideoSide {
+    func resolveVideo(videoId: String, forceRefresh: Bool = false) async throws -> ResolvedVideoSide {
         try await withCheckedThrowingContinuation { continuation in
             PlayerBridge.shared.resolveVideo(
                 videoId: videoId,
+                forceRefresh: forceRefresh,
                 callback: VideoCallbackAdapter { json, message in
                     guard let json else {
                         continuation.resume(throwing: VideoSideError(
