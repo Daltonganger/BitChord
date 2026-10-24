@@ -14,6 +14,47 @@ struct ResolvedYouTubeStream {
     let loudnessDb: Double?
 }
 
+/// What the extraction stack could see of a track's video side.
+///
+/// This is the O9 spike's answer, not the playback path: `wantVideo` stays
+/// false in `extract`, and only this method asks for video formats. A thrown
+/// error from the bridge means the progressive stack would not deliver a
+/// video-only stream at all; a successful one is the extractor's own fields.
+struct ResolvedVideoProbe: Sendable {
+    /// Signed and short-lived: report whether it exists, never print it.
+    let videoUrl: String?
+    let width: Int?
+    let height: Int?
+    let itag: Int?
+    let mimeType: String?
+    let codecs: String?
+    let bitrate: Int?
+    let availableVideoHeights: [Int]
+    /// The extractor's readiness rule rejects a URL carrying YouTube's `n`
+    /// throttle parameter; the probe reports it instead of hiding the reason.
+    let hasNParameter: Bool
+    let clientName: String
+    let profileId: String
+    let musicVideoType: String?
+    /// Which ask produced this answer: the audio path's own direct profile
+    /// (by override) or the automatic video selection.
+    let selection: String
+
+    var hasVideoURL: Bool { !(videoUrl ?? "").isEmpty }
+    var aspectRatio: Double? {
+        guard let width, let height, height > 0 else { return nil }
+        return Double(width) / Double(height)
+    }
+    /// A square picture is an art track, not a music video (upstream's
+    /// `MIN_VIDEO_ASPECT = 1.2`, engine.ts:47).
+    var looksLikeMusicVideo: Bool { (aspectRatio ?? 0) >= 1.2 }
+}
+
+struct VideoProbeError: Error, LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 /// Swift bridge over the shared module's `StreamResolver` (via `PlayerBridge`):
 /// resolves a videoId to a playable audio URL. The resolved payload crosses FFI
 /// as JSON.
@@ -52,6 +93,44 @@ final class InnertubeStreamResolver: Sendable {
         // The shared resolver transforms both direct and ciphered URLs before
         // probing. Applying the n transform again corrupts a verified URL.
         return payload
+    }
+
+    /// Ask the shared extractor what the video side of a track is, without
+    /// changing what playback resolves (the O9 spike).
+    func probeVideo(videoId: String) async throws -> ResolvedVideoProbe {
+        try await withCheckedThrowingContinuation { continuation in
+            PlayerBridge.shared.probeVideo(
+                videoId: videoId,
+                callback: VideoProbeCallbackAdapter { json, message in
+                    guard let json else {
+                        continuation.resume(throwing: VideoProbeError(
+                            message: message ?? "Video probe failed"
+                        ))
+                        return
+                    }
+                    do {
+                        let payload = try JSONDecoder().decode(VideoProbePayload.self, from: Data(json.utf8))
+                        continuation.resume(returning: ResolvedVideoProbe(
+                            videoUrl: payload.videoUrl,
+                            width: payload.videoWidth,
+                            height: payload.videoHeight,
+                            itag: payload.videoItag,
+                            mimeType: payload.videoMimeType,
+                            codecs: payload.videoCodecs,
+                            bitrate: payload.videoBitrate,
+                            availableVideoHeights: payload.availableVideoHeights ?? [],
+                            hasNParameter: payload.videoUrlHasNParameter ?? false,
+                            clientName: payload.clientName,
+                            profileId: payload.profileId,
+                            musicVideoType: payload.musicVideoType,
+                            selection: payload.selection
+                        ))
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            )
+        }
     }
 
     struct StreamError: Error, LocalizedError {
@@ -132,6 +211,35 @@ private struct StreamPayload: Codable {
 }
 
 private final class ResolveCallbackAdapter: PlayerBridgeResolveCallback {
+    private let onResult: (String?, String?) -> Void
+
+    init(onResult: @escaping (String?, String?) -> Void) {
+        self.onResult = onResult
+    }
+
+    func onResult(json: String?, message: String?) {
+        onResult(json, message)
+    }
+}
+
+private struct VideoProbePayload: Decodable {
+    let videoUrl: String?
+    let videoWidth: Int?
+    let videoHeight: Int?
+    let videoItag: Int?
+    let videoMimeType: String?
+    let videoCodecs: String?
+    let videoBitrate: Int?
+    /// Kotlin omits an empty default list.
+    let availableVideoHeights: [Int]?
+    let videoUrlHasNParameter: Bool?
+    let clientName: String
+    let profileId: String
+    let musicVideoType: String?
+    let selection: String
+}
+
+private final class VideoProbeCallbackAdapter: PlayerBridgeProbeCallback {
     private let onResult: (String?, String?) -> Void
 
     init(onResult: @escaping (String?, String?) -> Void) {
