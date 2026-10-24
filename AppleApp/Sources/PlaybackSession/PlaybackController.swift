@@ -2348,7 +2348,9 @@ final class PlaybackController {
             let key = entry.source.hasPrefix("src:") ? entry.source : entry.id
             if let stream = await SourceSearch.shared.stream(
                 key: key, title: entry.title, artist: entry.artist,
-                durationSec: Int(entry.durationSeconds.rounded())
+                // Unknown is not zero: a 0 s runtime would be read as a real
+                // length and reject every match.
+                durationSec: entry.durationSeconds > 0 ? Int(entry.durationSeconds.rounded()) : nil
             ) {
                 return ResolveOutcome(
                     source: ResolvedSource(

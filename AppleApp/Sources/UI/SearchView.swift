@@ -123,6 +123,10 @@ enum AddonSearchHistory {
 struct SearchView: View {
     @Environment(PlaybackController.self) private var controller
     @Environment(AppModel.self) private var appModel
+    #if os(macOS)
+    /// Settings is a scene on the Mac, not an in-app cover.
+    @Environment(\.openSettings) private var openSettings
+    #endif
     @State private var query = ""
     @State private var categories = MoodGenreLoader()
     @State private var historyRevision = 0
@@ -173,6 +177,9 @@ struct SearchView: View {
     @State private var addonError: String?
     @State private var searchingAddons = false
     @State private var addonHistory: [String] = AddonSearchHistory.load()
+    /// How many addons are enabled, so the Addons tab can say "no addons yet"
+    /// before a query has to fail to prove it.
+    @State private var addonCount = 0
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
@@ -357,6 +364,9 @@ struct SearchView: View {
             }
         }
         .pickerStyle(.segmented)
+        // macOS draws the picker's own label beside the segments; the label is
+        // still right for VoiceOver, so it is hidden rather than removed.
+        .labelsHidden()
         .onChange(of: searchSource) { _, _ in
             guard !term.isEmpty else { return }
             Task { await performSearch() }
@@ -478,8 +488,8 @@ struct SearchView: View {
             EmptyStateView(icon: Image(.bchSearch), title: "Sources unavailable", subtitle: addonError, buttonTitle: nil, action: nil)
         } else if !addonHits.isEmpty {
             List {
-                ForEach(addonHits) { hit in
-                    addonRow(hit)
+                ForEach(Array(addonHits.enumerated()), id: \.element.id) { index, hit in
+                    addonRow(hit, index: index)
                 }
             }
             .listStyle(.plain)
@@ -496,7 +506,23 @@ struct SearchView: View {
     private var addonHistoryView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                if addonHistory.isEmpty {
+                if addonCount == 0 {
+                    // Said before a query can fail rather than after: with no
+                    // addon configured there is nothing to search, and the fix
+                    // is one screen away.
+                    EmptyStateView(
+                        icon: Image(.bchSearch),
+                        title: "No addons yet",
+                        subtitle: "Add an addon in Settings ▸ Sources to search it here.",
+                        buttonTitle: "Open Sources"
+                    ) {
+                        #if os(macOS)
+                        openSettings()
+                        #else
+                        appModel.settingsPresented = true
+                        #endif
+                    }
+                } else if addonHistory.isEmpty {
                     Text("Search your addons. Their addresses and order live in Settings ▸ Sources.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -545,11 +571,14 @@ struct SearchView: View {
             .padding(.top, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onAppear {
+            addonCount = Int(SourceResolverBridge.shared.addonCount())
+        }
     }
 
     /// One addon search row: sleeve, title, the tier the source offered, and the
     /// artist. Tapping plays it; the engine resolves its `src:` key.
-    private func addonRow(_ hit: SearchHitDTO) -> some View {
+    private func addonRow(_ hit: SearchHitDTO, index: Int) -> some View {
         HStack(spacing: 12) {
             ArtworkView(url: hit.thumbnailUrl, data: nil, side: 44)
                 .clipShape(.rect(cornerRadius: 6, style: .continuous))
@@ -585,8 +614,11 @@ struct SearchView: View {
         .padding(.horizontal, 8)
         .contentShape(.rect)
         .onTapGesture {
-            controller.play([hit.asEntry()], at: 0)
+            // Play the whole answer list, not one row, so Next has somewhere to
+            // go — the same context the YouTube song rows use.
+            controller.play(addonHits.map { $0.asEntry() }, at: index, context: "Search")
         }
+        .accessibilityAddTraits(.isButton)
         .searchRowChrome()
     }
 
