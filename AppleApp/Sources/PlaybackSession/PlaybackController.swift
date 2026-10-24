@@ -3457,41 +3457,16 @@ final class PlaybackController {
 
     // MARK: Per-track provider choice (O1)
 
-    /// The choices ride the iCloud key-value store, so the provider a track
-    /// sings from on this device is the one it sings from everywhere. The
-    /// entitlement is what makes it sync; without it the store still answers
-    /// locally, which keeps the picker honest on this device alone.
-    private static let providerChoicesKey = "lyrics_provider_choices"
-    private static let providerChoicesLimit = 300
-
-    private struct ProviderChoice: Codable {
-        let track: String
-        let source: String
-    }
-
-    private static func storedProviderChoices() -> [ProviderChoice] {
-        guard let json = NSUbiquitousKeyValueStore.default.string(forKey: providerChoicesKey),
-              let data = json.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode([ProviderChoice].self, from: data) else { return [] }
-        return decoded
-    }
+    /// The choice store, used through the protocol so the iCloud switch is a
+    /// one-line change when the entitlement lands.
+    private static let lyricsChoiceStore: any LyricsChoiceStore = DefaultsLyricsChoiceStore(defaults: .standard)
 
     private static func storedProviderChoice(for videoId: String) -> String? {
-        storedProviderChoices().first { $0.track == videoId }?.source
+        lyricsChoiceStore.choice(for: videoId)
     }
 
     private static func storeProviderChoice(_ source: String, for videoId: String) {
-        var choices = storedProviderChoices()
-        choices.removeAll { $0.track == videoId }
-        choices.insert(ProviderChoice(track: videoId, source: source), at: 0)
-        // One small dict carries every device's choices; the newest win.
-        if choices.count > providerChoicesLimit {
-            choices = Array(choices.prefix(providerChoicesLimit))
-        }
-        guard let data = try? JSONEncoder().encode(choices),
-              let json = String(data: data, encoding: .utf8) else { return }
-        NSUbiquitousKeyValueStore.default.set(json, forKey: providerChoicesKey)
-        NSUbiquitousKeyValueStore.default.synchronize()
+        lyricsChoiceStore.remember(source, for: videoId)
     }
 
     /// Fill in missing word timestamps in the background. The fetched text stays
@@ -4728,6 +4703,48 @@ enum LyricsSourceState {
         case .notFound: self = .notFound
         default: self = .notFetched
         }
+    }
+}
+
+/// Where a per-track provider choice is kept. A protocol because the
+/// destination is iCloud's key-value store once provisioning allows the
+/// entitlement; today it is local defaults, which keep the picker honest
+/// on this device alone.
+protocol LyricsChoiceStore {
+    func choice(for trackId: String) -> String?
+    func remember(_ source: String, for trackId: String)
+}
+
+/// Local defaults: one JSON array, newest first, capped — an array rather
+/// than a dict so the cap evicts the oldest choice instead of an
+/// arbitrary one.
+struct DefaultsLyricsChoiceStore: LyricsChoiceStore {
+    let defaults: UserDefaults
+    var key = "lyrics_provider_choices"
+    var limit = 300
+
+    private struct Entry: Codable {
+        let track: String
+        let source: String
+    }
+
+    func choice(for trackId: String) -> String? {
+        entries().first { $0.track == trackId }?.source
+    }
+
+    func remember(_ source: String, for trackId: String) {
+        var all = entries()
+        all.removeAll { $0.track == trackId }
+        all.insert(Entry(track: trackId, source: source), at: 0)
+        if all.count > limit { all = Array(all.prefix(limit)) }
+        guard let data = try? JSONEncoder().encode(all) else { return }
+        defaults.set(data, forKey: key)
+    }
+
+    private func entries() -> [Entry] {
+        guard let data = defaults.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([Entry].self, from: data) else { return [] }
+        return decoded
     }
 }
 
