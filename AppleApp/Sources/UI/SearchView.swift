@@ -1002,8 +1002,13 @@ struct SearchView: View {
                 // page was in flight; a stale page must not append to it.
                 guard searchedTerm == term, scope == wanted, !Task.isCancelled else { return }
                 let existing = Set(hits.map(\.id))
-                hits.append(contentsOf: page.hits.filter { !existing.contains($0.id) })
-                searchContinuationToken = page.continuation
+                let newRows = page.hits.filter { !existing.contains($0.id) }
+                hits.append(contentsOf: newRows)
+                // Keep the token only when there is a real next step. A page
+                // that adds no new rows, or that echoes the token it was given
+                // back, cannot lead anywhere further — and without this the
+                // sentinel re-fires on every appear, fetching forever.
+                searchContinuationToken = (page.continuation == token || newRows.isEmpty) ? nil : page.continuation
             } catch {
                 // A failed page is silent: the rows already on screen stay, and
                 // the sentinel can try again on the next pass.
