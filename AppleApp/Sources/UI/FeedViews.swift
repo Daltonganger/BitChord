@@ -16,6 +16,12 @@ final class FeedLoader {
     private(set) var phase: Phase = .loading
     private(set) var loadingMore = false
     private(set) var refreshError: String?
+    /// The track that was playing when this feed last finished loading, kept
+    /// by the view that owns the controller. Upstream's `homeStale`: a play
+    /// registered since the fetch means the page may be out of date — and
+    /// nothing else does, because re-fetching otherwise would rearrange the
+    /// page under whoever is reading it.
+    private(set) var loadedDuringTrackId: String?
     private var continuation: String?
     private var loadedEpoch: Int?
     private var context: PageContext?
@@ -26,6 +32,11 @@ final class FeedLoader {
 
     init(_ source: Source) { self.source = source }
     func load() async { await load(force: true, epoch: loadedEpoch) }
+
+    /// Records what was playing when a load finished; see [loadedDuringTrackId].
+    func noteLoaded(duringTrackId: String?) {
+        loadedDuringTrackId = duringTrackId
+    }
 
     func load(force: Bool, epoch: Int?) async {
         let current = PageSession.capture()
@@ -392,6 +403,23 @@ struct ShelfCardView: View {
     private var isCurrentTrack: Bool {
         guard let videoId = card.videoId, !videoId.isEmpty else { return false }
         return controller.current?.id == videoId
+    }
+}
+
+/// Attaches an externally owned scroll position when the caller supplies one,
+/// so a view that gets recreated — the Mac sidebar rebuilds its detail on
+/// every row switch — reopens where the reader left it. Without one the
+/// scroll is the view's own business, as on iOS where the TabView keeps every
+/// tab alive.
+struct ExternalScrollPosition: ViewModifier {
+    let position: Binding<ScrollPosition>?
+
+    func body(content: Content) -> some View {
+        if let position {
+            content.scrollPosition(position)
+        } else {
+            content
+        }
     }
 }
 

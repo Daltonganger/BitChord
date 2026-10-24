@@ -23,6 +23,10 @@ struct RootView: View {
     @State private var macInspector: MacInspectorKind?
     /// What the sidebar has selected.
     @State private var macSide: MacSide = .home
+    /// Home's scroll position, owned here rather than by HomeView: the detail
+    /// column rebuilds on every sidebar row switch, and the reader's place in
+    /// the feed should not be one of the things that resets.
+    @State private var homeScroll = ScrollPosition()
     /// The listener's own playlists, listed in the sidebar as Music lists them.
     @State private var macPlaylists: [UserPlaylistDTO] = []
     #endif
@@ -477,7 +481,7 @@ struct RootView: View {
     private var macDetail: some View {
         switch macSide {
         case .home:
-            HomeView(feed: homeFeed)
+            HomeView(feed: homeFeed, scrollPosition: $homeScroll)
         case .explore:
             ExploreView()
         case .recent:
