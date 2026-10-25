@@ -70,6 +70,12 @@ struct SongActionButtons: View {
         // answers so the menu cannot disagree with the resolution path about
         // what a revert means.
         if entry.id == controller.current?.id {
+            if controller.songVersions[entry.id] != nil {
+                Divider()
+                Button("Convert to Audio", systemImage: "music.note") {
+                    controller.playSongVersion()
+                }
+            }
             if controller.canRevertToOriginal {
                 Divider()
                 Button("Revert to Original") { controller.revertToOriginal() }
@@ -498,33 +504,47 @@ struct CollectionDownloadActions: View {
         let downloading = owner.map { downloadOwner in
             store.jobs.contains { downloadOwner.requests.contains($0.id) && ($0.status == .queued || $0.status == .running) }
         } ?? false
-            if let owner, !downloading, owner.requests.allSatisfy({ request in
-                store.jobs.first { $0.id == request }?.status != .failed
-            }) {
-                Button("Delete Download", role: .destructive) {
-                    toast.requestConfirmation(ConfirmationRequest(
-                        title: "Delete the download?",
-                        message: "The downloaded songs from “\(title)” will be removed from this device and will stream again when played.",
-                        confirm: "Delete Download"
-                    ) {
-                        DownloadStore.shared.removeOwner(owner.id)
-                        toast.show("Deleted \(title)")
-                    })
+        let requests = owner?.requests ?? []
+        let downloadedCount = store.savedEntries(for: browseId).count
+        let downloaded = !requests.isEmpty && downloadedCount == requests.count
+        let stateLabel = downloading ? "Waiting" : downloaded ? "Downloaded" : nil
+
+        Button {
+            Task {
+                switch await DownloadStore.shared.downloadCollection(browseId: browseId) {
+                case .started:
+                    toast.show("Downloading \(title)")
+                case .blockedByWifiOnly:
+                    toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
+                case .alreadyExists:
+                    toast.show("\(title) is already downloading or downloaded", kind: .info)
+                case .ignoredLocalTrack:
+                    break
                 }
-            } else {
-            Button(downloading ? "Downloading…" : "Download") {
-                Task {
-                    switch await DownloadStore.shared.downloadCollection(browseId: browseId) {
-                    case .started:
-                        toast.show("Downloading \(title)")
-                    case .blockedByWifiOnly:
-                        toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
-                    case .alreadyExists:
-                        toast.show("\(title) is already downloading or downloaded", kind: .info)
-                    case .ignoredLocalTrack:
-                        break
-                    }
+            }
+        }
+        label: {
+            HStack {
+                Label("Download All", systemImage: "arrow.down.to.line")
+                Spacer()
+                if let stateLabel {
+                    Text(stateLabel).foregroundStyle(.secondary)
                 }
+            }
+        }
+
+        if let owner, !downloading, owner.requests.allSatisfy({ request in
+            store.jobs.first { $0.id == request }?.status != .failed
+        }) {
+            Button("Delete Download", role: .destructive) {
+                toast.requestConfirmation(ConfirmationRequest(
+                    title: "Delete the download?",
+                    message: "The downloaded songs from “\(title)” will be removed from this device and will stream again when played.",
+                    confirm: "Delete Download"
+                ) {
+                    DownloadStore.shared.removeOwner(owner.id)
+                    toast.show("Deleted \(title)")
+                })
             }
         }
     }
