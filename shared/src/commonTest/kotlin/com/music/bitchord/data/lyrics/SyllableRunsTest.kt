@@ -50,4 +50,16 @@ class SyllableRunsTest {
         assertEquals(listOf("hel", "lo"), western.map { it.text })
         assertEquals(listOf("日", "本"), cjk.map { it.text })
     }
+
+    @Test
+    fun flush_resets_the_previous_word_end_time() {
+        val words = wordsFromRuns(
+            listOf(
+                TimedRun(0, 1_500, "first "),
+                TimedRun(1_100, 1_250, "second")
+            )
+        )
+
+        assertEquals(listOf(1_500L, 1_250L), words.map { it.endMs })
+    }
 }

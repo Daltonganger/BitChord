@@ -24,6 +24,7 @@ internal fun wordsFromRuns(runs: List<TimedRun>): List<LyricWordDto> {
             words += LyricWordDto(start, maxOf(start, end), current.toString())
         }
         current.setLength(0)
+        end = 0L
     }
 
     for (run in runs) {
