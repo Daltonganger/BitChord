@@ -124,13 +124,7 @@ object TrackMatcher {
      * thing this exists to avoid.
      */
     fun bestOfficialAudioForVideo(candidates: List<Song>, target: Target): Song? = candidates
-        .filter { candidate ->
-            val wanted = parseTitle(target.title, target.artist)
-            val got = parseTitle(candidate.title, candidate.artist)
-            wanted.core.isNotEmpty() && wanted.core == got.core &&
-                wanted.versions == got.versions &&
-                sharesArtist(target.artist, candidate.artist)
-        }
+        .filter { candidate -> sameOfficialTitleAndArtist(candidate, target) }
         // Duration only ranks here; it never decides. A video is routinely longer
         // than the audio it is showing.
         .sortedByDescending { candidate ->
@@ -139,6 +133,27 @@ object TrackMatcher {
             if (wanted == null || got == null) 0 else -abs(wanted - got)
         }
         .firstOrNull()
+
+    /**
+     * Official music-video candidates can include long visual intros/outros or
+     * alternate edits, so runtime is not a match veto. Keep the exact recording
+     * identity checks from [bestOfficialAudioForVideo], then sort closest runtime
+     * first so the caller can try the most plausible cut first.
+     */
+    fun rankedOfficialVideos(candidates: List<Song>, target: Target): List<Song> = candidates
+        .filter { candidate -> sameOfficialTitleAndArtist(candidate, target) }
+        .sortedBy { candidate ->
+            val wanted = target.durationSec
+            val got = secondsOf(candidate.durationText)
+            if (wanted == null || got == null) Int.MAX_VALUE else abs(wanted - got)
+        }
+
+    private fun sameOfficialTitleAndArtist(candidate: Song, target: Target): Boolean {
+        val wanted = parseTitle(target.title, target.artist)
+        val got = parseTitle(candidate.title, candidate.artist)
+        return wanted.core.isNotEmpty() && wanted.core == got.core &&
+            wanted.versions == got.versions && sharesArtist(target.artist, candidate.artist)
+    }
 
     /**
      * [candidates] that are genuinely [target], most confident first.

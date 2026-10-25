@@ -27,7 +27,7 @@ import kotlin.time.Clock
 
 /** The catalogue music-video counterpart for a song's video toggle. */
 object VideoVersionBridge {
-    private const val CACHE_KEY = "video_version_bridge_cache_v1"
+    private const val CACHE_KEY = "video_version_bridge_cache_v2"
     private const val CACHE_CAPACITY = 128
     private const val POSITIVE_TTL_MS = 14L * 24 * 60 * 60 * 1000
     private const val NEGATIVE_TTL_MS = 24L * 60 * 60 * 1000
@@ -123,7 +123,7 @@ object VideoVersionBridge {
                 .filter { it.videoId != videoId }
                 .filter { types[it.videoId] == "MUSIC_VIDEO_TYPE_OMV" }
                 .filterNot { isExcludedSearchTitle(it.title, title) }
-            for (song in TrackMatcher.ranked(songs, target)) {
+            for (song in TrackMatcher.rankedOfficialVideos(songs, target)) {
                 if (found.none { it.videoId == song.videoId }) {
                     found += Candidate(
                         videoId = song.videoId,

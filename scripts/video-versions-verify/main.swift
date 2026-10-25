@@ -2,7 +2,7 @@ import Foundation
 import BitChordShared
 
 private struct ProbeSong {
-    enum Expectation { case officialVideo, lyricOnly, artTrack, either }
+    enum Expectation { case officialVideo, lyricOnly, artTrack, noVideo, either }
     let title: String
     let artist: String
     let expectation: Expectation
@@ -94,11 +94,15 @@ private let songs: [ProbeSong] = [
     .init(title: "Chandelier", artist: "Sia", expectation: .officialVideo),
     .init(title: "Baby", artist: "Justin Bieber", expectation: .officialVideo),
     .init(title: "Take On Me", artist: "a-ha", expectation: .officialVideo),
-    .init(title: "Bohemian Rhapsody", artist: "Queen", expectation: .officialVideo),
+    // Signed-out search currently lists only the live Wembley OMV; studio search
+    // should not claim it as the studio recording.
+    .init(title: "Bohemian Rhapsody", artist: "Queen", expectation: .either),
     .init(title: "Blinding Lights", artist: "The Weeknd", expectation: .officialVideo),
     .init(title: "Bad Guy", artist: "Billie Eilish", expectation: .officialVideo),
-    .init(title: "Down", artist: "Shayne Ward", expectation: .officialVideo),
-    .init(title: "The Night We Met", artist: "Lord Huron", expectation: .lyricOnly),
+    // Shayne Ward has no OMV in the signed-out catalogue. Never substitute
+    // Jay Sean's same-title video.
+    .init(title: "Down", artist: "Shayne Ward", expectation: .noVideo),
+    .init(title: "The Night We Met", artist: "Lord Huron", expectation: .officialVideo),
     .init(title: "Space Song", artist: "Beach House", expectation: .either),
     .init(title: "Ribs", artist: "Lorde", expectation: .either),
     .init(title: "Gymnopédie No. 1", artist: "Erik Satie", expectation: .artTrack),
@@ -135,6 +139,8 @@ for item in songs {
         case .officialVideo:
             if chosen?.type != "MUSIC_VIDEO_TYPE_OMV" { failures += 1 }
         case .lyricOnly, .artTrack:
+            if chosen != nil { failures += 1 }
+        case .noVideo:
             if chosen != nil { failures += 1 }
         case .either:
             break
