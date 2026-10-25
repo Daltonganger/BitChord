@@ -389,6 +389,9 @@ struct BrowseActionButtons: View {
     @Environment(AuthController.self) private var auth
     @Environment(AppModel.self) private var appModel
     @Environment(ToastCenter.self) private var toast
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
 
     var body: some View {
         if let videoId = card.videoId, !videoId.isEmpty {
@@ -401,6 +404,14 @@ struct BrowseActionButtons: View {
             Button("Add to Queue") { controller.addToQueue(entry) }
         }
         if let browseId = card.browseId, !browseId.isEmpty {
+            #if os(macOS)
+            Button("Open in New Window") {
+                openWindow(
+                    id: MacBrowseWindow.sceneID,
+                    value: MacBrowseWindowRoute.detail(browseId: browseId, title: card.title)
+                )
+            }
+            #endif
             if browseId.hasPrefix("UC") {
                 // Upstream leaves artists out of the browse menu entirely
                 // (MainActivity.kt:1851) — there is nothing to download, pin,

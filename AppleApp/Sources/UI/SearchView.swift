@@ -126,8 +126,10 @@ struct SearchView: View {
     #if os(macOS)
     /// Settings is a scene on the Mac, not an in-app cover.
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     #endif
     @State private var query = ""
+    private let initialQuery: String?
     @State private var categories = MoodGenreLoader()
     @State private var historyRevision = 0
     /// Starts on the mixed page, which is what YouTube Music opens on and the only
@@ -185,15 +187,26 @@ struct SearchView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
 
+    init(
+        initialQuery: String? = nil,
+        initialScope: Scope = .all,
+        initialSource: SearchSource = .youtube
+    ) {
+        self.initialQuery = initialQuery
+        _query = State(initialValue: initialQuery ?? "")
+        _scope = State(initialValue: initialScope)
+        _searchSource = State(initialValue: initialSource)
+    }
+
     /// Which catalogue the field answers. Upstream's three-way switcher also has
     /// Local Music; our Local Music lives in Library, so this one is two.
-    enum SearchSource: String, CaseIterable, Identifiable {
+    enum SearchSource: String, CaseIterable, Identifiable, Codable {
         case youtube, addons
         var id: String { rawValue }
         var label: String { self == .youtube ? "YouTube" : "Addons" }
     }
 
-    enum Scope: String, CaseIterable, Identifiable {
+    enum Scope: String, CaseIterable, Identifiable, Codable {
         /// YouTube Music's mixed page — the only one with a promoted card, and so
         /// the only one a top result is shown for.
         case all, songs, videos, albums, artists, playlists
@@ -225,6 +238,22 @@ struct SearchView: View {
                         TopBarLeadingMark()
                     }
                     ToolbarItem(placement: .topBarTrailing) { TopBarAccountButton() }
+                    #elseif os(macOS)
+                    if !searchedTerm.isEmpty {
+                        ToolbarItem(placement: .primaryAction) {
+                            Button {
+                                openWindow(
+                                    id: MacBrowseWindow.sceneID,
+                                    value: MacBrowseWindowRoute.search(
+                                        query: searchedTerm, scope: scope, source: searchSource
+                                    )
+                                )
+                            } label: {
+                                Label("Open in New Window", systemImage: "macwindow.badge.plus")
+                            }
+                            .help("Open these search results in a new window")
+                        }
+                    }
                     #endif
                 }
                 #if os(iOS)
@@ -243,6 +272,11 @@ struct SearchView: View {
                         await performSearch()
                         searchFieldFocused = false
                     }
+                }
+                .task(id: initialQuery) {
+                    guard let initialQuery,
+                          !initialQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    await performSearch()
                 }
                 // Upstream's `searchFocusTrigger`: re-tapping the tab that is
                 // already selected focuses the field instead of doing nothing.

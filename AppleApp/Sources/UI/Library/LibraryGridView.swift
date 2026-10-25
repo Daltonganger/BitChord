@@ -13,6 +13,9 @@ struct LibraryGridView: View {
     var isPlaylists: Bool = false
 
     @Environment(AppModel.self) private var appModel
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
     @State private var searchQuery = ""
     @State private var sortOrder: SortOrder = .defaultOrder
 
@@ -103,6 +106,17 @@ struct LibraryGridView: View {
                 } label: {
                     Label("Sort", systemImage: "arrow.up.arrow.down")
                 }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    openWindow(
+                        id: MacBrowseWindow.sceneID,
+                        value: MacBrowseWindowRoute.grid(title: title, items: items)
+                    )
+                } label: {
+                    Label("Open in New Window", systemImage: "macwindow.badge.plus")
+                }
+                .help("Open this grid in a new window")
             }
         }
         #endif
