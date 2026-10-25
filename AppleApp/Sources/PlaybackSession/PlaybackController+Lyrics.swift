@@ -131,9 +131,9 @@ extension PlaybackController {
 
     // MARK: Per-track provider choice (O1)
 
-    /// The choice store, used through the protocol so the iCloud switch is a
-    /// one-line change when the entitlement lands.
-    private static let lyricsChoiceStore: any LyricsChoiceStore = DefaultsLyricsChoiceStore(defaults: .standard)
+    /// Provider choices sync through iCloud KVS and fall back to local defaults
+    /// when cloud data is not available on this device.
+    private static let lyricsChoiceStore: any LyricsChoiceStore = UbiquitousLyricsChoiceStore()
 
     private static func storedProviderChoice(for videoId: String) -> String? {
         lyricsChoiceStore.choice(for: videoId)
