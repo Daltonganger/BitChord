@@ -752,6 +752,17 @@ struct SettingsView: View {
                     isOn: $automixSequence
                 )
             }
+            rows.row("Mix on Skip", "skip", "next", "transition", "echo", "beat") {
+                SettingsToggleLine(
+                    glyph: .automix,
+                    title: "Mix on Skip",
+                    subtitle: "Pressing Next blends into the next track on the beat instead of cutting. Off during a party and on Repeat One.",
+                    isOn: Binding(
+                        get: { controller.automixOnSkipEnabled },
+                        set: { controller.setAutomixOnSkipEnabled($0) }
+                    )
+                )
+            }
         }
         rows.row("Automix Performance", "cpu", "threads", "analysis", "budget", "efficient", "balanced", "performance", "battery") {
             PushLink {
