@@ -2,6 +2,10 @@ import SwiftUI
 import Observation
 import BitChordShared
 
+extension Notification.Name {
+    static let partyMembershipDidChange = Notification.Name("BitChordPartyMembershipDidChange")
+}
+
 /// What the Listen Together screen reads, as one observable value.
 ///
 /// # Why this exists rather than the views calling the coordinator
@@ -25,7 +29,12 @@ final class PartyStore {
     /// a screen that appears after a party is already live shows the party instead of
     /// an empty one for a frame. Kotlin's defaults are not bridged to Swift
     /// synthesised defaults, so this is the real value read at construction.
-    private(set) var state: PartyState = PartyCoordinator.shared.session.current
+    private(set) var state: PartyState = PartyCoordinator.shared.session.current {
+        didSet {
+            guard oldValue.inParty != state.inParty else { return }
+            NotificationCenter.default.post(name: .partyMembershipDidChange, object: nil)
+        }
+    }
 
     /// Which server answered, and how fast. Drives the line under the address.
     ///

@@ -170,6 +170,17 @@ impl DeckFx {
         })
     }
 
+    /// A manual skip is too short for the normal five-beat EchoOut phrase.
+    /// Keep the throw and ring inside a two-beat window, landing the incoming
+    /// after the first beat and crossing over the second.
+    pub(crate) fn new_skip_echo(device_rate: u32, beat_seconds: f64) -> Option<Self> {
+        let mut fx = Self::new(TransitionStyle::EchoOut, device_rate, beat_seconds)?;
+        fx.window_frames = (fx.beat_frames as u64 * 2).max(1);
+        fx.land_frame = fx.beat_frames as u64;
+        fx.overlap_frames = fx.beat_frames as u64;
+        Some(fx)
+    }
+
     /// Whether the incoming voice should be decoding yet. It is held until
     /// the first chunk at or after its landing frame, so its first rendered
     /// sample is its cue — never a chunk decoded at zero gain and lost.
@@ -182,6 +193,11 @@ impl DeckFx {
     /// render harness).
     pub(crate) fn land_frame(&self) -> u64 {
         self.land_frame
+    }
+
+    #[cfg(test)]
+    pub(crate) fn window_frames(&self) -> u64 {
+        self.window_frames
     }
 
     /// Level of the incoming voice for the next sample: nothing before it
@@ -647,6 +663,28 @@ mod tests {
             assert!(fx.dry_gain() < 0.001, "{style:?} dry at crossing end");
             assert!((fx.incoming_gain() - 1.0).abs() < 0.001, "{style:?} incoming at crossing end");
         }
+    }
+
+    #[test]
+    fn skip_echo_crosses_smoothly_inside_two_beats() {
+        let rate = 48_000u32;
+        let mut fx = DeckFx::new_skip_echo(rate, 0.5).unwrap();
+        assert_eq!(fx.window_frames, rate as u64);
+        assert_eq!(fx.land_frame, rate as u64 / 2);
+        assert_eq!(fx.overlap_frames, rate as u64 / 2);
+        assert!(fx.overlap_frames as f64 / rate as f64 >= 0.004);
+
+        let initial = (fx.dry_gain(), fx.incoming_gain());
+        assert!((initial.0 - 1.0).abs() < 0.001);
+        assert!(initial.1 < 0.001);
+        let land = fx.land_frame;
+        advance_to(&mut fx, land);
+        assert!((fx.dry_gain() - 1.0).abs() < 0.001);
+        assert!(fx.incoming_gain() < 0.001);
+        let window = fx.window_frames;
+        advance_to(&mut fx, window);
+        assert!(fx.dry_gain() < 0.001);
+        assert!((fx.incoming_gain() - 1.0).abs() < 0.001);
     }
 
     #[test]

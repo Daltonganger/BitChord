@@ -273,7 +273,9 @@ final class PlaybackController {
         case off, all, one
     }
 
-    private(set) var repeatMode: RepeatMode = .off
+    private(set) var repeatMode: RepeatMode = .off {
+        didSet { syncSkipMixEnabled() }
+    }
     private(set) var shuffleEnabled = false
     /// AutoPlay tail removed while repeat-all is on, put back when it ends —
     /// upstream `repeatAllStash`. Taken once per stretch of ALL so OFF→ALL→ONE
@@ -366,6 +368,7 @@ final class PlaybackController {
     private(set) var sleepAfterTrack = false
     private(set) var autoplayEnabled = PlatformSettings.shared.getBoolean(key: "autoplay", default: true)
     private(set) var automixEnabled = PlatformSettings.shared.getBoolean(key: "smart_fade_enabled", default: true)
+    private(set) var automixOnSkipEnabled = PlatformSettings.shared.getBoolean(key: "automix_on_skip", default: false)
     var hideVolumeBar = PlatformSettings.shared.getBoolean(key: "hide_volume_bar", default: false)
     /// Hides the "Playing from" / "Played by" caption on the main player.
     /// Read by the player UI; persisted here so the choice survives restarts.
@@ -543,12 +546,18 @@ final class PlaybackController {
                 }
             }
         )
+        routeObservers.append(NotificationCenter.default.addObserver(
+            forName: .partyMembershipDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.syncSkipMixEnabled() }
+        })
         #if os(iOS)
         routeObservers.append(NotificationCenter.default.addObserver(forName: UIAccessibility.monoAudioStatusDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in AudioRouteState.shared.refresh(); self?.applySpatialPreference() }
         })
         #endif
         AudioRouteState.shared.refresh()
+        syncSkipMixEnabled()
         routeObservers += AudioSessionManager.observeSpatialCapabilities { [weak self] enabled in
             Task { @MainActor in
                 AudioRouteState.shared.refresh(systemSpatialEnabled: enabled)
@@ -1604,6 +1613,7 @@ final class PlaybackController {
         guard let queued = engine.pendingTrack(),
               queued.title == entry.title, queued.artist == entry.artist
         else { return false }
+        syncSkipMixEnabled()
         guard let info = try? engine.skipToPending() else {
             // Armed a moment ago but already consumed (a natural handoff may
             // have landed it meanwhile): if the queue is already there, the
@@ -2108,9 +2118,26 @@ final class PlaybackController {
         guard automixEnabled != enabled else { return }
         automixEnabled = enabled
         AppSettings.shared.setSmartFadeEnabled(value: enabled)
+        syncSkipMixEnabled()
         refreshPlaybackRegions()
         syncEngineQueueNext()
         applyListOrder()
+    }
+
+    /// Updated by Settings' "Mix on Skip" control.
+    func setAutomixOnSkipEnabled(_ enabled: Bool) {
+        guard automixOnSkipEnabled != enabled else { return }
+        automixOnSkipEnabled = enabled
+        PlatformSettings.shared.putBoolean(key: "automix_on_skip", value: enabled)
+        syncSkipMixEnabled()
+    }
+
+    private func syncSkipMixEnabled() {
+        let enabled = automixEnabled
+            && automixOnSkipEnabled
+            && !PartyStore.shared.inParty
+            && repeatMode != .one
+        engine.setSkipMixEnabled(enabled: enabled)
     }
 
     func authoriseLastFm() {

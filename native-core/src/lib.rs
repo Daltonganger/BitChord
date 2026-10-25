@@ -521,6 +521,9 @@ pub struct PlayerEngine {
     /// Exact integer depth opened by the callback, or zero when inactive.
     active_bit_perfect_depth: Arc<AtomicU32>,
     bit_perfect_enabled: AtomicBool,
+    /// Whether a manual Next may use a short beat-synced transition. Updated
+    /// by the app when AutoMix, the opt-in, party membership or repeat mode changes.
+    skip_mix_enabled: AtomicBool,
     bit_perfect_reason: Arc<Mutex<String>>,
     /// Prefer a USB audio device over the system default (upstream
     /// `preferUsbDac`). Advisory on iOS, where the session owns the route;
@@ -685,6 +688,7 @@ impl PlayerEngine {
             bit_perfect_depth: Arc::new(AtomicU32::new(0)),
             active_bit_perfect_depth: Arc::new(AtomicU32::new(0)),
             bit_perfect_enabled: AtomicBool::new(false),
+            skip_mix_enabled: AtomicBool::new(false),
             bit_perfect_reason: Arc::new(Mutex::new("Bit-perfect output is off".into())),
             prefer_usb: Arc::new(AtomicBool::new(false)),
             loudness_enabled: Arc::new(AtomicBool::new(false)),
@@ -695,6 +699,12 @@ impl PlayerEngine {
 
     pub fn register_callback(&self, callback: Box<dyn EngineCallback>) {
         *self.events.inner.lock().unwrap() = Some(CallbackHolder(Arc::from(callback)));
+    }
+
+    /// Enable the short beat-synced manual-Next transition, matching upstream
+    /// `DesktopAudioEngine.setSkipMixEnabled` / `beginSkipMix`.
+    pub fn set_skip_mix_enabled(&self, enabled: bool) {
+        self.skip_mix_enabled.store(enabled, Ordering::Release);
     }
 
     /// Opens the output device and starts the mixer thread.
@@ -1109,12 +1119,15 @@ impl PlayerEngine {
         }
     }
 
-    /// Promote the armed successor now instead of at the planned mix point.
-    /// Returns the promoted track's info so the app can flip its queue index
-    /// without waiting for the handoff event. Err when nothing is armed.
+    /// Skip to the armed successor now, using a short AutoMix mix when enabled
+    /// and a trusted beat grid is available. Returns the target's info so the
+    /// app can flip its queue index without waiting for the handoff event.
     pub fn skip_to_pending(&self) -> Result<TrackInfoRec, EngineError> {
         let (reply, result) = crossbeam_channel::bounded(1);
-        self.send(Command::SkipToPending { reply })?;
+        self.send(Command::SkipToPending {
+            skip_mix_enabled: self.skip_mix_enabled.load(Ordering::Acquire),
+            reply,
+        })?;
         match result.recv_timeout(std::time::Duration::from_secs(30)) {
             Ok(Ok(info)) => Ok(info_to_rec(info)),
             Ok(Err(error)) => Err(EngineError::LoadFailed(error)),
