@@ -24,6 +24,7 @@ pub use beat::Grid;
 pub use models::analyzer_ready;
 pub use plan::{
     last_analysis_sources, last_transition_edges, next_energy_dip, plan_pair,
+    plan_pair_with_phrase_bars,
     seed_analysis_overlay, AnalysisOverlay, TransitionEdges,
 };
 pub use sequencer::{rank_candidate_indices, rank_candidates, CandidateScore};

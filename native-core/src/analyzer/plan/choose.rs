@@ -23,11 +23,22 @@ use super::{
 };
 use crate::mixer::{TransitionPlan, TransitionStyle, MAX_DUCK_DEPTH};
 
+#[cfg(test)]
 pub(super) fn plan_from(
     outgoing: &Analysis,
     incoming: &Analysis,
     fade: f64,
     allow_effects: bool,
+) -> TransitionPlan {
+    plan_from_with_phrase_bars(outgoing, incoming, fade, allow_effects, 0)
+}
+
+pub(super) fn plan_from_with_phrase_bars(
+    outgoing: &Analysis,
+    incoming: &Analysis,
+    fade: f64,
+    allow_effects: bool,
+    phrase_bars: u32,
 ) -> TransitionPlan {
     let entry = incoming_entry(incoming);
     // Upstream `MIN_SMART_DURATION_SECONDS`: a track too short to spend a smart
@@ -46,7 +57,15 @@ pub(super) fn plan_from(
     }
     if matches!(tier, Tier::Plain) {
         if allow_effects {
-            if let Some(plan) = technique_plan(outgoing, incoming, tier, entry, None, None) {
+            if let Some(plan) = technique_plan(
+                outgoing,
+                incoming,
+                tier,
+                entry,
+                None,
+                None,
+                phrase_bars,
+            ) {
                 return plan;
             }
         }
@@ -278,6 +297,7 @@ pub(super) fn plan_from(
             } else {
                 last_strong_downbeat(outgoing, mix_end)
             },
+            phrase_bars,
         ) {
             return plan;
         }

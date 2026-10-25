@@ -226,6 +226,13 @@ extension PlaybackController {
         engine.setAutomixPerformance(mode: valid)
     }
 
+    func setAutomixPhraseBars(_ bars: Int) {
+        let valid = bars == 8 || bars == 16 ? bars : 0
+        automixPhraseBars = valid
+        PlatformSettings.shared.putInt(key: "automix_phrase_bars", value: Int32(valid))
+        engine.setAutomixPhraseBars(bars: UInt32(valid))
+    }
+
     func setSmartVersionAlignment(_ enabled: Bool) {
         smartVersionAlignment = enabled
         PlatformSettings.shared.putBoolean(key: "smart_version_alignment", value: enabled)

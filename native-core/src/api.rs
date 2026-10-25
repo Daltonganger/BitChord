@@ -39,6 +39,7 @@ pub(super) fn info_to_rec(info: TrackInfo) -> TrackInfoRec {
     }
 }
 
+#[cfg(test)]
 pub(super) fn plan_automix_impl_with_tier(
     outgoing: &str,
     incoming: &str,
@@ -53,12 +54,44 @@ pub(super) fn plan_automix_impl_with_tier(
     tier: AutomixTier,
     allow_effects: bool,
 ) -> TransitionPlanRec {
+    plan_automix_impl_with_tier_and_phrase_bars(
+        outgoing,
+        incoming,
+        outgoing_text,
+        incoming_text,
+        album_sequential,
+        crossfade_seconds,
+        outgoing_duration_seconds,
+        incoming_duration_seconds,
+        outgoing_headers,
+        incoming_headers,
+        tier,
+        allow_effects,
+        0,
+    )
+}
+
+pub(super) fn plan_automix_impl_with_tier_and_phrase_bars(
+    outgoing: &str,
+    incoming: &str,
+    outgoing_text: &str,
+    incoming_text: &str,
+    album_sequential: bool,
+    crossfade_seconds: f64,
+    outgoing_duration_seconds: f64,
+    incoming_duration_seconds: f64,
+    outgoing_headers: &std::collections::HashMap<String, String>,
+    incoming_headers: &std::collections::HashMap<String, String>,
+    tier: AutomixTier,
+    allow_effects: bool,
+    phrase_bars: u32,
+) -> TransitionPlanRec {
     let skip_vocals = !tier.runs_vocal_model();
     let empty_headers = std::collections::HashMap::new();
     if skip_vocals {
         log::info!("automix: EFFICIENT tier — beat grid + energy, vocal model skipped");
     }
-    let plan = crate::analyzer::plan_pair(
+    let plan = crate::analyzer::plan_pair_with_phrase_bars(
         outgoing,
         incoming,
         outgoing_text,
@@ -70,6 +103,7 @@ pub(super) fn plan_automix_impl_with_tier(
         skip_vocals,
         tier.name(),
         allow_effects,
+        phrase_bars,
         |path, start, dur, mono| {
             let headers = if path == outgoing {
                 outgoing_headers

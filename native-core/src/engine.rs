@@ -2,7 +2,8 @@
 
 use crate::analyzer::BeatSpectrogram;
 use crate::api::{
-    decode_region_impl, decode_region_impl_with_headers, info_to_rec, plan_automix_impl_with_tier,
+    decode_region_impl, decode_region_impl_with_headers, info_to_rec,
+    plan_automix_impl_with_tier_and_phrase_bars,
     to_track_source,
 };
 use crate::callback::{CallbackHolder, EngineCallback, SharedEvents};
@@ -90,6 +91,8 @@ pub struct PlayerEngine {
     /// Automix analysis tier (EFFICIENT / BALANCED / PERFORMANCE). Read when
     /// a plan is computed; no rebuild involved.
     pub(super) automix_tier: Arc<Mutex<AutomixTier>>,
+    /// Requested effect phrase length (0 = adaptive); read when a plan is computed.
+    pub(super) automix_phrase_bars: Arc<Mutex<u32>>,
     /// The output control built at `start`, retained so later setting changes
     /// (PCM mode, route preference) can ask for the same rebuild a route
     /// change gets.
@@ -138,6 +141,7 @@ impl PlayerEngine {
             prefer_usb: Arc::new(AtomicBool::new(false)),
             loudness_enabled: Arc::new(AtomicBool::new(false)),
             automix_tier: Arc::new(Mutex::new(AutomixTier::Balanced)),
+            automix_phrase_bars: Arc::new(Mutex::new(0)),
             control: Mutex::new(None),
         })
     }
@@ -905,6 +909,12 @@ impl PlayerEngine {
         *self.automix_tier.lock().unwrap() = AutomixTier::parse(&mode);
     }
 
+    /// Set the fixed effect phrase length (0 = adaptive, 8 or 16 bars).
+    pub fn set_automix_phrase_bars(&self, bars: u32) {
+        *self.automix_phrase_bars.lock().unwrap() =
+            if matches!(bars, 8 | 16) { bars } else { 0 };
+    }
+
     pub fn nerd_stats(&self) -> NerdStatsRec {
         let snap = self.nerd.lock().unwrap().clone();
         NerdStatsRec {
@@ -1000,9 +1010,10 @@ impl PlayerEngine {
         allow_effects: bool,
     ) -> TransitionPlanRec {
         let tier = *self.automix_tier.lock().unwrap();
+        let phrase_bars = *self.automix_phrase_bars.lock().unwrap();
         let outgoing_headers = outgoing_headers.unwrap_or_default();
         let incoming_headers = incoming_headers.unwrap_or_default();
-        plan_automix_impl_with_tier(
+        plan_automix_impl_with_tier_and_phrase_bars(
             &outgoing_path,
             &incoming_path,
             &outgoing_text,
@@ -1015,7 +1026,25 @@ impl PlayerEngine {
             &incoming_headers,
             tier,
             allow_effects,
+            phrase_bars,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlayerEngine;
+
+    #[test]
+    fn phrase_bars_setting_accepts_supported_values_and_defaults_invalid_to_adaptive() {
+        let engine = PlayerEngine::new();
+        assert_eq!(*engine.automix_phrase_bars.lock().unwrap(), 0);
+        engine.set_automix_phrase_bars(8);
+        assert_eq!(*engine.automix_phrase_bars.lock().unwrap(), 8);
+        engine.set_automix_phrase_bars(16);
+        assert_eq!(*engine.automix_phrase_bars.lock().unwrap(), 16);
+        engine.set_automix_phrase_bars(12);
+        assert_eq!(*engine.automix_phrase_bars.lock().unwrap(), 0);
     }
 }
 

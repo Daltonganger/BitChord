@@ -400,6 +400,11 @@ final class PlaybackController {
     /// PERFORMANCE). EFFICIENT skips the vocal model; the 1 / 2 / 4 thread
     /// counts are upstream's ORT numbers, reported for the analysis path.
     var automixPerformanceMode = PlatformSettings.shared.getString(key: "automix_performance", default: "BALANCED")
+    /// Fixed effect phrase length in bars; zero keeps the analyzer's adaptive windows.
+    var automixPhraseBars: Int = {
+        let stored = Int(PlatformSettings.shared.getInt(key: "automix_phrase_bars", default: 0))
+        return stored == 8 || stored == 16 ? stored : 0
+    }()
     /// Whether a manual version switch keeps the playback position.
     /// Upstream aligns the matching moment by waveform; this port has no
     /// analyser, so "aligned" means resuming where the listener was. Off
@@ -696,6 +701,9 @@ final class PlaybackController {
                 eng.setAutomixPerformance(
                     mode: PlatformSettings.shared.getString(key: "automix_performance", default: "BALANCED")
                 )
+                let storedPhraseBars = PlatformSettings.shared.getInt(key: "automix_phrase_bars", default: 0)
+                let phraseBars = storedPhraseBars == 8 || storedPhraseBars == 16 ? storedPhraseBars : 0
+                eng.setAutomixPhraseBars(bars: UInt32(phraseBars))
                 try eng.start(
                     rate: format?.rate,
                     channels: format?.channels
