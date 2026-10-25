@@ -156,7 +156,9 @@ fn after_song_hold_rejects_late_successors() {
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
         .is_none());
-    drain_frames(&mut harness.consumer, &harness.buffered, 44100 * 8);
+    // The 8 s fixture plus the limiter's look-ahead, which drains after it.
+    let lookahead = crate::sound::Protector::new(44100).delay_frames();
+    drain_frames(&mut harness.consumer, &harness.buffered, 44100 * 8 + lookahead);
     std::thread::sleep(Duration::from_millis(20));
     assert!(harness.events.handoffs.lock().unwrap().is_empty());
     assert_eq!(harness.events.ended.lock().unwrap().len(), 1);

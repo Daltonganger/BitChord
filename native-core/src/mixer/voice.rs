@@ -256,6 +256,7 @@ impl Voice {
             applied_normalization_db: normalization_gain(self, normalization)
                 .1
                 .map(|db| db as f64),
+            true_peak_dbtp: self.measured_loudness.as_ref().and_then(|m| m.true_peak_dbtp),
         }
     }
 

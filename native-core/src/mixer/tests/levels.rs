@@ -3,20 +3,29 @@
 use super::*;
 
 #[test]
-fn a_transition_matches_like_with_like_and_clamps_at_six_db() {
+fn a_transition_matches_like_with_like_and_clamps() {
     let loud = deck(Some(-14.0), None, None);
     let quiet = deck(Some(-20.0), None, None);
-    // Six LU apart: the incoming deck is boosted by six.
+    // Six LU apart: a quieter incoming deck is boosted, but only by the
+    // boost ceiling — turning a streamed master up is turning it into the
+    // limiter.
     let db = DeckLoudness::match_gain_db(quiet, loud).unwrap();
-    assert!((db - 6.0).abs() < 1e-9, "{db}");
-    // And the other way round it attenuates.
+    assert!((db - MAX_TRANSITION_BOOST_DB).abs() < 1e-9, "{db}");
+    // And the other way round it attenuates by the full difference.
     let db = DeckLoudness::match_gain_db(loud, quiet).unwrap();
     assert!((db + 6.0).abs() < 1e-9, "{db}");
-    // A twelve-LU difference is clamped: a transition corrects a level, it
-    // does not re-master a track.
-    let very_quiet = deck(Some(-26.0), None, None);
-    let db = DeckLoudness::match_gain_db(very_quiet, loud).unwrap();
-    assert!((db - MAX_TRANSITION_MATCH_DB).abs() < 1e-9, "{db}");
+    // A twelve-LU cut is clamped: a transition corrects a level, it does not
+    // re-master a track.
+    let very_loud = deck(Some(-8.0), None, None);
+    let db = DeckLoudness::match_gain_db(very_loud, quiet).unwrap();
+    assert!((db + MAX_TRANSITION_MATCH_DB).abs() < 1e-9, "{db}");
+    // A measured true peak bounds the boost further: a deck already peaking at
+    // -0.5 dBTP has no room under the -1 dBTP ceiling.
+    let hot = DeckLoudness { true_peak_dbtp: Some(-0.5), ..quiet };
+    assert_eq!(DeckLoudness::match_gain_db(hot, loud), Some(0.0));
+    let roomy = DeckLoudness { true_peak_dbtp: Some(-2.5), ..quiet };
+    let db = DeckLoudness::match_gain_db(roomy, loud).unwrap();
+    assert!((db - 1.5).abs() < 1e-9, "{db}");
 
     // Relative figures use the player's own convention: positive is louder,
     // because `loudness_gain` attenuates by `-db`. A deck marked 6 dB louder
@@ -26,7 +35,7 @@ fn a_transition_matches_like_with_like_and_clamps_at_six_db() {
     let db = DeckLoudness::match_gain_db(louder, reference).unwrap();
     assert!((db + 6.0).abs() < 1e-9, "louder incoming got {db:+}");
     let db = DeckLoudness::match_gain_db(reference, louder).unwrap();
-    assert!((db - 6.0).abs() < 1e-9, "quieter incoming got {db:+}");
+    assert!((db - MAX_TRANSITION_BOOST_DB).abs() < 1e-9, "quieter incoming got {db:+}");
 
     // An absolute figure and a relative one are not comparable.
     let mixed = deck(None, Some(3.0), None);
@@ -51,15 +60,16 @@ fn normalization_that_already_matched_the_decks_is_not_applied_twice() {
     // the difference the transition has to make up.
     let loud_off = deck(Some(-20.0), None, None);
     let quiet_off = deck(Some(-26.0), None, None);
-    let db = DeckLoudness::match_gain_db(quiet_off, loud_off).unwrap();
-    assert!((db - 6.0).abs() < 1e-9, "{db}");
+    let db = DeckLoudness::match_gain_db(loud_off, quiet_off).unwrap();
+    assert!((db + 6.0).abs() < 1e-9, "{db}");
 
     // A relative deck under normalization keeps whatever the attenuation
-    // could not reach: boosting is refused, so the residual is the match.
+    // could not reach: boosting is refused, so the residual is the match —
+    // up to the transition's own boost ceiling.
     let quiet_relative = deck(None, Some(-6.0), None);
     let reference = deck(None, Some(0.0), Some(0.0));
     let db = DeckLoudness::match_gain_db(quiet_relative, reference).unwrap();
-    assert!((db - 6.0).abs() < 1e-9, "{db}");
+    assert!((db - MAX_TRANSITION_BOOST_DB).abs() < 1e-9, "{db}");
 }
 
 /// The production path, end to end: the playing deck gets its measurement
@@ -135,7 +145,7 @@ fn the_queue_path_matches_a_measured_deck_to_a_relative_one() {
     // The queued deck is opened by the arming path and has only the player's
     // relative figure.
     tx.send(Command::QueueNext {
-        request: source(&quiet, -6.0),
+        request: source(&quiet, 6.0),
     })
     .unwrap();
 
@@ -189,29 +199,30 @@ fn the_queue_path_matches_a_measured_deck_to_a_relative_one() {
 
     assert_eq!(
         armed,
-        Some(6.0),
+        Some(-6.0),
         "a measured outgoing deck and a relative incoming one declined to match"
     );
 }
 
 #[test]
 fn the_voice_path_matches_a_six_lu_blend_and_releases() {
+    // Quiet into loud: the louder incoming is cut by six.
     let (loud, quiet) = levels();
-    let mut outgoing = open_voice(&loud);
-    let mut incoming = open_voice(&quiet);
-    outgoing.measured_loudness = Some(measured(-14.0));
-    incoming.measured_loudness = Some(measured(-20.0));
+    let mut outgoing = open_voice(&quiet);
+    let mut incoming = open_voice(&loud);
+    outgoing.measured_loudness = Some(measured(-20.0));
+    incoming.measured_loudness = Some(measured(-14.0));
 
     incoming.arm_transition_match(Some(&outgoing), false);
     assert!(
-        (incoming.match_db - 6.0).abs() < 1e-6,
+        (incoming.match_db + 6.0).abs() < 1e-6,
         "armed {}",
         incoming.match_db
     );
     // G: the correction is in place at arm, before the incoming is audible.
     // A ramp here is the owner's "blasts, then corrects" complaint.
     assert!(
-        (incoming.smoothed_match - db_to_gain(6.0) as f32).abs() < 1e-6,
+        (incoming.smoothed_match - db_to_gain(-6.0) as f32).abs() < 1e-6,
         "the match was not in place at arm: {}",
         incoming.smoothed_match
     );
@@ -221,8 +232,8 @@ fn the_voice_path_matches_a_six_lu_blend_and_releases() {
     assert!(spread < 1.0, "level moved {spread:.2} dB across the blend");
     assert!(peak <= 1.0, "peak {peak} clipped");
     assert!(
-        incoming.smoothed_match > 1.9,
-        "the ramp did not arrive: {}",
+        incoming.smoothed_match < 0.55,
+        "the cut did not hold: {}",
         incoming.smoothed_match
     );
 
@@ -235,13 +246,13 @@ fn the_voice_path_matches_a_six_lu_blend_and_releases() {
         let mut out = vec![0.0f32; frames.len()];
         incoming.mix_into(&frames, &mut out, 1.0, false);
         assert!(
-            incoming.smoothed_match <= previous + 1e-6,
-            "release went back up: {} > {previous}",
+            incoming.smoothed_match >= previous - 1e-6,
+            "release went back down: {} < {previous}",
             incoming.smoothed_match
         );
         previous = incoming.smoothed_match;
     }
-    assert!(previous < 1.5, "release stalled at {}", previous);
+    assert!(previous > 0.7, "release stalled at {}", previous);
 }
 
 #[test]

@@ -127,21 +127,23 @@ fn a_transition_match_is_settled_before_the_first_audible_frame() {
     let quiet = dir.join("quiet.wav");
     noise_wav(&loud, 0.0, 6.0, 0.5, 0x51DC_1A2B);
     noise_wav(&quiet, 0.0, 6.0, 0.5, 0x77EE_3C4D);
+    // The incoming is the louder deck: a match cuts it, and a cut is where
+    // the "blasts, then corrects" shape was heard.
     let mut outgoing_source = transition_source(&loud);
-    outgoing_source.loudness_db = Some(-2.0);
+    outgoing_source.loudness_db = Some(-8.0);
     let mut incoming_source = transition_source(&quiet);
-    incoming_source.loudness_db = Some(-8.0);
+    incoming_source.loudness_db = Some(-2.0);
     let outgoing =
         Voice::open(&outgoing_source, false, 0.0, 48_000, 1.0, false, false).unwrap();
     let mut incoming =
         Voice::open(&incoming_source, false, 0.0, 48_000, 1.0, false, false).unwrap();
     incoming.arm_transition_match(Some(&outgoing), false);
     assert!(
-        (incoming.match_db - 6.0).abs() < 1e-6,
-        "expected a +6 dB match, got {}",
+        (incoming.match_db + 6.0).abs() < 1e-6,
+        "expected a -6 dB match, got {}",
         incoming.match_db
     );
-    let target = db_to_gain(6.0) as f32;
+    let target = db_to_gain(-6.0) as f32;
     assert!(
         (incoming.smoothed_match - target).abs() < 1e-6,
         "the match is set at arm, not ramped at the fade: {} vs {target}",
