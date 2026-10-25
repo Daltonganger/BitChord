@@ -86,19 +86,43 @@ for (origin, hasQueue, stopped, audible, expected) in [
 ] {
     check(PlaybackQueuePolicy.heroState(origin: origin, listID: "list", hasQueue: hasQueue, stopped: stopped, playingOrBuffering: audible) == expected, "Hero reflects playing/buffering, pause, stopped and different-list state")
 }
+let initialContextWindow = PlaybackQueueWindow.initialRange(count: 100, selectedIndex: 40)
+check(initialContextWindow == 39..<66, "Detail playback starts with one previous, current, and 25 upcoming entries")
+check(PlaybackQueueWindow.initialRange(count: 100, selectedIndex: 0) == 0..<26, "First detail track still materializes 25 upcoming entries")
+check(PlaybackQueueWindow.appendCount(upcomingCount: 13, canonicalRemaining: 100) == 0, "Context window waits above the 12-entry low water")
+check(PlaybackQueueWindow.appendCount(upcomingCount: 12, canonicalRemaining: 100) == 13, "Context window tops back up to 25 at low water")
+check(PlaybackQueueWindow.appendCount(upcomingCount: 12, canonicalRemaining: 3) == 3, "Context window drains the canonical page before continuation")
+check(PlaybackQueueWindow.shouldFetchContinuation(upcomingCount: 12, canonicalRemaining: 0, hasContinuation: true), "Playback requests continuation only after canonical songs run out at low water")
+check(!PlaybackQueueWindow.shouldFetchContinuation(upcomingCount: 13, canonicalRemaining: 0, hasContinuation: true), "Playback does not fetch continuation above low water")
 let defaults = UserDefaults.standard
 let previousSnapshot = defaults.object(forKey: "bitchord_last_played")
 defer {
     if let previousSnapshot { defaults.set(previousSnapshot, forKey: "bitchord_last_played") }
     else { defaults.removeObject(forKey: "bitchord_last_played") }
 }
-LastPlayed.save(tracks: ordered, index: 1, position: 42, repeatMode: .one, shuffleEnabled: true, volume: 0.8, contextID: "list", contextTitle: "Album")
+var contextVideo = track("context-video", order: 1)
+contextVideo.isVideo = true
+LastPlayed.save(
+    tracks: ordered, index: 1, position: 42, repeatMode: .one, shuffleEnabled: true,
+    volume: 0.8, contextID: "list", contextTitle: "Album",
+    contextEntries: [track("context-a", order: 0), contextVideo],
+    orderedContextEntries: [contextVideo, track("context-a", order: 0)],
+    contextContinuation: "next-page", contextCursor: 1, contextBaseIndex: 2
+)
 let restored = LastPlayed.load()!
 check(restored.contextID == "list" && restored.contextTitle == "Album", "Origin is saved atomically with the queue")
 check(restored.tracks == ordered && restored.index == 1 && restored.position == 42 && restored.shuffleEnabled, "Order, provenance and playback state survive restore")
+check(restored.contextEntries.map(\.id) == ["context-a", "context-video"] && restored.orderedContextEntries.map(\.id) == ["context-video", "context-a"], "Canonical and playback-ordered context survive restore")
+check(restored.contextEntries.last?.isVideo == true, "Video metadata survives context restore")
+check(restored.contextContinuation == "next-page" && restored.contextCursor == 1 && restored.contextBaseIndex == 2, "Continuation and rolling window cursors survive restore")
 var old = try JSONSerialization.jsonObject(with: defaults.data(forKey: "bitchord_last_played")!) as! [String: Any]
 old.removeValue(forKey: "contextID")
 old.removeValue(forKey: "contextTitle")
+old.removeValue(forKey: "contextEntries")
+old.removeValue(forKey: "orderedContextEntries")
+old.removeValue(forKey: "contextContinuation")
+old.removeValue(forKey: "contextCursor")
+old.removeValue(forKey: "contextBaseIndex")
 old["tracks"] = (old["tracks"] as! [[String: Any]]).map { track in
     var track = track; track.removeValue(forKey: "contextOrder"); return track
 }
