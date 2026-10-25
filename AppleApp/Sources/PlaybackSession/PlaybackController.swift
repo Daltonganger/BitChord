@@ -3127,8 +3127,7 @@ final class PlaybackController {
     }
 
     /// A streamed download is finished once `.complete` lands, or when it was
-    /// never a stream. `.grow` without `.complete` means bytes are still arriving
-    /// and a plan made now is only as good as the audio on disk.
+    /// never a stream. `.grow` without `.complete` means more analysis may help.
     private nonisolated static func fileSettled(_ path: String) -> Bool {
         let files = FileManager.default
         if files.fileExists(atPath: path + ".complete") { return true }
@@ -3252,9 +3251,11 @@ final class PlaybackController {
                     outgoingHoldSeconds: 0,
                     transitionEndSeconds: 0, cueSeconds: 0, playbackRate: 1,
                     bedFraction: 0, bedGainDb: 0, dipDepth: 0, dipWidth: 0,
-                    postGlideSeconds: 0, outgoingDurationSeconds: outgoingDuration
+                    postGlideSeconds: 0, outgoingDurationSeconds: outgoingDuration,
+                    reason: "safety:"
                 ) : nil
-                let safetyPlan = initialSafetyPlan.map { constrainAutomixPlanForSources(plan: $0, outgoingSource: currentSource, incomingSource: resolved.source, outgoingDuration: outgoingDuration, incomingDuration: incomingDuration) }
+                let safetyPlan = initialSafetyPlan
+                    .map { constrainAutomixPlanForSources(plan: $0, outgoingSource: currentSource, incomingSource: resolved.source, outgoingDuration: outgoingDuration, incomingDuration: incomingDuration) }
                 guard try gate.performIfCurrent(generation: generation, revision: revision, {
                     try engine.queueNextIfCurrent(request: LoadRequest(
                     source: resolved.source, title: next.title, artist: next.artist,
@@ -3280,10 +3281,11 @@ final class PlaybackController {
                 }
                 guard automix, !currentSource.isEmpty else { return }
                 let fade = Double(PlatformSettings.shared.getInt(key: "crossfade_seconds", default: 0))
-                // Plan from whatever is already downloaded, then again as the
-                // files grow. Waiting for both downloads to finish is what put
-                // the real blend at the last second of the song.
-                for attempt in 0..<12 {
+                // ResolveSource returns when the progressive intro is on disk.
+                // Analyze it now against the queued safety overlap, then refresh
+                // the plan as more of either file arrives while the mixer is arming.
+                var attempt = 0
+                while true {
                     let stillPlanning = await MainActor.run { [weak self] in
                         guard let self else { return false }
                         return self.playGeneration == generation
@@ -3342,8 +3344,11 @@ final class PlaybackController {
                         incomingHeaders: resolved.headers,
                         allowEffects: self.pacing.allowsEffect(for: transitionPair)
                     )
-                    let plan = constrainAutomixPlanForSources(plan: rawPlan, outgoingSource: currentSource, incomingSource: resolved.source, outgoingDuration: outgoingDuration, incomingDuration: incomingDuration)
-                    guard try gate.performIfCurrent(generation: generation, revision: revision, {
+                    let plan = constrainAutomixPlanForSources(
+                        plan: rawPlan, outgoingSource: currentSource, incomingSource: resolved.source,
+                        outgoingDuration: outgoingDuration, incomingDuration: incomingDuration
+                    )
+                    let queued = try gate.performIfCurrent(generation: generation, revision: revision, {
                         self.pacing.note(plan.style, for: transitionPair)
                         return try engine.queueNextIfCurrent(request: LoadRequest(
                             source: resolved.source,
@@ -3361,33 +3366,47 @@ final class PlaybackController {
                             // a cut. We already know the length.
                             durationSeconds: declaredDuration
                         ), expectedSource: expectedSource)
-                    }) != nil else { return }
-                    NSLog(
-                        "[BitChord] automix plan %d for %@%@: %@, cue %.2fs, fade %.2fs, end %.1fs — %@",
-                        attempt, next.title, selfMix ? " (self-mix)" : "",
-                        String(describing: plan.style),
-                        plan.cueSeconds, plan.fadeSeconds, plan.transitionEndSeconds,
-                        plan.reason
-                    )
-                    // The transition log Automix never had: which technique each
-                    // pair got and why, persisted with the rest of the playback
-                    // record so "it only ever fades" can be counted, not argued.
-                    PlaybackDebugLog.shared.record(
-                        "automix \(Self.tierName(plan)) [plan \(attempt)] → \(next.title): "
-                            + String(format: "cue %.1fs, window %.1fs, end %.1fs. ", plan.cueSeconds, plan.fadeSeconds, plan.transitionEndSeconds)
-                            + (plan.reason.isEmpty ? "no reason given" : plan.reason),
-                        about: nextId
-                    )
-                    await MainActor.run { [weak self] in
-                        guard let self, self.queueNextRevision == revision else { return }
-                        self.adoptAutomixPlan(plan)
+                    }) != nil
+                    guard queued else { return }
+                    // This synchronous query is ordered after QueueNext on the
+                    // mixer command channel, so it confirms the analyzed plan
+                    // reached the engine before this race is considered won.
+                    let delivered = engine.pendingTrack()?.source == resolved.source
+                    if delivered {
+                        let shown = Self.displayAutomixReason(plan.reason)
+                        NSLog(
+                            "[BitChord] automix plan %d for %@%@: %@, cue %.2fs, fade %.2fs, end %.1fs — %@",
+                            attempt, next.title, selfMix ? " (self-mix)" : "",
+                            String(describing: plan.style),
+                            plan.cueSeconds, plan.fadeSeconds, plan.transitionEndSeconds,
+                            shown
+                        )
+                        // The transition log Automix never had: which technique each
+                        // pair got and why, persisted with the rest of the playback
+                        // record so "it only ever fades" can be counted, not argued.
+                        PlaybackDebugLog.shared.record(
+                            "automix \(Self.tierName(plan)) [plan \(attempt)] → \(next.title): "
+                                + String(format: "cue %.1fs, window %.1fs, end %.1fs. ", plan.cueSeconds, plan.fadeSeconds, plan.transitionEndSeconds)
+                                + (shown.isEmpty ? "no reason given" : shown),
+                            about: nextId
+                        )
+                        await MainActor.run { [weak self] in
+                            guard let self, self.queueNextRevision == revision else { return }
+                            self.adoptAutomixPlan(plan)
+                        }
                     }
+                    // Replan after delivery too: the incoming/outgoing windows
+                    // gain useful audio as progressive files grow. The mixer
+                    // applies each replacement only while Arming; the file and
+                    // tail guards below end this loop once further evidence is
+                    // unavailable or the safety fade is about to start.
                     let settled = Self.fileSettled(currentSource) && Self.fileSettled(resolved.source)
                     if settled { return }
                     let position = engine.positionSeconds()
                     let remaining = outgoingDuration - position
                     let lead = max(plan.fadeSeconds, safetyFade) + 8
                     if outgoingDuration > 0, remaining < lead { return }
+                    attempt += 1
                     try await Task.sleep(nanoseconds: 2_000_000_000)
                 }
             } catch {
@@ -4951,7 +4970,8 @@ final class PlaybackController {
             ? String(format: " @%.3fx", plan.playbackRate)
             : ""
         analysisTier = Self.tierName(plan) + rateNote
-        transitionReason = plan.reason.isEmpty ? nil : plan.reason
+        let visibleReason = Self.displayAutomixReason(plan.reason)
+        transitionReason = visibleReason.isEmpty ? nil : visibleReason
         let sources = lastAutomixAnalysisSources()
         if sources.count >= 2 {
             analysisSources = "\(sources[0]) → \(sources[1])"
@@ -4962,6 +4982,11 @@ final class PlaybackController {
         }
         automixCueSeconds = plan.cueSeconds
         publishSmartWindow()
+    }
+
+    nonisolated private static func displayAutomixReason(_ reason: String) -> String {
+        guard reason.hasPrefix("safety:") else { return reason }
+        return String(reason.dropFirst("safety:".count)).trimmingCharacters(in: .whitespaces)
     }
 
     private func publishSmartWindow() {

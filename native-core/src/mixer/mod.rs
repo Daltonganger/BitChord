@@ -30,6 +30,22 @@ use crate::transition_filter::TransitionFilter;
 
 mod fx;
 
+const AUTOMIX_SAFETY_PREFIX: &str = "safety:";
+
+fn automix_plan_winner(plan: &TransitionPlan) -> Option<&'static str> {
+    if plan.reason.starts_with(AUTOMIX_SAFETY_PREFIX) {
+        Some("safety")
+    } else if plan.fade_seconds > 0.0 || !plan.reason.is_empty() {
+        Some("analyzed")
+    } else {
+        None
+    }
+}
+
+fn accepts_analyzed_plan(phase: Phase, swap: bool) -> bool {
+    phase == Phase::Arming && !swap
+}
+
 /// How long a technique's window is at `beat_seconds`, for the planner.
 pub fn technique_window_seconds(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
     fx::window_seconds(style, beat_seconds)
@@ -2540,7 +2556,7 @@ impl MixerState {
         let still_waiting = self
             .transition
             .as_ref()
-            .is_some_and(|transition| transition.phase == Phase::Arming && !transition.swap);
+            .is_some_and(|transition| accepts_analyzed_plan(transition.phase, transition.swap));
         if !still_waiting {
             log::debug!("queueNext ignored; transition already fading");
             return;
@@ -2892,6 +2908,13 @@ impl MixerState {
             t.phase = Phase::Fading;
             t.handed_off = true;
             t.fx = fx::DeckFx::new(t.plan.style, device_rate, t.plan.beat_seconds);
+            if let Some(winner) = automix_plan_winner(&t.plan) {
+                log::info!(
+                    "automix: plan_won={winner} fade={:.2}s style={:?}",
+                    t.fade_frames as f64 / device_rate as f64,
+                    t.plan.style
+                );
+            }
             let transition_start = (t.plan.transition_end_seconds
                 - t.fade_frames as f64 / device_rate as f64)
                 .max(0.0);
@@ -5570,6 +5593,181 @@ mod tests {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn armed_test_state(
+        outgoing: &std::path::Path,
+        incoming: &std::path::Path,
+        phase: Phase,
+    ) -> MixerState {
+        let source = |path: &std::path::Path, title: &str| TrackSource {
+            source: path.display().to_string(),
+            title: title.into(),
+            artist: String::new(),
+            start_seconds: 0.0,
+            plan: TransitionPlan::default(),
+            headers: std::collections::HashMap::new(),
+            claimed_kbps: 0,
+            loudness_db: None,
+            duration_seconds: 12.0,
+        };
+        let mut current =
+            Voice::open(&source(outgoing, "out"), false, 0.0, 44_100, 1.0, false, false).unwrap();
+        let incoming_voice =
+            Voice::open(&source(incoming, "in"), false, 0.0, 44_100, 1.0, false, false).unwrap();
+        current.gain = 1.0;
+        MixerState {
+            current: Some(current),
+            incoming: Some(incoming_voice),
+            pending_next: None,
+            warned_no_duration: false,
+            transition: Some(TransitionState {
+                phase,
+                fade_frames: 4 * 44_100,
+                handed_off: phase == Phase::Fading,
+                plan: TransitionPlan {
+                    fade_seconds: 4.0,
+                    reason: "safety:".into(),
+                    ..TransitionPlan::default()
+                },
+                arm_deadline: Instant::now() + Duration::from_secs(30),
+                swap: false,
+                fx: None,
+                effect_start_frame: 0,
+                effect_input_gain: None,
+            }),
+            retiring: Vec::new(),
+            playing: true,
+            bit_perfect: false,
+            volume: 1.0,
+            sleep_gain: 1.0,
+            hold_end: false,
+            crossfade_window_s: 4.0,
+            spatial_enabled: false,
+            head_yaw: 0.0,
+            device_rate: 44_100,
+            buffered_frames: Arc::new(AtomicU64::new(0)),
+            position_ms: Arc::new(AtomicU64::new(0)),
+            duration_ms: Arc::new(AtomicU64::new(0)),
+            events: Arc::new(RecordedEvents::default()),
+            state: crate::PlaybackState::Playing,
+            flush_ring: Arc::new(AtomicBool::new(false)),
+            bail_flush: Arc::new(AtomicBool::new(false)),
+            playback_speed: 1.0,
+            skip_silence: false,
+            eq: EqualizerProcessor::new(44_100, 2),
+            sound_mode: SoundMode::Transparent,
+            clarity_tuning: ClarityTuning::default(),
+            clarity: Clarity::new(44_100),
+            protector: Protector::new(44_100),
+            pipeline_tail_frames: 0,
+            output_generation: 0,
+            queue_target_ms: 250,
+            underrun_counter: None,
+            observed_underruns: 0,
+            nerd: Arc::new(Mutex::new(NerdSnapshot::default())),
+            loudness_enabled: false,
+            loudness_mode: LoudnessMode::Off,
+            swap_probe: SwapProbe::default(),
+        }
+    }
+
+    fn analyzed_upgrade(incoming: &std::path::Path) -> TrackSource {
+        TrackSource {
+            source: incoming.display().to_string(),
+            title: "in".into(),
+            artist: String::new(),
+            start_seconds: 1.0,
+            plan: TransitionPlan {
+                style: TransitionStyle::DjBlend,
+                fade_seconds: 6.0,
+                cue_seconds: 1.0,
+                reason: "beat grid and vocal windows".into(),
+                ..TransitionPlan::default()
+            },
+            headers: std::collections::HashMap::new(),
+            claimed_kbps: 0,
+            loudness_db: None,
+            duration_seconds: 12.0,
+        }
+    }
+
+    #[test]
+    fn automix_winner_classifies_safety_and_analyzed_plans() {
+        assert_eq!(
+            automix_plan_winner(&TransitionPlan {
+                fade_seconds: 4.0,
+                reason: "safety:".into(),
+                ..TransitionPlan::default()
+            }),
+            Some("safety")
+        );
+        assert_eq!(
+            automix_plan_winner(&TransitionPlan {
+                fade_seconds: 2.0,
+                reason: "tempo fit".into(),
+                ..TransitionPlan::default()
+            }),
+            Some("analyzed")
+        );
+        assert_eq!(automix_plan_winner(&TransitionPlan::default()), None);
+    }
+
+    #[test]
+    fn analyzed_plan_replaces_safety_plan_only_while_arming() {
+        let dir = std::env::temp_dir()
+            .join(format!("bitchord-am4-upgrade-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let outgoing = dir.join("out.wav");
+        let incoming = dir.join("in.wav");
+        test_wav(&outgoing, 12.0, 440.0);
+        test_wav(&incoming, 12.0, 660.0);
+
+        let mut arming = armed_test_state(&outgoing, &incoming, Phase::Arming);
+        arming.upgrade_armed_plan(analyzed_upgrade(&incoming));
+        let retained = &arming.transition.as_ref().unwrap().plan;
+        assert_eq!(automix_plan_winner(retained), Some("analyzed"));
+        assert_eq!(retained.style, TransitionStyle::DjBlend);
+        assert_eq!(retained.cue_seconds, 1.0);
+
+        let mut fading = armed_test_state(&outgoing, &incoming, Phase::Fading);
+        fading.upgrade_armed_plan(analyzed_upgrade(&incoming));
+        let retained = &fading.transition.as_ref().unwrap().plan;
+        assert_eq!(automix_plan_winner(retained), Some("safety"));
+        assert_eq!(retained.style, TransitionStyle::EqualPower);
+    }
+
+    #[test]
+    fn throttled_intro_fixture_keeps_analyzed_wins_at_or_above_ninety_percent() {
+        const DOWNLOAD_RATE_KIB_PER_SECOND: u64 = 64;
+        const ANALYSIS_TIME_MS: u64 = 350;
+        const FADE_START_MS: u64 = 10_000;
+        const INTRO_KIB: [u64; 10] = [16, 64, 128, 256, 320, 384, 448, 512, 576, 1_024];
+
+        // Fixed download rate and analysis time form a deterministic throttled
+        // arrival fixture. Nine plans reach the mixer during Arming; the tenth
+        // finishes analysis after the safety fade has started.
+        let analyzed_wins = INTRO_KIB
+            .into_iter()
+            .filter(|intro_kib| {
+                let download_ms =
+                    (*intro_kib * 1_000 + DOWNLOAD_RATE_KIB_PER_SECOND - 1)
+                        / DOWNLOAD_RATE_KIB_PER_SECOND;
+                let analysis_ready_ms = download_ms + ANALYSIS_TIME_MS;
+                let phase = if analysis_ready_ms < FADE_START_MS {
+                    Phase::Arming
+                } else {
+                    Phase::Fading
+                };
+                accepts_analyzed_plan(phase, false)
+            })
+            .count();
+        assert_eq!(analyzed_wins, 9);
+        assert!(
+            analyzed_wins * 100 >= INTRO_KIB.len() * 90,
+            "only {analyzed_wins}/{} throttled intros kept the analyzed plan at {DOWNLOAD_RATE_KIB_PER_SECOND} KiB/s with {ANALYSIS_TIME_MS} ms analysis",
+            INTRO_KIB.len()
+        );
     }
 
     /// Clicks on one channel, silence on the other, so a mix can be split back
