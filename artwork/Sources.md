@@ -2,7 +2,7 @@
 
 ## Design assets used
 
-- Original app icon and three screenshots: the user’s Downloads folder, October 1, 2026.
+- Original app icon: the user’s Downloads folder, October 1, 2026. Screenshots: the user’s Downloads folder, October 25, 2026; the profile photo is covered by a plain circle on all three devices.
 - Native Mac window corners and shadows: `Windows/Dark/Window BG (with Sidebar)/Active`, from the installed Apple macOS 27 UI Kit. The original screenshot supplies the window’s interface and controls; only its surrounding black margin is cropped.
 - iPhone frame: Hoverify’s independently drawn iPhone 17 Pro Max, Deep Blue. https://tryhoverify.com/tools/device-frames/iphone-17-pro-max/
 - iPad frame: Hoverify’s independently drawn iPad Pro 11 M5, Space Black, rotated into landscape. https://tryhoverify.com/tools/device-frames/ipad-pro-11-m5/
