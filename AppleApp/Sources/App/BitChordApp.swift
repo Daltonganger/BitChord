@@ -43,15 +43,17 @@ struct BitChordApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                #if os(macOS)
+                // Inside the environment calls below: the toolbar's button and
+                // sheet read the controller, auth and toast models.
+                .background(SettingsDeepLinkOpener())
+                .modifier(MacWindowAccountToolbar())
+                #endif
                 .environment(controller)
                 .environment(appModel)
                 .environment(auth)
                 .environment(toast)
                 .environment(party)
-                #if os(macOS)
-                .background(SettingsDeepLinkOpener())
-                .modifier(MacWindowAccountToolbar())
-                #endif
                 .task {
                     #if DEBUG
                     if ProcessInfo.processInfo.arguments.contains("--verify-queue") {
