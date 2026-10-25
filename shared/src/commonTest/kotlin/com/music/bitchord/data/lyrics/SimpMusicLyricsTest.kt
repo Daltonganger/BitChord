@@ -1,7 +1,9 @@
 package com.music.bitchord.data.lyrics
 
+import com.music.bitchord.data.http.RawHttpText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -158,6 +160,18 @@ class SimpMusicLyricsTest {
     @Test
     fun `a service that says it failed is not an answer`() {
         assertNull(SimpMusicLyrics.parse("""{"type":"error","success":false,"error":"Not Found"}""", 310_000))
+    }
+
+    @Test
+    fun `a third-party access refusal is surfaced as blocked rather than a miss`() {
+        val blocked = assertFailsWith<SimpMusicBlockedException> {
+            SimpMusicLyrics.parseResponse(
+                RawHttpText(403, "{\"reason\":\"This API is only available to SimpMusic clients\"}"),
+                310_000,
+            )
+        }
+        assertEquals("Provider blocks third-party apps", blocked.message)
+        assertNull(SimpMusicLyrics.parseResponse(RawHttpText(404, "not found"), 310_000))
     }
 
     @Test

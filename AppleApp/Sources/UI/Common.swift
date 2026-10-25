@@ -1082,7 +1082,9 @@ enum LyricsSourceNames {
         LyricsSourceCatalog.names()
     }
 
-    static var defaultEnabled: String { defaultOrder.joined(separator: ",") }
+    static var defaultEnabled: String {
+        defaultOrder.filter { $0 != "SIMP_MUSIC" }.joined(separator: ",")
+    }
 
     static func canonical(_ id: String) -> String {
         switch id.trimmingCharacters(in: .whitespaces) {

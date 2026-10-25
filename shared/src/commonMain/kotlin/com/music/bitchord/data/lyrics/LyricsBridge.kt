@@ -32,7 +32,7 @@ object LyricsBridge {
      * What the per-source picker knows about one provider for the current
      * track — upstream's `LyricsProviderState`.
      */
-    enum class LyricsProviderState { NOT_FETCHED, FETCHING, FOUND, NOT_FOUND }
+    enum class LyricsProviderState { NOT_FETCHED, FETCHING, FOUND, NOT_FOUND, BLOCKED }
 
     /** Swift: one provider's state changed. [lines] is non-empty only for FOUND. */
     fun interface SourceStateCallback {
@@ -42,7 +42,8 @@ object LyricsBridge {
     /**
      * [fetchAttributed] plus the provider picker's feed: every enabled source
      * is announced FETCHING when its attempt starts, then FOUND (with its
-     * lines, so a tap can apply them from memory) or NOT_FOUND when it
+     * lines, so a tap can apply them from memory), NOT_FOUND, or BLOCKED when
+     * the provider refuses third-party access
      * settles, and a cancelled race loser returns to NOT_FETCHED. The winner
      * also arrives through [callback], so the lyrics pane and the picker
      * cannot disagree about who won. Both passes of a romanised retry report
@@ -74,7 +75,7 @@ object LyricsBridge {
                 val fresh = lock.withLock {
                     when (state) {
                         LyricsProviderState.FETCHING -> started.add(source.name)
-                        LyricsProviderState.FOUND, LyricsProviderState.NOT_FOUND -> settled.add(source.name)
+                        LyricsProviderState.FOUND, LyricsProviderState.NOT_FOUND, LyricsProviderState.BLOCKED -> settled.add(source.name)
                         LyricsProviderState.NOT_FETCHED -> false
                     }
                 }
@@ -89,6 +90,7 @@ object LyricsBridge {
                         else report(source, LyricsProviderState.NOT_FOUND)
                     },
                     onSourceCancelled = { report(it, LyricsProviderState.NOT_FETCHED) },
+                    onSourceBlocked = { report(it, LyricsProviderState.BLOCKED) },
                 )
             }.getOrElse { null to emptyList() }
             callback.onResult(source?.name.orEmpty(), source?.label.orEmpty(), lines)
@@ -165,6 +167,7 @@ object LyricsBridge {
         onSourceStarted: (suspend (LyricsSource) -> Unit)? = null,
         onSourceResult: (suspend (LyricsSource, LyricsRepository.Result?) -> Unit)? = null,
         onSourceCancelled: (suspend (LyricsSource) -> Unit)? = null,
+        onSourceBlocked: (suspend (LyricsSource) -> Unit)? = null,
     ): Pair<LyricsSource?, List<LyricLineDto>> {
         if (!localPath.isNullOrBlank()) {
             EmbeddedLyrics.forPath(localPath)?.let { return null to it }
@@ -189,6 +192,7 @@ object LyricsBridge {
             onSourceStarted = onSourceStarted,
             onSourceResult = onSourceResult,
             onSourceCancelled = onSourceCancelled,
+            onSourceBlocked = onSourceBlocked,
         )
         if (found != null && found.lines.isNotEmpty()) {
             return found.source to found.lines

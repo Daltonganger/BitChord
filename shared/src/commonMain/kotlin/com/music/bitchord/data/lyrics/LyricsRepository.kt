@@ -89,6 +89,8 @@ object LyricsRepository {
         onSourceResult: (suspend (LyricsSource, Result?) -> Unit)? = null,
         /** Lets callers turn a cancelled race loser back into "not fetched". */
         onSourceCancelled: (suspend (LyricsSource) -> Unit)? = null,
+        /** A provider-wide refusal is not a per-track miss. */
+        onSourceBlocked: (suspend (LyricsSource) -> Unit)? = null,
     ): Result? = coroutineScope {
         val configuredSequence = order.filter { it in sources } +
             LyricsSource.entries.filter { it in sources && it !in order }
@@ -136,6 +138,10 @@ object LyricsRepository {
                 } catch (cancelled: CancellationException) {
                     onSourceCancelled?.invoke(source)
                     throw cancelled
+                } catch (blocked: SimpMusicBlockedException) {
+                    DebugLog.d("${source.name} is blocked for third-party apps")
+                    onSourceBlocked?.invoke(source)
+                    null
                 } catch (e: Exception) {
                     DebugLog.d("${source.name} failed: ${e.message}")
                     onSourceResult?.invoke(source, null)

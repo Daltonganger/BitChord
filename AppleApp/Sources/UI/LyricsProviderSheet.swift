@@ -65,8 +65,13 @@ struct LyricsProviderSheet: View {
         let row = HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(source.label)
-                    .foregroundStyle(state == .notFound ? .secondary : .primary)
-                if isCurrent {
+                    .foregroundStyle(state == .notFound || state == .blocked ? .secondary : .primary)
+                if state == .blocked {
+                    Text("Provider blocks third-party apps")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if isCurrent && state != .blocked {
                     Text("In use")
                         .font(.caption)
                         .foregroundStyle(.tint)
@@ -107,6 +112,10 @@ struct LyricsProviderSheet: View {
             Image(systemName: "xmark.circle")
                 .foregroundStyle(.tertiary)
                 .accessibilityLabel("Nothing found")
+        case .blocked:
+            Image(systemName: "hand.raised.circle")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Provider blocks third-party apps")
         case .notFetched:
             Image(systemName: "circle.dotted")
                 .foregroundStyle(.tertiary)

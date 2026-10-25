@@ -37,7 +37,8 @@ class LyricsSourcesPrefTest {
     private fun adopt(current: Set<LyricsSource>, known: Set<LyricsSource>): Pair<Set<LyricsSource>, Set<LyricsSource>> {
         val everything = LyricsSource.entries.toSet()
         if (known.containsAll(everything)) return current to known
-        return (current + (everything - known)) to everything
+        val newlyEnabled = (everything - known) - LyricsSource.SIMP_MUSIC
+        return (current + newlyEnabled) to everything
     }
 
     private fun names(set: Set<LyricsSource>) = set.map { it.name }.toSet()
@@ -52,13 +53,14 @@ class LyricsSourcesPrefTest {
     }
 
     @Test
-    fun `every current source is reached on a first upgrade`() {
+    fun `every default source except blocked SimpMusic is reached on a first upgrade`() {
         val (enabled, known) = adopt(
             current = setOf(LyricsSource.LRCLIB),
             known = setOf(LyricsSource.LRCLIB),
         )
-        assertEquals(names(LyricsSource.entries.toSet()), names(enabled))
+        assertEquals(names(defaultEnabledLyricsSources()), names(enabled))
         assertEquals(names(LyricsSource.entries.toSet()), names(known))
+        assertFalse(LyricsSource.SIMP_MUSIC in enabled)
     }
 
     @Test
@@ -84,6 +86,23 @@ class LyricsSourcesPrefTest {
         assertEquals(names(decided), names(enabled))
         assertFalse(LyricsSource.PAXSENIX in enabled)
         assertFalse(LyricsSource.BETTER_LYRICS in enabled)
+    }
+
+    @Test
+    fun `an explicit SimpMusic choice survives later source adoption`() {
+        val everything = LyricsSource.entries.toSet()
+        val (enabled, _) = adopt(
+            current = setOf(LyricsSource.LRCLIB, LyricsSource.SIMP_MUSIC),
+            known = everything - LyricsSource.BINI_LYRICS,
+        )
+        assertTrue(LyricsSource.SIMP_MUSIC in enabled)
+        assertTrue(LyricsSource.BINI_LYRICS in enabled)
+    }
+
+    @Test
+    fun `fresh defaults do not enable SimpMusic`() {
+        assertFalse(LyricsSource.SIMP_MUSIC in defaultEnabledLyricsSources())
+        assertTrue(LyricsSource.BINI_LYRICS in defaultEnabledLyricsSources())
     }
 
     @Test
