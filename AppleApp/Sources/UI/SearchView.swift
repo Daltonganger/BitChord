@@ -121,6 +121,8 @@ enum AddonSearchHistory {
 }
 
 struct SearchView: View {
+    /// Upstream `TYPEAHEAD_MAX_RESULTS` in MainViewModel.kt.
+    private static let typeaheadMaxResults = 15
     @Environment(PlaybackController.self) private var controller
     @Environment(AppModel.self) private var appModel
     #if os(macOS)
@@ -853,8 +855,8 @@ struct SearchView: View {
             // field is still being edited, so a half-typed query already answers
             // the question. They sit above the recents — the recents list is long
             // and used to push the answers below the fold, where nobody saw them.
-            // Capped short because a dropdown is not a results page.
-            let media = Array(typeaheadHits.prefix(8))
+            // Capped at 15 because a dropdown is not a results page.
+            let media = Array(typeaheadHits.prefix(Self.typeaheadMaxResults))
             if !media.isEmpty {
                 Section {
                     ForEach(media) { hit in
