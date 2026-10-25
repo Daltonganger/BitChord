@@ -88,6 +88,26 @@ struct WindowLeadingReader: NSViewRepresentable {
     }
 }
 
+// MARK: - Settings window
+
+/// Puts its window's toolbar in the unified style: one titlebar row holding
+/// the traffic lights, the toolbar items and the title. A Settings scene opens
+/// with the preferences style (a title strip over a separate toolbar row) and
+/// does not take the scene-level toolbar style.
+struct UnifiedTitlebar: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { WindowView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class WindowView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            window.toolbarStyle = .unified
+            window.titleVisibility = .visible
+        }
+    }
+}
+
 // MARK: - Full screen
 
 /// Enters or leaves full screen, and draws which: arrows pointing out to go

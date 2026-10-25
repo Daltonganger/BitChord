@@ -118,7 +118,8 @@ struct SettingsView: View {
                 NavigationStack(path: Bindable(settingsHistory).path) {
                     settingsForm
                         .navigationTitle("Settings")
-                        .searchable(text: $search, prompt: "Search settings")
+                        // The titlebar's own search pill at the trailing edge.
+                        .searchable(text: $search, placement: .toolbar, prompt: "Search")
                         .navigationDestination(for: PushRoute.self) { route in
                             route.make().navigationBarBackButtonHidden(true)
                         }
@@ -129,6 +130,7 @@ struct SettingsView: View {
                         MacHistoryButtons(navigator: settingsHistory)
                     }
                 }
+                .background(UnifiedTitlebar())
                 #else
                 NavigationStack {
                     settingsForm
