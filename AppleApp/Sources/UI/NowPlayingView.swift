@@ -171,7 +171,7 @@ struct NowPlayingView: View {
                     .frame(width: 32, height: 32)
                     .glassEffect(.regular.interactive(), in: Circle())
                     .background(WindowLeadingReader { closeLeading in
-                        trailingInset = max(0, closeLeading - Self.titlebarTrailingInset)
+                        trailingInset = max(0, closeLeading - Self.systemTitlebarMargin)
                     })
             }
             .sharedBackgroundVisibility(.hidden)
@@ -224,9 +224,20 @@ struct NowPlayingView: View {
         }
     }
 
-    /// The toolbar's own margin after its last item: the right-hand gap with
-    /// no spacer, measured on macOS 26.
-    private static let titlebarTrailingInset: CGFloat = 18
+    /// The window's own titlebar margin, read from the system: the red
+    /// traffic light's inset from the left edge, which the toolbar also keeps
+    /// after its last item. Full screen hides the traffic lights, so the value
+    /// read in a window is kept for it.
+    @MainActor private static var cachedTitlebarMargin: CGFloat?
+    @MainActor private static var systemTitlebarMargin: CGFloat {
+        if let button = MacFullScreenButton.playerWindow?.standardWindowButton(.closeButton),
+           !button.isHidden, button.window?.styleMask.contains(.fullScreen) == false {
+            let margin = button.convert(button.bounds, to: nil).minX
+            cachedTitlebarMargin = margin
+            return margin
+        }
+        return cachedTitlebarMargin ?? 0
+    }
 
     private var macCloseButton: some View {
         Button("Close", systemImage: "xmark") {

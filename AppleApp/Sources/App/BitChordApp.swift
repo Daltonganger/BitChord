@@ -274,6 +274,10 @@ struct BitChordApp: App {
                 .preferredColorScheme(appModel.preferredScheme)
                 .environment(\.locale, appModel.appLanguage.isEmpty ? .autoupdatingCurrent : Locale(identifier: appModel.appLanguage))
         }
+        // One unified titlebar row, as System Settings has: the traffic
+        // lights, back and forward, the title and the search field together,
+        // rather than a title strip over a second toolbar row.
+        .windowToolbarStyle(.unified(showsTitle: true))
         #endif
     }
 }
