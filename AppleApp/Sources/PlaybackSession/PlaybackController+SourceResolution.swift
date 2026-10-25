@@ -335,38 +335,105 @@ extension PlaybackController {
                                        "cold", source.clientName ?? "unknown")
                 return ResolveOutcome(source: source, leftover: lookup)
             } catch {
-                lookup.cancel()
-                throw error
+                // The lookup is the first thing to fall back on now, so it is
+                // awaited rather than cancelled.
+                let source = try await recoverRefusedTrack(entry, videoId: videoId, prefs: prefs, lookup: lookup, error: error)
+                await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", source.clientName ?? "recovered")
+                return ResolveOutcome(source: source, leftover: nil)
             }
         case .none:
             // Preserve the resolver's actual failure instead of replacing
             // account/CDN errors with an uninformative "No stream".
-            let source = try await fallback.value
+            let source: ResolvedSource
+            do {
+                source = try await fallback.value
+            } catch {
+                source = try await recoverRefusedTrack(entry, videoId: videoId, prefs: prefs, lookup: lookup, error: error)
+            }
             await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
                                    "cold", source.clientName ?? "unknown")
             return ResolveOutcome(source: source, leftover: nil)
         }
     }
 
+    /// What plays when YouTube refused every way this app has of asking for a
+    /// track: the same recording from another enabled catalogue, or else the
+    /// track's YouTube Music counterpart — the Song/Video pairing YouTube itself
+    /// publishes — when its length agrees with the song's. Only when both miss
+    /// does the original failure stand, and the queue moves on.
+    private static func recoverRefusedTrack(
+        _ entry: QueueEntry, videoId: String, prefs: ResolvePrefs,
+        lookup: Task<QualityUpgrade.Candidate?, Never>, error: Error
+    ) async throws -> ResolvedSource {
+        if let stream = await lookup.value {
+            PlaybackDebugLog.shared.record("YouTube refused; playing the same recording from another catalogue", about: videoId)
+            return ResolvedSource(
+                source: stream.url, headers: stream.headers,
+                kbps: stream.format.kbps ?? 0,
+                lossless: stream.format.lossless, codec: stream.format.codec,
+                durationSec: stream.durationSec,
+                origin: .substitute
+            )
+        }
+        // The counterpart is another YouTube ask, which a bot check refuses too.
+        if !InnertubeStreamResolver.StreamError.isBotCheck(error),
+           let twin = await counterpart(of: entry, videoId: videoId) {
+            do {
+                var source = try await resolveYouTube(videoId: twin, prefs: prefs)
+                source.clientName = "counterpart " + (source.clientName ?? "unknown")
+                PlaybackDebugLog.shared.record("YouTube refused; playing its counterpart \(twin)", about: videoId)
+                return source
+            } catch {
+                PlaybackDebugLog.shared.record("counterpart \(twin) failed too: \(error.localizedDescription)", about: videoId)
+            }
+        }
+        throw error
+    }
+
+    /// YouTube Music's explicit counterpart of [entry], when it runs within three
+    /// seconds of the song: an edit that long or short is not the same audio.
+    private static func counterpart(of entry: QueueEntry, videoId: String) async -> String? {
+        let songSeconds = entry.durationSeconds
+        guard songSeconds > 0 else { return nil }
+        let candidates: [CounterpartCandidate] = await withCheckedContinuation { continuation in
+            VideoVersionBridge.shared.find(
+                videoId: videoId, title: entry.title, artist: entry.artist,
+                durationText: entry.durationText ?? QueueEntry.formatDuration(songSeconds),
+                callback: CounterpartAdapter { json, _ in
+                    continuation.resume(returning: json.flatMap {
+                        try? JSONDecoder().decode([CounterpartCandidate].self, from: Data($0.utf8))
+                    } ?? [])
+                }
+            )
+        }
+        return candidates.first { candidate in
+            guard candidate.source == "counterpart", candidate.videoId != videoId,
+                  let seconds = QueueEntry.seconds(fromDurationText: candidate.durationText) else { return false }
+            return abs(seconds - songSeconds) <= 3
+        }?.videoId
+    }
+
     /// Innertube URL + growing local file, the path that starts playback earliest.
     ///
-    /// ## Why there is no retry loop, and what replaces it
+    /// ## What happens when a URL is refused
     ///
-    /// There used to be one: on a 403, ask for the same URL again. That is the
-    /// worst available response, because the URL is not stale data — a googlevideo
-    /// URL is *bound to the session that minted it*, and re-fetching the same one
-    /// with the same headers is the single most reliable way to talk a session
-    /// into being throttled. It also cannot succeed: the reason the first fetch
-    /// was refused is the same reason the second will be.
+    /// Never the same URL again. A googlevideo URL is *bound to the session that
+    /// minted it*, and re-fetching it with the same headers is the most reliable
+    /// way to talk a session into being throttled; the reason it was refused is
+    /// the reason it would be refused again.
     ///
-    /// What replaces it is a *fresh player request*, which is a different thing:
+    /// Instead the refusal walks a ladder, each rung a different variable:
     ///
-    ///  - The bridge has already reported the refusal to the resolver, which forgot
-    ///    the URL and stood the client that minted it down. So the second attempt
-    ///    asks `player` again and gets a **new URL, usually from a different
-    ///    client** — the variable that actually changed is the one that matters.
-    ///  - It happens **once**. A second refusal means the problem is not this
-    ///    track's URL, and a third attempt would be a session hammering itself.
+    ///  1. **Another client.** The bridge has already told the resolver, which
+    ///     forgot the URL and set aside the client that minted it, so asking
+    ///     `player` again gets a new URL from a different client — up to
+    ///     [clientsPerSession] of them.
+    ///  2. **A fresh session.** When that many clients refuse one track in a row,
+    ///     the session is the likelier culprit (a stale player config, a PoToken
+    ///     bound to an old challenge), so it is rebuilt — new config, cipher and
+    ///     token — the refused clients are forgiven, and the walk runs once more.
+    ///  3. Past this function, the caller falls back to the same recording in
+    ///     another catalogue, then to the track's YouTube Music counterpart.
     ///
     /// A *transport* failure is the opposite case and deliberately does not
     /// re-resolve: the URL was served once, so it is alive, and handing it to the
@@ -376,10 +443,9 @@ extension PlaybackController {
     private static func resolveYouTube(
         videoId: String, prefs: ResolvePrefs
     ) async throws -> ResolvedSource {
-        var stream: ResolvedYouTubeStream
-        do {
-            stream = try await InnertubeStreamResolver.shared.resolve(videoId: videoId, maxKbps: prefs.maxKbps)
-        } catch {
+        var refusedClients: [String] = []
+        var rebuilt = false
+        func record(_ error: Error) {
             // The per-client reasons, which the shared module carries and the
             // sentence a listener sees does not. Recorded here because this is where
             // the debug log lives, and a report that says "playback failed" is worth
@@ -387,7 +453,50 @@ extension PlaybackController {
             if let streamError = error as? InnertubeStreamResolver.StreamError {
                 PlaybackDebugLog.shared.record(streamError.raw, about: videoId)
             }
-            throw error
+        }
+        /// Rung 2: a rebuilt session, asked once.
+        func rebuildAndResolve(after error: Error) async throws -> ResolvedYouTubeStream {
+            // A bot check is the network's verdict; a new session asks again
+            // from the same address and only adds to the suspicion.
+            guard !rebuilt, !InnertubeStreamResolver.StreamError.isBotCheck(error) else { throw error }
+            rebuilt = true
+            PlaybackDebugLog.shared.record(
+                "no client would serve this track (\(refusedClients.isEmpty ? "extraction failed" : refusedClients.joined(separator: ", "))); rebuilding the session and asking again",
+                about: videoId
+            )
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                PlayerBridge.shared.rebuildSession(videoId: videoId, callback: DoneAdapter { done.resume() })
+            }
+            refusedClients.removeAll()
+            do {
+                return try await InnertubeStreamResolver.shared.resolve(videoId: videoId, maxKbps: prefs.maxKbps)
+            } catch {
+                record(error)
+                throw error
+            }
+        }
+        /// The next URL after a refusal: another client, then a rebuilt session.
+        func nextStream() async throws -> ResolvedYouTubeStream {
+            let exhausted = InnertubeStreamResolver.StreamError(
+                message: "Every client refused this track (\(refusedClients.joined(separator: ", ")))"
+            )
+            guard refusedClients.count < Self.clientsPerSession else {
+                return try await rebuildAndResolve(after: exhausted)
+            }
+            do {
+                return try await InnertubeStreamResolver.shared.resolve(videoId: videoId, maxKbps: prefs.maxKbps)
+            } catch {
+                // The catalogue ran out of clients before the budget did.
+                record(error)
+                return try await rebuildAndResolve(after: error)
+            }
+        }
+        var stream: ResolvedYouTubeStream
+        do {
+            stream = try await InnertubeStreamResolver.shared.resolve(videoId: videoId, maxKbps: prefs.maxKbps)
+        } catch {
+            record(error)
+            stream = try await rebuildAndResolve(after: error)
         }
         var resolvedAt = ProcessInfo.processInfo.systemUptime
         var rangeRetry = 0
@@ -423,18 +532,20 @@ extension PlaybackController {
                         origin: .youtube, youtubeVideoId: videoId
                     )
                 }
-                guard rangeRetry < 2 else {
-                    throw InnertubeStreamResolver.StreamError(
-                        message: "Opening media range was rejected after same-client and alternate-client retries: \(reason ?? "unknown response")"
-                    )
-                }
+                refusedClients.append(stream.clientName ?? "unknown")
                 rangeRetry += 1
-                DebugLog.shared.d(message: "\(videoId): opening range rejected; resolving retry \(rangeRetry)")
-                stream = try await InnertubeStreamResolver.shared.resolve(videoId: videoId, maxKbps: prefs.maxKbps)
+                DebugLog.shared.d(message: "\(videoId): \(stream.clientName ?? "a client") refused (\(reason ?? "no reason")); asking another")
+                stream = try await nextStream()
                 resolvedAt = ProcessInfo.processInfo.systemUptime
             }
         }
     }
+
+    /// Clients asked per session before the session itself is rebuilt. Upstream
+    /// asks three and then gives the track up; this asks four, then rebuilds the
+    /// session and asks again, because a burst of refusals is far more often the
+    /// session than the track.
+    private static let clientsPerSession = 4
 
     /// Catalogues ranked above YouTube — first match that is the same recording.
     /// The cross-source race, delegated to the shared resolver.
@@ -655,4 +766,22 @@ extension PlaybackController {
             StreamDownloadBridge.shared.streamToFile(url: url, headers: headers, ready: ready, done: done)
         }
     }
+}
+
+private final class DoneAdapter: PlayerBridgeDoneCallback {
+    private let handler: () -> Void
+    init(_ handler: @escaping () -> Void) { self.handler = handler }
+    func onDone() { handler() }
+}
+
+private struct CounterpartCandidate: Decodable {
+    let videoId: String
+    let durationText: String?
+    let source: String?
+}
+
+private final class CounterpartAdapter: VideoVersionBridgeVideoVersionCallback {
+    private let handler: (String?, String?) -> Void
+    init(_ handler: @escaping (String?, String?) -> Void) { self.handler = handler }
+    func onResult(json: String?, message: String?) { handler(json, message) }
 }

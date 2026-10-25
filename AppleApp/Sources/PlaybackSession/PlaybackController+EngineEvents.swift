@@ -77,8 +77,9 @@ extension PlaybackController {
         // a self-mix: stay on the same queue item. Repeat-all wrap lands on 0.
         if repeatMode == .one {
             // Same song again — count the lap like upstream REASON_REPEAT.
-        } else if playingIndex + 1 < queue.count {
-            playingIndex += 1
+        } else if let next = nextPlayableIndex(after: playingIndex) {
+            // The armed track, which is the next one not stepped over.
+            playingIndex = next
         } else if repeatMode == .all, !queue.isEmpty {
             playingIndex = 0
         } else {
@@ -168,8 +169,9 @@ extension PlaybackController {
             engineLoadedId = nil
             advanceToNext(userInitiated: false)
         case .off:
-            if playingIndex + 1 < queue.count {
-                loadCurrent(playingIndex + 1, refreshAutoplay: false)
+            if let next = nextPlayableIndex(after: playingIndex) {
+                automaticLoadEntryId = queue[next].id
+                loadCurrent(next, refreshAutoplay: false)
                 return
             }
             state = .stopped
@@ -255,13 +257,37 @@ extension PlaybackController {
     /// music video is found and lined up while this track plays).
     var upNextEntry: QueueEntry? { nextEntry }
 
+    /// The first index after [index] whose track has not just failed every way
+    /// of playing it, or nil past the end of the queue.
+    func nextPlayableIndex(after index: Int) -> Int? {
+        let now = Date()
+        return queue.indices.first { $0 > index && (unplayableUntil[queue[$0].id] ?? .distantPast) <= now }
+    }
+
+    /// Steps the queue over [entry] for ten minutes, upstream's window for a
+    /// track that refused every ask. A failure while offline, or behind
+    /// YouTube's bot check, says nothing about the track, so it is not held
+    /// against it.
+    @discardableResult
+    func markUnplayable(_ entry: QueueEntry, after error: Error) -> Bool {
+        let nsError = error as NSError
+        let message = error.localizedDescription
+        guard nsError.domain != NSURLErrorDomain,
+              !InnertubeStreamResolver.StreamError.isBotCheck(error),
+              !message.localizedCaseInsensitiveContains("offline"),
+              !message.localizedCaseInsensitiveContains("network connection") else { return false }
+        unplayableUntil = unplayableUntil.filter { $0.value > Date() }
+        unplayableUntil[entry.id] = Date().addingTimeInterval(600)
+        return true
+    }
+
     var nextEntry: QueueEntry? {
         if repeatMode == .one {
             // Automix: blend the track into itself. Without Automix there is no
             // engine next — EOS reopens the same item.
             return automixEnabled ? current : nil
         }
-        if playingIndex + 1 < queue.count { return queue[playingIndex + 1] }
+        if let next = nextPlayableIndex(after: playingIndex) { return queue[next] }
         // Including a one-item queue: Media3 wrap under REPEAT_ALL points next
         // at the same index, which is how a single track on repeat-all self-mixes.
         if repeatMode == .all, !queue.isEmpty { return queue[0] }

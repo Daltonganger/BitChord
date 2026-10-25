@@ -130,6 +130,11 @@ final class InnertubeStreamResolver: Sendable {
         ///
         /// Same rule as the party screen's `describe`: the server's own words when it
         /// sent any, otherwise a statement of what failed and never the raw error.
+        /// YouTube's "confirm you're not a bot": about the network, not the track.
+        static func isBotCheck(_ error: Error) -> Bool {
+            ((error as? StreamError)?.raw ?? "\(error)").localizedCaseInsensitiveContains("not a bot")
+        }
+
         static func say(_ raw: String) -> String {
             let said = raw.lowercased()
             if said.contains("signed-in playback:") {
@@ -138,7 +143,10 @@ final class InnertubeStreamResolver: Sendable {
             if said.contains("temporarily unavailable") {
                 return "Playback is temporarily unavailable. Try again shortly."
             }
-            if said.contains("sign in") || said.contains("not a bot") {
+            if said.contains("not a bot") {
+                return "YouTube is asking this network to confirm it isn’t a bot, so it won’t serve audio for now. Switching between Wi-Fi and mobile data, or waiting a while, usually clears it."
+            }
+            if said.contains("sign in") {
                 return "YouTube is asking this device to sign in before it will serve anything. That is YouTube's gate rather than anything to do with the track."
             }
             if said.contains("needs to be reloaded") || said.contains("page needs") {

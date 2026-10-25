@@ -230,6 +230,15 @@ final class PlaybackController {
     var holdAfterLoad = false
     /// How often each track has been reloaded after its download failed.
     var failedDownloadResumes: [String: Int] = [:]
+    /// Tracks that failed every way of asking for them, and until when the
+    /// queue steps over them instead of stopping on them.
+    var unplayableUntil: [String: Date] = [:]
+    /// The queue entry this player moved to on its own (a song ended), so a
+    /// failure to load it moves on again rather than stopping the music.
+    var automaticLoadEntryId: String?
+    /// Tracks stepped over in a row; bounded so a dead network does not walk
+    /// the whole queue.
+    var automaticSkips = 0
     /// Recommendations that have had their one Automix ordering pass.
     var settledAutoplayIds: Set<String> = []
     /// The selection whose load is in flight, cleared once it lands or fails.

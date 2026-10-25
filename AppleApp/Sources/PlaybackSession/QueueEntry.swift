@@ -88,12 +88,15 @@ struct QueueEntry: Identifiable, Hashable, Sendable, Codable {
         )
     }
 
-    var durationSeconds: Double {
-        let parts = (durationText ?? "").split(separator: ":").compactMap { Double($0) }
+    var durationSeconds: Double { Self.seconds(fromDurationText: durationText) ?? 0 }
+
+    /// "3:12" or "1:02:03" in seconds; nil for anything else.
+    static func seconds(fromDurationText text: String?) -> Double? {
+        let parts = (text ?? "").split(separator: ":").compactMap { Double($0) }
         switch parts.count {
         case 2: return parts[0] * 60 + parts[1]
         case 3: return parts[0] * 3600 + parts[1] * 60 + parts[2]
-        default: return 0
+        default: return nil
         }
     }
 

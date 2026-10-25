@@ -276,9 +276,10 @@ object StreamDownloadBridge {
                         if (offset == 0L && !readyFired && videoId != null &&
                             (e is InvalidFirstMediaRangeException || (code != null && code in REFUSAL_CODES))) {
                             val status = (e as? InvalidFirstMediaRangeException)?.responseCode ?: code ?: 0
-                            StreamResolver.onFirstRangeRejected(
-                                currentUrl, status, excludeClient = firstRangeRetry > 0
-                            )
+                            // The client that minted a refused URL is set aside at
+                            // once, as upstream does: asking it again spent one of
+                            // the few attempts on the answer it had just given.
+                            StreamResolver.onFirstRangeRejected(currentUrl, status, excludeClient = true)
                             throw e
                         }
                         if (e is InvalidFirstMediaRangeException) throw e

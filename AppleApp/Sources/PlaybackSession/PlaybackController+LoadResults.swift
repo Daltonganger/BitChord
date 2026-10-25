@@ -52,6 +52,8 @@ extension PlaybackController {
         duration = info.durationSeconds
         repairMissingDuration(entry: entry, info: info)
         lastError = nil
+        automaticLoadEntryId = nil
+        automaticSkips = 0
         state = .playing
         persistSession()
         refreshArtwork(entry)
@@ -145,6 +147,22 @@ extension PlaybackController {
         }
         loadingGeneration = nil
         holdAfterLoad = false
+        // A song this player moved to on its own is stepped over, not stopped
+        // on: upstream's skipPastUnplayable, reached here only after the whole
+        // recovery ladder in the resolver has already run.
+        if automaticLoadEntryId == entry.id, state == .buffering, automaticSkips < 3,
+           markUnplayable(entry, after: error),
+           let next = nextPlayableIndex(after: playingIndex) {
+            automaticSkips += 1
+            PlaybackDebugLog.shared.record(
+                "could not play \(entry.title) (\(error.localizedDescription)); moving on to \(queue[next].title)",
+                about: entry.id
+            )
+            automaticLoadEntryId = queue[next].id
+            loadCurrent(next, refreshAutoplay: true)
+            return
+        }
+        automaticLoadEntryId = nil
         lastError = "Couldn't play “\(entry.title)” — \(error.localizedDescription)"
         // Somebody (pause, another load, sleep, interruption) owns the
         // transport now; their state stands and only the message is new.
@@ -451,6 +469,12 @@ extension PlaybackController {
                     guard let self, self.playGeneration == generation,
                           self.queueNextRevision == revision else { return }
                     PlaybackDebugLog.shared.record("next-track preparation failed: \(error.localizedDescription)", about: nextId)
+                    // Found out minutes early, so the track after it is
+                    // prepared in its place and the blend still happens.
+                    if self.markUnplayable(next, after: error) {
+                        PlaybackDebugLog.shared.record("stepping over it; preparing the track after it instead", about: nextId)
+                        self.syncEngineQueueNext()
+                    }
                 }
             }
         }
