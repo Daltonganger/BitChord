@@ -55,15 +55,26 @@ struct LyricsPane: View {
     var trackArtist: String = ""
     var artworkData: Data? = nil
     var artworkUrl: String? = nil
-    /// Lyric lines picked for a share card, at most [maxSharedLines].
+    /// Lyric lines picked for a share card, within [maxSharedCharacters].
     @State private var selection: Set<Int> = []
     @State private var shareImage: Image?
     /// True while the listener is scrolling the list themselves, which stands the
     /// auto-scroll down until they have been still for a moment.
     @State private var reading = false
-    /// A share card is a quote, not a transcript: four lines read as a lyric,
-    /// twenty read as a wall.
-    private let maxSharedLines = 4
+    /// Bound the quote by characters so a short line does not use up the same
+    /// budget as a long one. Count the original text that the card quotes.
+    private let maxSharedCharacters = 250
+
+    private var selectedCharacterCount: Int {
+        selection.reduce(0) { $0 + shareText(at: $1).count }
+    }
+
+    private func shareText(at index: Int) -> String {
+        if let originalLines, originalLines.indices.contains(index) {
+            return originalLines[index].text
+        }
+        return lines.indices.contains(index) ? lines[index].text : ""
+    }
 
     /// The clock the lyrics are judged against, which runs `offsetMs` behind the
     /// transport.
@@ -342,7 +353,7 @@ struct LyricsPane: View {
     /// The quote bar: what has been picked, and the way to share it.
     private var shareBar: some View {
         HStack(spacing: 10) {
-            Text(selection.count == 1 ? "1 line selected" : "\(selection.count) lines selected")
+            Text("\(selectedCharacterCount)/\(maxSharedCharacters) characters")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.white.opacity(0.8))
             Spacer(minLength: 0)
@@ -395,7 +406,8 @@ struct LyricsPane: View {
     private func toggleShareSelection(_ index: Int) {
         if selection.contains(index) {
             selection.remove(index)
-        } else if selection.count < maxSharedLines {
+        } else if lines.indices.contains(index),
+                  selectedCharacterCount + shareText(at: index).count <= maxSharedCharacters {
             selection.insert(index)
         }
         Haptics.play(.select)
@@ -417,9 +429,7 @@ struct LyricsPane: View {
             if previous >= 0, index > previous + 1 {
                 out.append(LyricShareCard.Line(text: "", isGap: true))
             }
-            let original = originalLines?.indices.contains(index) == true
-                ? originalLines![index].text
-                : lines[index].text
+            let original = shareText(at: index)
             let sub = subbed ? subLines?[index].text : nil
             out.append(LyricShareCard.Line(
                 text: original,
