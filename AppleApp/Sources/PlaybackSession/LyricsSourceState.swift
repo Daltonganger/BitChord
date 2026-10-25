@@ -65,6 +65,24 @@ struct DefaultsLyricsChoiceStore: LyricsChoiceStore {
         defaults.set(data, forKey: key)
     }
 
+    /// Combines an already ordered cloud snapshot with the current local one.
+    /// The preferred source wins duplicate IDs; unique tracks from the other
+    /// snapshot follow in its newest-first order before the usual cap applies.
+    @discardableResult
+    func merge(with cloudData: Data?, preferLocal: Bool) -> Data? {
+        let cloudEntries = cloudData.flatMap { try? JSONDecoder().decode([Entry].self, from: $0) } ?? []
+        let localEntries = entries()
+        let orderedEntries = preferLocal
+            ? localEntries + cloudEntries
+            : cloudEntries + localEntries
+        var seen = Set<String>()
+        let merged = orderedEntries.filter { seen.insert($0.track).inserted }
+        let capped = Array(merged.prefix(limit))
+        guard let data = try? JSONEncoder().encode(capped) else { return snapshot }
+        replace(with: data)
+        return data
+    }
+
     private func entries() -> [Entry] {
         guard let data = defaults.data(forKey: key),
               let decoded = try? JSONDecoder().decode([Entry].self, from: data) else { return [] }
@@ -109,21 +127,23 @@ final class UbiquitousLyricsChoiceStore: LyricsChoiceStore, @unchecked Sendable 
     }
 
     func choice(for trackId: String) -> String? {
-        if let data = cloud.object(forKey: key) as? Data {
-            local.replace(with: data)
-        }
+        synchronizeSnapshots(preferLocal: false)
         return local.choice(for: trackId)
     }
 
     func remember(_ source: String, for trackId: String) {
         local.remember(source, for: trackId)
-        guard let data = local.snapshot else { return }
-        cloud.set(data, forKey: key)
-        cloud.synchronize()
+        synchronizeSnapshots(preferLocal: true)
     }
 
     private func refreshLocalFromCloud() {
-        guard let data = cloud.object(forKey: key) as? Data else { return }
-        local.replace(with: data)
+        synchronizeSnapshots(preferLocal: false)
+    }
+
+    private func synchronizeSnapshots(preferLocal: Bool) {
+        let cloudData = cloud.object(forKey: key) as? Data
+        guard let data = local.merge(with: cloudData, preferLocal: preferLocal), data != cloudData else { return }
+        cloud.set(data, forKey: key)
+        cloud.synchronize()
     }
 }

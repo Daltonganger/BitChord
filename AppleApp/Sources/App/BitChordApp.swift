@@ -273,6 +273,7 @@ struct BitChordApp: App {
                 .environment(party)
                 .preferredColorScheme(appModel.preferredScheme)
         }
+        .defaultSize(width: 1000, height: 760)
         Window("Mini Player", id: MiniPlayerWindow.id) {
             MiniPlayerView()
                 .environment(controller)
