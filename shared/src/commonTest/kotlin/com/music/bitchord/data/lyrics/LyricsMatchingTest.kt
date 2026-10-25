@@ -6,6 +6,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.decodeFromString
 
 class LyricsMatchingTest {
 
@@ -154,6 +155,27 @@ class LyricsMatchingTest {
         """.trimIndent())
         assertEquals(950, lines.first().timeMs)
         assertEquals(1_750, lines.last().timeMs)
+    }
+
+    @Test
+    fun `Bini decodes the search response envelope and selects a metadata match`() {
+        // Trimmed synthetic data in the provider's observed wire shape. Keep a
+        // URL-shaped placeholder so the fixture tests search metadata only; it
+        // contains no lyrics and never fetches a live document.
+        val response = lyricsJson.decodeFromString(
+            BiniLyrics.Response.serializer(),
+            """{"total":1,"source":"HIT-EXACT","results":[{"track_name":"Fixture Song","artist_name":"The Fixture Artist","album_name":"Fixture Album","duration":205,"isrc":"SYNTHETIC123","timing_type":"line","lyricsUrl":"https://fixture.invalid/lyrics.ttml"}]}""",
+        )
+
+        val selected = BiniLyrics.selectHit(
+            response.results.orEmpty(),
+            title = "Fixture Song",
+            artist = "Fixture Artist",
+            durationMs = 205_000,
+        )
+
+        assertEquals("SYNTHETIC123", selected?.isrc)
+        assertEquals("https://fixture.invalid/lyrics.ttml", selected?.lyricsUrl)
     }
 
     @Test
