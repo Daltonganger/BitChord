@@ -3,6 +3,7 @@ package com.music.bitchord.data.sources.addon
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
@@ -58,7 +59,9 @@ data class AddonManifest(
      * nothing on every track instead of saying so while the user is still looking
      * at the URL they pasted.
      */
-    val isPlayable: Boolean get() = search != null && stream != null
+    val isPlayable: Boolean get() =
+        (search != null || resources.any { it.equals("search", ignoreCase = true) }) &&
+            (stream != null || resources.any { it.equals("stream", ignoreCase = true) })
 }
 
 @Serializable
@@ -112,8 +115,13 @@ data class AddonTrack(
     val artist: String = "",
     val album: String? = null,
     val durationSec: Int? = null,
+    val duration: Double? = null,
     val artworkUrl: String? = null,
+    val artworkURL: String? = null,
+    val albumArtworkURL: String? = null,
     val codec: String? = null,
+    val format: String? = null,
+    val audioQuality: String? = null,
     val bitrateKbps: Int? = null,
     val sampleRateHz: Int? = null,
     val bitDepth: Int? = null,
@@ -122,6 +130,11 @@ data class AddonTrack(
     val year: Int? = null,
     val isrc: String? = null,
 ) {
+    val effectiveDurationSec: Int? get() = durationSec ?: duration?.positiveInt()
+    val effectiveArtworkUrl: String? get() = artworkUrl?.ifBlank { null }
+        ?: artworkURL?.ifBlank { null } ?: albumArtworkURL?.ifBlank { null }
+    val effectiveCodec: String? get() = codec?.ifBlank { null } ?: format?.ifBlank { null }
+
     /**
      * What this row claims about itself, for the resolver's ranking.
      *
@@ -130,9 +143,11 @@ data class AddonTrack(
      * performed, and ranking it as bit-exact would put it above a real FLAC.
      */
     val claimsLossless: Boolean
-        get() = lossless || codec?.lowercase() in LOSSLESS_CODECS
+        get() = effectiveCodec?.lowercase() in LOSSLESS_CODECS ||
+            (effectiveCodec == null && (lossless || audioQuality?.uppercase() in LOSSLESS_QUALITIES))
 
     private companion object {
+        val LOSSLESS_QUALITIES = setOf("LOSSLESS", "HI_RES_LOSSLESS")
         val LOSSLESS_CODECS = setOf("flac", "alac", "wav", "aiff", "ape", "wv", "dsf", "dff")
     }
 }
@@ -141,11 +156,16 @@ data class AddonTrack(
 data class AddonStream(
     val url: String = "",
     val codec: String? = null,
+    val format: String? = null,
     val bitrateKbps: Int? = null,
+    val bitrate: Double? = null,
     val sampleRateHz: Int? = null,
+    val sampleRate: Double? = null,
     val bitDepth: Int? = null,
     val mimeType: String? = null,
     val headers: Map<String, String> = emptyMap(),
+    /** The protocol allows a Boolean or the name of a DRM scheme. */
+    val encrypted: JsonElement? = null,
     /**
      * Whether this answer is worse than was asked for.
      *
@@ -158,6 +178,27 @@ data class AddonStream(
     /** ISO-8601 or epoch seconds. A five-minute default covers an addon that omits it. */
     val expiresAt: String? = null,
 ) {
+    val effectiveCodec: String? get() = codec?.ifBlank { null } ?: format?.ifBlank { null }
+
+    /** Canonical fields already have units; only aliases need conversion. */
+    val effectiveSampleRateHz: Int? get() = sampleRateHz ?: sampleRate?.let {
+        (if (it < 1000) it * 1000 else it).positiveInt()
+    }
+    val effectiveBitrateKbps: Int? get() = bitrateKbps ?: bitrate?.let {
+        (if (it >= 10_000) it / 1000 else it).positiveInt()
+    }
+
+    val isEncrypted: Boolean
+        get() {
+            val value = encrypted ?: return false
+            if (value is JsonNull) return false
+            val primitive = value as? JsonPrimitive ?: return true
+            primitive.booleanOrNull?.let { return it }
+            return primitive.content.isNotBlank() &&
+                !primitive.content.equals("false", ignoreCase = true) &&
+                !primitive.content.equals("none", ignoreCase = true)
+        }
+
     /**
      * Dolby Atmos, read from every spelling an addon might send.
      *
@@ -167,8 +208,11 @@ data class AddonStream(
      * an addon that had it.
      */
     val isDolbyAtmos: Boolean
-        get() = codec?.lowercase() in setOf("eac3-joc", "ec3-joc", "dolby-atmos")
+        get() = effectiveCodec?.lowercase() in setOf("eac3-joc", "ec3-joc", "dolby-atmos")
 }
+
+private fun Double.positiveInt(): Int? =
+    takeIf { it.isFinite() && it > 0 && it <= Int.MAX_VALUE }?.toInt()?.takeIf { it > 0 }
 
 /** `true`/`1`/`"1"`/`"true"` → true, `false`/`0` → false, anything else → null. */
 internal fun JsonElement?.asFlag(): Boolean? {
