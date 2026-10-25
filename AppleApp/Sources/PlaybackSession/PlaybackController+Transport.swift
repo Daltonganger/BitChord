@@ -310,6 +310,8 @@ extension PlaybackController {
         }
         if playingIndex > 0 {
             loadCurrent(playingIndex - 1)
+        } else if prependPreviousContextEntry() {
+            loadCurrent(0)
         } else if repeatMode == .all, queue.count > 1 {
             loadCurrent(queue.count - 1)
         } else {

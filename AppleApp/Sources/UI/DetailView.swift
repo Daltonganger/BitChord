@@ -38,6 +38,7 @@ struct DetailView: View {
     /// Whether a continuation fetch is in flight; the token stays put until it
     /// succeeds, so this is what keeps duplicate requests out.
     @State private var loadingMore = false
+    @State private var loadMoreTask: Task<Void, Never>?
     @State private var pageRequestID = UUID()
     @State private var suggested: [DetailPageModel.SongPayload] = []
     @Environment(AuthController.self) private var auth
@@ -133,6 +134,8 @@ struct DetailView: View {
             pinned = PlaylistPinning.pinnedIds().contains(browseId)
             await load()
         }
+        .onAppear { mirrorPlaybackContext() }
+        .onChange(of: controller.playbackContextRevision) { _, _ in mirrorPlaybackContext() }
         .task(id: signatureLookupKey) {
             await loadArtistSignature()
         }
@@ -627,7 +630,8 @@ struct DetailView: View {
                     let entries = page.songs.map { toEntry($0, fallbackArt: fallbackArt(page)) }
                     controller.togglePlaybackContext(
                         entries, title: page.title, contextID: browseId,
-                        shuffleRequested: controller.shuffleEnabled
+                        shuffleRequested: controller.shuffleEnabled,
+                        continuationToken: handoffContinuation(page)
                     )
                 }
 
@@ -637,7 +641,8 @@ struct DetailView: View {
                 ) {
                     controller.play(
                         page.songs.map { toEntry($0, fallbackArt: fallbackArt(page)) },
-                        context: page.title, contextID: browseId, shuffleRequested: true, shuffleStart: true
+                        context: page.title, contextID: browseId, shuffleRequested: true, shuffleStart: true,
+                        boundedContext: true, continuationToken: handoffContinuation(page)
                     )
                 }
 
@@ -695,12 +700,14 @@ struct DetailView: View {
         if shuffled {
             controller.play(
                 entries, context: page.title, contextID: browseId,
-                shuffleRequested: true, shuffleStart: true
+                shuffleRequested: true, shuffleStart: true,
+                boundedContext: true, continuationToken: handoffContinuation(page)
             )
         } else {
             controller.togglePlaybackContext(
                 entries, title: page.title, contextID: browseId,
-                shuffleRequested: controller.shuffleEnabled
+                shuffleRequested: controller.shuffleEnabled,
+                continuationToken: handoffContinuation(page)
             )
         }
     }
@@ -1139,7 +1146,8 @@ struct DetailView: View {
                                     page.songs.map { toEntry($0, fallbackArt: fallback) },
                                     at: page.songs.firstIndex(where: { $0.videoId == song.videoId }) ?? index,
                                     context: page.title, contextID: browseId,
-                                    shuffleRequested: controller.shuffleEnabled
+                                    shuffleRequested: controller.shuffleEnabled,
+                                    boundedContext: true, continuationToken: handoffContinuation(page)
                                 )
                             },
                             playNext: { controller.playNext(toEntry(song, fallbackArt: fallback)) },
@@ -1151,7 +1159,7 @@ struct DetailView: View {
                         .listRowBackground(Color.clear)
                         .onAppear {
                             if song.videoId == songs.last?.videoId {
-                                Task { await loadMore() }
+                                requestMoreIfNeeded()
                             }
                         }
                     }
@@ -1198,7 +1206,8 @@ struct DetailView: View {
                                     page.songs.map { toEntry($0, fallbackArt: fallback) },
                                     at: page.songs.firstIndex(where: { $0.videoId == song.videoId }) ?? index,
                                     context: page.title, contextID: browseId,
-                                    shuffleRequested: controller.shuffleEnabled
+                                    shuffleRequested: controller.shuffleEnabled,
+                                    boundedContext: true, continuationToken: handoffContinuation(page)
                                 )
                             },
                             playNext: { controller.playNext(toEntry(song, fallbackArt: fallback)) },
@@ -1208,7 +1217,7 @@ struct DetailView: View {
                         )
                         .onAppear {
                             if song.videoId == songs.last?.videoId {
-                                Task { await loadMore() }
+                                requestMoreIfNeeded()
                             }
                         }
                     }
@@ -1244,7 +1253,8 @@ struct DetailView: View {
                                     controller.play(
                                         queue, at: columnIndex * 4 + rowIndex,
                                         context: page.title, contextID: browseId,
-                                        shuffleRequested: controller.shuffleEnabled
+                                        shuffleRequested: controller.shuffleEnabled,
+                                        boundedContext: true, continuationToken: handoffContinuation(page)
                                     )
                                 },
                                 playNext: { controller.playNext(toEntry(song, fallbackArt: fallback)) },
@@ -1378,6 +1388,7 @@ struct DetailView: View {
         }
         guard generation == PageSession.generation(), pageRequestID == request, !Task.isCancelled else { return }
         loading = false
+        mirrorPlaybackContext()
         if error == nil { await DownloadStore.shared.syncIfOwned(browseId: browseId) }
     }
 
@@ -1386,18 +1397,61 @@ struct DetailView: View {
         // retry and the "12+ songs" count both read. Clearing it before the await
         // made a slow page — and a failed one for ever — look like the end of the
         // playlist. `loadingMore` is what stops the last row asking twice.
-        guard !loadingMore, let token = continuation, !token.isEmpty else { return }
+        guard !loadingMore, !controller.ownsPlaybackContextWindow(browseId),
+              let token = continuation, !token.isEmpty else { return }
         loadingMore = true
         defer { loadingMore = false }
         let generation = PageSession.generation()
         let request = pageRequestID
         guard let extra = try? await InnertubeDetail.shared.more(token: token),
               generation == PageSession.generation(), !Task.isCancelled,
-              pageRequestID == request, var page else { return }
-        let known = Set(page.songs.map(\.videoId))
-        page.songs.append(contentsOf: extra.songs.filter { !known.contains($0.videoId) })
+              pageRequestID == request, !controller.ownsPlaybackContextWindow(browseId), var page else { return }
+        var known = Set(page.songs.map(\.videoId))
+        let additions = extra.songs.filter { known.insert($0.videoId).inserted }
+        page.songs.append(contentsOf: additions)
         suggested.append(contentsOf: extra.suggestedSongs)
-        continuation = extra.continuation
+        continuation = extra.continuation == token || additions.isEmpty ? nil : extra.continuation
+        page.continuation = continuation
+        self.page = page
+    }
+
+    private func requestMoreIfNeeded() {
+        guard !controller.ownsPlaybackContextWindow(browseId), loadMoreTask == nil else { return }
+        loadMoreTask = Task { @MainActor in
+            await loadMore()
+            loadMoreTask = nil
+        }
+    }
+
+    /// Playback becomes the sole owner of paging once this page starts a
+    /// context. Cancelling an in-flight view request leaves the token intact;
+    /// the controller takes that token and mirrors completed pages back here.
+    private func handoffContinuation(_ page: DetailPageModel) -> String? {
+        loadMoreTask?.cancel()
+        loadMoreTask = nil
+        loadingMore = false
+        return continuation
+    }
+
+    private func mirrorPlaybackContext() {
+        guard controller.ownsPlaybackContextWindow(browseId), var page else { return }
+        page.songs = controller.playbackContextEntries.compactMap { entry in
+            guard let videoId = entry.videoId else { return nil }
+            return DetailPageModel.SongPayload(
+                videoId: videoId,
+                title: entry.title,
+                artist: entry.artist,
+                thumbnailUrl: entry.thumbnailUrl,
+                durationText: entry.durationText,
+                albumName: entry.albumName,
+                isVideo: entry.isVideo,
+                artistId: entry.artistId,
+                albumId: entry.albumId,
+                setVideoId: entry.setVideoId
+            )
+        }
+        continuation = controller.playbackContextContinuation
+        page.continuation = continuation
         self.page = page
     }
 

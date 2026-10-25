@@ -20,14 +20,21 @@ extension PlaybackController {
         context: String? = nil,
         contextID: String? = nil,
         shuffleRequested: Bool? = nil,
-        shuffleStart: Bool = false
+        shuffleStart: Bool = false,
+        boundedContext: Bool = false,
+        continuationToken: String? = nil
     ) {
         noteLocalIntent()
         guard entries.indices.contains(index) else { return }
         let entry = entries[index]
+        if boundedContext, current?.id == entry.id, playbackContextID == contextID,
+           !shuffleStart, shuffleRequested == nil || shuffleRequested == shuffleEnabled,
+           state == .buffering || state == .playing {
+            return
+        }
         // Same song already loading or playing: extra taps are from the
         // download delay, not a request to restart.
-        if current?.id == entry.id,
+        if !boundedContext, current?.id == entry.id,
            playbackContextID == contextID,
            !shuffleStart, shuffleRequested == nil || shuffleRequested == shuffleEnabled,
            queue.filter({ $0.contextOrder != nil }).sorted(by: { ($0.contextOrder ?? 0) < ($1.contextOrder ?? 0) }).map(\.id) == entries.map(\.id),
@@ -35,22 +42,48 @@ extension PlaybackController {
             return
         }
         let useShuffle = shuffleRequested ?? shuffleEnabled
-        var entries = entries.enumerated().map { offset, value in
+        let canonicalEntries = entries.enumerated().map { offset, value in
             var value = value
             value.contextOrder = offset
             value.fromAutoplay = false
             return value
         }
+        var entries = canonicalEntries
         var index = index
         if shuffleStart, useShuffle, !automixSequencingEnabled {
             entries = PlaybackQueuePolicy.startingWith(entries, seed: Int.random(in: entries.indices))
             index = 0
         }
-        let selected = entries[index]
-        queue = PlaybackQueuePolicy.orderList(
+        let ordered = PlaybackQueuePolicy.orderList(
             entries, after: index, automix: automixSequencingEnabled,
             shuffle: useShuffle, scores: tasteScores(entries)
         )
+        contextContinuationTask?.cancel()
+        contextContinuationTask = nil
+        contextWindowGeneration &+= 1
+        contextWindowInstalling = true
+        let materialized: [QueueEntry]
+        let materializedIndex: Int
+        if boundedContext, contextID != nil {
+            playbackContextEntries = canonicalEntries
+            contextWindowEntries = ordered
+            playbackContextContinuation = continuationToken
+            let range = PlaybackQueueWindow.initialRange(count: ordered.count, selectedIndex: index)
+            materialized = Array(ordered[range])
+            materializedIndex = index - range.lowerBound
+            contextWindowBaseIndex = range.lowerBound
+            contextWindowCursor = range.upperBound
+        } else {
+            playbackContextEntries = []
+            contextWindowEntries = []
+            playbackContextContinuation = nil
+            contextWindowCursor = 0
+            contextWindowBaseIndex = 0
+            materialized = ordered
+            materializedIndex = index
+        }
+        let selected = materialized[materializedIndex]
+        queue = materialized
         playbackContext = context
         playbackContextID = contextID
         shuffleEnabled = useShuffle
@@ -59,17 +92,20 @@ extension PlaybackController {
         restoredStart = nil
         repeatAllStash = []
         repeatAllStashSeed = nil
+        playingIndex = materializedIndex
+        contextWindowInstalling = false
+        playbackContextRevision &+= 1
         startEngineIfNeeded()
         if engineLoadedId == selected.id, current?.source == selected.source, state == .playing {
-            playingIndex = index
-            current = queue[index]
+            current = queue[materializedIndex]
             persistSession()
             maybeAutoplay(force: true)
             syncEngineQueueNext()
             scheduleSequencing()
             return
         }
-        loadCurrent(index)
+        loadCurrent(materializedIndex)
+        maintainContextWindow()
     }
 
     var automixSequencingEnabled: Bool {
@@ -84,6 +120,11 @@ extension PlaybackController {
         playbackContextState(contextID) == .playing
     }
 
+    func ownsPlaybackContextWindow(_ contextID: String) -> Bool {
+        playbackContextID == contextID && !playbackContextEntries.isEmpty
+            && playbackContextState(contextID) != .inactive
+    }
+
     private func playbackContextState(_ contextID: String) -> PlaybackQueuePolicy.HeroState {
         PlaybackQueuePolicy.heroState(
             origin: playbackContextID, listID: contextID, hasQueue: !queue.isEmpty,
@@ -96,12 +137,110 @@ extension PlaybackController {
         at index: Int = 0,
         title: String,
         contextID: String,
-        shuffleRequested: Bool? = nil
+        shuffleRequested: Bool? = nil,
+        continuationToken: String? = nil
     ) {
         if isPlaybackContextActive(contextID) {
             togglePlayPause()
         } else {
-            play(entries, at: index, context: title, contextID: contextID, shuffleRequested: shuffleRequested, shuffleStart: true)
+            play(entries, at: index, context: title, contextID: contextID, shuffleRequested: shuffleRequested,
+                 shuffleStart: true, boundedContext: true, continuationToken: continuationToken)
+        }
+    }
+
+    /// Keeps a detail-page context rolling forward without putting the entire
+    /// fetched catalogue page into the active playback queue.
+    func maintainContextWindow() {
+        guard !contextWindowInstalling, contextWindowGeneration > 0,
+              playbackContextID != nil, !playbackContextEntries.isEmpty else { return }
+        trimPlayedContextPrefix()
+        let upcoming = max(0, queue.count - playingIndex - 1)
+        let available = max(0, contextWindowEntries.count - contextWindowCursor)
+        let append = PlaybackQueueWindow.appendCount(upcomingCount: upcoming, canonicalRemaining: available)
+        if append > 0 {
+            let end = contextWindowCursor + append
+            queue.append(contentsOf: contextWindowEntries[contextWindowCursor..<end])
+            contextWindowCursor = end
+            queueEditRevision &+= 1
+            syncEngineQueueNext()
+            persistSession()
+        }
+        let remaining = max(0, contextWindowEntries.count - contextWindowCursor)
+        if PlaybackQueueWindow.shouldFetchContinuation(
+            upcomingCount: max(0, queue.count - playingIndex - 1),
+            canonicalRemaining: remaining,
+            hasContinuation: playbackContextContinuation?.isEmpty == false
+        ) {
+            fetchContextContinuation()
+        }
+    }
+
+    private func trimPlayedContextPrefix() {
+        guard repeatMode != .all, playingIndex > 1 else { return }
+        let removeCount = playingIndex - 1
+        let removedContextRows = queue.prefix(removeCount).filter { $0.contextOrder != nil }.count
+        contextWindowInstalling = true
+        queue.removeFirst(removeCount)
+        playingIndex -= removeCount
+        contextWindowBaseIndex += removedContextRows
+        queueEditRevision &+= 1
+        contextWindowInstalling = false
+    }
+
+    /// Rematerializes a prior page row when Previous crosses the retained
+    /// one-row history boundary of the rolling queue.
+    func prependPreviousContextEntry() -> Bool {
+        guard playbackContextID != nil, contextWindowBaseIndex > 0,
+              contextWindowEntries.indices.contains(contextWindowBaseIndex - 1) else { return false }
+        contextWindowBaseIndex -= 1
+        queue.insert(contextWindowEntries[contextWindowBaseIndex], at: 0)
+        playingIndex = 0
+        return true
+    }
+
+    private func fetchContextContinuation() {
+        guard contextContinuationTask == nil,
+              let token = playbackContextContinuation, !token.isEmpty,
+              let contextID = playbackContextID else { return }
+        let generation = contextWindowGeneration
+        contextContinuationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for (attempt, delay) in [0, 2, 5, 15].enumerated() {
+                if delay > 0 {
+                    do { try await Task.sleep(for: .seconds(delay)) }
+                    catch { return }
+                }
+                guard !Task.isCancelled, self.contextWindowGeneration == generation,
+                      self.playbackContextID == contextID,
+                      self.playbackContextContinuation == token else { return }
+                do {
+                    let page = try await InnertubeDetail.shared.more(token: token)
+                    guard !Task.isCancelled, self.contextWindowGeneration == generation,
+                          self.playbackContextID == contextID,
+                          self.playbackContextContinuation == token else { return }
+                    var known = Set(self.playbackContextEntries.map(\.id))
+                    let fallbackArt = self.playbackContextEntries.first?.thumbnailUrl
+                    var additions = page.songs.map { $0.asEntry(fallbackArt: fallbackArt) }
+                        .filter { known.insert($0.id).inserted }
+                    let firstOrder = self.playbackContextEntries.count
+                    for index in additions.indices {
+                        additions[index].contextOrder = firstOrder + index
+                        additions[index].fromAutoplay = false
+                    }
+                    self.playbackContextEntries.append(contentsOf: additions)
+                    self.contextWindowEntries.append(contentsOf: additions)
+                    self.playbackContextContinuation = page.continuation == token || additions.isEmpty
+                        ? nil : page.continuation
+                    self.playbackContextRevision &+= 1
+                    self.contextContinuationTask = nil
+                    self.maintainContextWindow()
+                    self.persistSession()
+                    return
+                } catch {
+                    self.debugLog.record("detail continuation attempt \(attempt + 1) failed; retaining playback context token")
+                }
+            }
+            if self.contextWindowGeneration == generation { self.contextContinuationTask = nil }
         }
     }
 
@@ -244,7 +383,12 @@ extension PlaybackController {
             repeatMode: repeatMode,
             shuffleEnabled: shuffleEnabled,
             volume: volume,
-            contextID: playbackContextID, contextTitle: playbackContext
+            contextID: playbackContextID, contextTitle: playbackContext,
+            contextEntries: playbackContextEntries,
+            orderedContextEntries: contextWindowEntries,
+            contextContinuation: playbackContextContinuation,
+            contextCursor: contextWindowCursor,
+            contextBaseIndex: contextWindowBaseIndex
         )
     }
 
@@ -261,8 +405,18 @@ extension PlaybackController {
         let savedContext = PlatformSettings.shared.getString(key: "last_playback_context", default: "")
         playbackContext = snap.contextTitle ?? (savedContext.isEmpty ? nil : savedContext)
         playbackContextID = snap.contextID
+        contextContinuationTask?.cancel()
+        contextContinuationTask = nil
+        contextWindowGeneration &+= 1
+        contextWindowInstalling = true
+        playbackContextEntries = snap.contextEntries
+        contextWindowEntries = snap.orderedContextEntries
+        playbackContextContinuation = snap.contextContinuation
+        contextWindowCursor = min(max(0, snap.contextCursor), contextWindowEntries.count)
+        contextWindowBaseIndex = min(max(0, snap.contextBaseIndex), contextWindowEntries.count)
         queue = snap.tracks
         playingIndex = snap.index
+        contextWindowInstalling = false
         current = queue[snap.index]
         position = snap.position
         duration = current?.durationSeconds ?? 0
@@ -272,6 +426,7 @@ extension PlaybackController {
         repeatAllStash = []
         repeatAllStashSeed = nil
         rememberRestoredStart(snap.position, of: current?.id)
+        maintainContextWindow()
         dolbyRenderer?.stop()
         dolbyRenderer = nil
         engineLoadedId = nil

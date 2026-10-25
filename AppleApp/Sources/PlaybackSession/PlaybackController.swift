@@ -123,11 +123,25 @@ final class PlaybackController {
     var playbackContext: String?
     /// Stable identity for the collection behind the queue, used by its hero control.
     var playbackContextID: String?
+    /// Canonical songs already fetched for a detail-page context. The audible
+    /// queue is only a rolling window over this list.
+    var playbackContextEntries: [QueueEntry] = []
+    var playbackContextContinuation: String?
+    var playbackContextRevision: UInt64 = 0
+    @ObservationIgnored var contextWindowEntries: [QueueEntry] = []
+    @ObservationIgnored var contextWindowCursor = 0
+    @ObservationIgnored var contextWindowBaseIndex = 0
+    @ObservationIgnored var contextWindowInstalling = false
+    @ObservationIgnored var contextWindowGeneration: UInt64 = 0
+    @ObservationIgnored var contextContinuationTask: Task<Void, Never>?
     var queue: [QueueEntry] = [] {
         didSet { refreshUpcomingURLPrefetch() }
     }
     var playingIndex: Int = 0 {
-        didSet { refreshUpcomingURLPrefetch() }
+        didSet {
+            refreshUpcomingURLPrefetch()
+            maintainContextWindow()
+        }
     }
     var position: Double = 0
     var duration: Double = 0
@@ -260,7 +274,7 @@ final class PlaybackController {
     }
 #endif
     var canPlayPrevious: Bool {
-        playingIndex > 0 || (repeatMode == .all && !queue.isEmpty)
+        playingIndex > 0 || contextWindowBaseIndex > 0 || (repeatMode == .all && !queue.isEmpty)
     }
     var canPlayNext: Bool {
         playingIndex + 1 < queue.count
