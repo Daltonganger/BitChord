@@ -131,6 +131,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UILaunchScreen: {}
         NSMotionUsageDescription: BitChord uses headphone motion to keep its spatial effect anchored when you turn your head.
+        NSPhotoLibraryAddUsageDescription: BitChord saves the lyric share cards you choose to add to Photos.
         NSSpeechRecognitionUsageDescription: BitChord uses on-device speech recognition to align fetched lyrics with the playing audio. Audio is not sent to a server for alignment.
     entitlements:
       path: BitChord.entitlements

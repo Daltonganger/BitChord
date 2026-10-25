@@ -7,6 +7,7 @@ import CoreImage.CIFilterBuiltins
 #if os(iOS)
 import UIKit
 import AVFAudio
+import Photos
 #else
 import AppKit
 #endif
@@ -58,6 +59,10 @@ struct LyricsPane: View {
     /// Lyric lines picked for a share card, within [maxSharedCharacters].
     @State private var selection: Set<Int> = []
     @State private var shareImage: Image?
+    @State private var shareImageData: Data?
+    @State private var storyCardFormat = false
+    @State private var showPhotoSaveAlert = false
+    @State private var photoSaveMessage = ""
     /// True while the listener is scrolling the list themselves, which stands the
     /// auto-scroll down until they have been still for a moment.
     @State private var reading = false
@@ -324,6 +329,11 @@ struct LyricsPane: View {
         .onChange(of: sharePicking) { _, picking in
             if !picking { clearShareSelection() }
         }
+        .alert("Save Share Card", isPresented: $showPhotoSaveAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(photoSaveMessage)
+        }
     }
 
     /// What makes one lyric document different from another.
@@ -345,9 +355,11 @@ struct LyricsPane: View {
     }
 
     private func clearShareSelection() {
-        guard !selection.isEmpty || shareImage != nil else { return }
+        guard !selection.isEmpty || shareImage != nil || storyCardFormat else { return }
         selection.removeAll()
         shareImage = nil
+        shareImageData = nil
+        storyCardFormat = false
     }
 
     /// The quote bar: what has been picked, and the way to share it.
@@ -358,6 +370,23 @@ struct LyricsPane: View {
                 .foregroundStyle(.white.opacity(0.8))
             Spacer(minLength: 0)
             if let shareImage {
+                Menu {
+                    Button("Standard card") { selectStoryCardFormat(false) }
+                    Button("Story · 9:16") { selectStoryCardFormat(true) }
+                } label: {
+                    Label(storyCardFormat ? "9:16" : "Card", systemImage: "aspectratio")
+                }
+                .font(.caption.weight(.semibold))
+                .accessibilityLabel("Share card format")
+                .help(storyCardFormat ? "Story format, 9:16" : "Standard card format")
+                #if os(iOS)
+                Button(action: saveShareCardToPhotos) {
+                    Image(systemName: "square.and.arrow.down")
+                }
+                .disabled(shareImageData == nil)
+                .accessibilityLabel("Save to Photos")
+                .help("Save to Photos")
+                #endif
                 ShareLink(
                     item: shareImage,
                     preview: SharePreview(
@@ -381,6 +410,8 @@ struct LyricsPane: View {
             Button("Done") {
                 selection.removeAll()
                 shareImage = nil
+                shareImageData = nil
+                storyCardFormat = false
                 onSharePicking?(false)
             }
             .font(.subheadline.weight(.semibold))
@@ -395,20 +426,34 @@ struct LyricsPane: View {
     /// What makes the card worth re-rendering: the pick, and whether the
     /// translation it would quote underneath has arrived or changed.
     private var shareCardKey: ShareCardKey {
-        ShareCardKey(selection: selection, translated: translator?.translatedLines != nil)
+        ShareCardKey(
+            selection: selection,
+            translated: translator?.translatedLines != nil,
+            storyFormat: storyCardFormat
+        )
+    }
+
+    private func selectStoryCardFormat(_ story: Bool) {
+        guard storyCardFormat != story else { return }
+        storyCardFormat = story
+        shareImage = nil
+        shareImageData = nil
     }
 
     private struct ShareCardKey: Equatable {
         var selection: Set<Int>
         var translated: Bool
+        var storyFormat: Bool
     }
 
     private func toggleShareSelection(_ index: Int) {
         if selection.contains(index) {
             selection.remove(index)
-        } else if lines.indices.contains(index),
-                  selectedCharacterCount + shareText(at: index).count <= maxSharedCharacters {
-            selection.insert(index)
+        } else if lines.indices.contains(index) {
+            let nextTotal = selectedCharacterCount + shareText(at: index).count
+            if selection.isEmpty || nextTotal <= maxSharedCharacters {
+                selection.insert(index)
+            }
         }
         Haptics.play(.select)
     }
@@ -448,6 +493,7 @@ struct LyricsPane: View {
     private func renderShareCard() {
         guard !selection.isEmpty else {
             shareImage = nil
+            shareImageData = nil
             return
         }
         let tint = ArtworkPalette.pageTint(
@@ -461,16 +507,56 @@ struct LyricsPane: View {
             artist: trackArtist,
             tint: tint,
             artwork: artworkData,
-            artworkUrl: artworkUrl
+            artworkUrl: artworkUrl,
+            storyFormat: storyCardFormat
         )
         let renderer = ImageRenderer(content: card)
-        renderer.scale = PlatformScale.current
+        renderer.scale = 2
         #if os(iOS)
-        shareImage = renderer.uiImage.map { Image(uiImage: $0) }
+        if let image = renderer.uiImage {
+            shareImage = Image(uiImage: image)
+            shareImageData = image.pngData()
+        } else {
+            shareImage = nil
+            shareImageData = nil
+        }
         #else
-        shareImage = renderer.nsImage.map { Image(nsImage: $0) }
+        if let image = renderer.nsImage {
+            shareImage = Image(nsImage: image)
+            shareImageData = image.tiffRepresentation.flatMap {
+                NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:])
+            }
+        } else {
+            shareImage = nil
+            shareImageData = nil
+        }
         #endif
     }
+
+    #if os(iOS)
+    @MainActor
+    private func saveShareCardToPhotos() {
+        guard let shareImageData else { return }
+        Task { @MainActor in
+            let authorization = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard authorization == .authorized else {
+                photoSaveMessage = "Allow BitChord to add photos in Settings to save this card."
+                showPhotoSaveAlert = true
+                return
+            }
+            do {
+                try await PHPhotoLibrary.shared().performChanges {
+                    let request = PHAssetCreationRequest.forAsset()
+                    request.addResource(with: .photo, data: shareImageData, options: nil)
+                }
+                photoSaveMessage = "Saved to Photos."
+            } catch {
+                photoSaveMessage = "The share card could not be saved to Photos."
+            }
+            showPhotoSaveAlert = true
+        }
+    }
+    #endif
 
     private var attribution: String? {
         guard let sourceLabel, !sourceLabel.isEmpty else { return nil }
@@ -483,6 +569,18 @@ struct LyricsPane: View {
             ? "Lyrics by \(sourceLabel)"
             : "Lyrics by \(sourceLabel) · partially synced"
     }
+}
+
+func lyricTextIsRightToLeft(_ text: String) -> Bool {
+    for scalar in text.unicodeScalars {
+        let value = scalar.value
+        guard CharacterSet.letters.contains(scalar) else { continue }
+        return (0x0590...0x08FF).contains(value) ||
+            (0xFB1D...0xFDFF).contains(value) ||
+            (0xFE70...0xFEFF).contains(value) ||
+            (0x1EE00...0x1EEFF).contains(value)
+    }
+    return false
 }
 
 private struct WordSyncedLine: View {
@@ -503,30 +601,46 @@ private struct WordSyncedLine: View {
         line.alignment == .end
     }
 
+    private var isRightToLeft: Bool {
+        lyricTextIsRightToLeft(line.text)
+    }
+
+    private var contentAlignment: HorizontalAlignment {
+        isSecondVoice ? .trailing : .leading
+    }
+
+    private var textAlignment: TextAlignment {
+        isSecondVoice ? .trailing : .leading
+    }
+
     var body: some View {
-        VStack(alignment: isSecondVoice ? .trailing : .leading, spacing: 4) {
+        VStack(alignment: contentAlignment, spacing: 4) {
             Text(leadRendered)
                 .scaledFont(size: 34, weight: .bold, design: .default)
-                .multilineTextAlignment(isSecondVoice ? .trailing : .leading)
+                .multilineTextAlignment(textAlignment)
                 .fixedSize(horizontal: false, vertical: true)
                 // The frame and the scale anchor follow the side as well. A second
                 // voice that grew towards the left would lean out of its own column
                 // the moment it was sung, which is the one moment the reader is
                 // looking at it.
                 .shadow(color: active ? .white.opacity(0.35) : .clear, radius: active ? 8 : 0, y: 0)
-                .scaleEffect(active ? 1.04 : 1, anchor: isSecondVoice ? .trailing : .leading)
+                .scaleEffect(
+                    active ? 1.04 : 1,
+                    anchor: isSecondVoice != isRightToLeft ? .trailing : .leading
+                )
                 .contentShape(Rectangle())
                 .onTapGesture { onTap?() }
             if let backing = backingRendered {
                 Text(backing)
                     .scaledFont(size: 24, weight: .semibold, design: .default)
-                    .multilineTextAlignment(isSecondVoice ? .trailing : .leading)
+                    .multilineTextAlignment(textAlignment)
                     .fixedSize(horizontal: false, vertical: true)
                     .opacity(0.45)
                     .contentShape(Rectangle())
                     .onTapGesture { onTap?() }
             }
         }
+        .environment(\.layoutDirection, isRightToLeft ? .rightToLeft : .leftToRight)
         .opacity(hasSyncedTimings ? (active ? 1 : max(0.18, 0.58 - Double(distance) * 0.12)) : 0.9)
         .blur(radius: lyricsBlur && hasSyncedTimings && !active ? min(CGFloat(distance) * 1.15, 4) : 0)
         .animation(.easeInOut(duration: 0.2), value: active)

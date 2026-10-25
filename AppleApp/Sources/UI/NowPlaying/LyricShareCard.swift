@@ -36,9 +36,26 @@ struct LyricShareCard: View {
     let tint: ArtworkPalette.PageTint
     let artwork: Data?
     let artworkUrl: String?
+    let storyFormat: Bool
+
+    private var quoteCharacterCount: Int {
+        lines.filter { !$0.isGap }.reduce(0) { $0 + $1.text.count }
+    }
+
+    private var lyricFontSize: CGFloat {
+        switch quoteCharacterCount {
+        case ..<80: 36
+        case ..<160: 32
+        default: 28
+        }
+    }
+
+    private var cardHeight: CGFloat? {
+        storyFormat ? 960 : nil
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: storyFormat ? 22 : 18) {
             HStack(spacing: 12) {
                 ArtworkView(url: artworkUrl, data: artwork, side: 56)
                     .clipShape(.rect(cornerRadius: 10, style: .continuous))
@@ -69,16 +86,20 @@ struct LyricShareCard: View {
                     } else {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(line.text)
-                                .font(.title2.weight(.semibold))
+                                .font(.system(size: lyricFontSize, weight: .semibold))
                                 .foregroundStyle(.white)
                                 .fixedSize(horizontal: false, vertical: true)
                             if let sub = line.subText {
                                 Text(sub)
-                                    .font(.subheadline.weight(.medium))
+                                    .font(.system(size: lyricFontSize * 0.68, weight: .medium))
                                     .foregroundStyle(.white.opacity(0.72))
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
+                        .environment(
+                            \.layoutDirection,
+                            lyricTextIsRightToLeft(line.text) ? .rightToLeft : .leftToRight
+                        )
                     }
                 }
             }
@@ -97,7 +118,7 @@ struct LyricShareCard: View {
             }
         }
         .padding(28)
-        .frame(width: 560, height: 700, alignment: .topLeading)
+        .frame(width: 540, height: cardHeight, alignment: .topLeading)
         .background {
             ZStack {
                 tint.wash
