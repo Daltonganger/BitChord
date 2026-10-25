@@ -42,5 +42,8 @@ require shared/src/commonMain/kotlin/com/music/bitchord/data/settings/AppSetting
 require shared/src/commonMain/kotlin/com/music/bitchord/data/settings/AppSettings.kt 'KEY_UPGRADE_LENGTH_SLACK_SECONDS'
 require shared/src/commonTest/kotlin/com/music/bitchord/data/settings/UpgradeLengthSlackTest.kt 'slack is bounded persisted and included in settings backup'
 require shared/src/commonTest/kotlin/com/music/bitchord/data/settings/UpgradeLengthSlackTest.kt 'artist signature preferences persist and restore'
+require AppleApp/Sources/UI/SearchView.swift 'typeaheadMaxResults = 15'
+require AppleApp/Sources/UI/SearchView.swift 'TYPEAHEAD_MAX_RESULTS'
+require AppleApp/Sources/UI/SearchView.swift 'typeaheadHits.prefix(Self.typeaheadMaxResults)'
 
 echo "settings parity source contracts passed"
