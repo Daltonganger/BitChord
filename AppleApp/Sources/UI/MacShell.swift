@@ -54,14 +54,14 @@ struct MacFullScreenButton: View {
                 ? "arrow.down.right.and.arrow.up.left"
                 : "arrow.up.left.and.arrow.down.right"
         ) {
-            NSApp.keyWindow?.toggleFullScreen(nil)
+            Self.playerWindow?.toggleFullScreen(nil)
         }
         .keyboardShortcut("f", modifiers: [.command, .control])
         .labelStyle(.iconOnly)
         .help(isFullScreen ? "Exit Full Screen" : "Enter Full Screen")
         .accessibilityLabel(isFullScreen ? "Exit Full Screen" : "Enter Full Screen")
         .onAppear {
-            isFullScreen = NSApp.keyWindow?.styleMask.contains(.fullScreen) ?? false
+            isFullScreen = Self.playerWindow?.styleMask.contains(.fullScreen) ?? false
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
             isFullScreen = true
@@ -69,6 +69,15 @@ struct MacFullScreenButton: View {
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
             isFullScreen = false
         }
+    }
+}
+
+extension MacFullScreenButton {
+    /// The window the player is in: the key one, or the main one when another
+    /// app is in front.
+    static var playerWindow: NSWindow? {
+        NSApp.keyWindow ?? NSApp.mainWindow
+            ?? NSApp.windows.first { $0.isVisible && $0.canBecomeMain }
     }
 }
 

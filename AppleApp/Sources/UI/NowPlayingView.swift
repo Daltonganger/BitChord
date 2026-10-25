@@ -156,23 +156,28 @@ struct NowPlayingView: View {
 
     @ToolbarContentBuilder
     private var macPlayerToolbar: some ToolbarContent {
-        // Close sits alone by the traffic lights, where a Mac window's way
-        // out is.
-        ToolbarItem(placement: .navigation) {
-            Button("Close", systemImage: "xmark") {
-                appModel.nowPlayingPresented = false
+        // Close by the traffic lights, and full screen beside it as its own
+        // button; volume and AirPlay at the far end. The player spans the
+        // whole window's toolbar (RootView collapses the sidebar while it is
+        // up), so the flexible space reaches the trailing edge.
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .navigation) {
+                macCloseButton
+                    .frame(width: 32, height: 32)
+                    .glassEffect(.regular.interactive(), in: Circle())
             }
-            .keyboardShortcut(.cancelAction)
-            .labelStyle(.iconOnly)
-            .help("Close")
-            .accessibilityLabel("Close")
-        }
-
-        // Full screen, volume and AirPlay are the trailing edge's: each its
-        // own control. Going full screen takes the traffic lights and the menu
-        // bar with it, which is the borderless player upstream offers.
-        ToolbarItem(placement: .primaryAction) {
-            MacFullScreenButton()
+            .sharedBackgroundVisibility(.hidden)
+            ToolbarItem(placement: .navigation) {
+                MacFullScreenButton()
+                    .buttonStyle(.plain)
+                    .frame(width: 32, height: 32)
+                    .glassEffect(.regular.interactive(), in: Circle())
+            }
+            .sharedBackgroundVisibility(.hidden)
+            ToolbarSpacer(.flexible, placement: .primaryAction)
+        } else {
+            ToolbarItem(placement: .navigation) { macCloseButton }
+            ToolbarItem(placement: .navigation) { MacFullScreenButton() }
         }
 
         if !controller.hideVolumeBar {
@@ -186,6 +191,7 @@ struct NowPlayingView: View {
         }
 
         if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
             ToolbarItem(placement: .primaryAction) {
                 AirPlayRouteButton()
                     .frame(width: 22, height: 22)
@@ -199,10 +205,21 @@ struct NowPlayingView: View {
                 AirPlayRouteButton()
                     .frame(width: 22, height: 22)
                     .frame(width: 32, height: 32)
-                    .toolbarChrome(in: Circle())
+                    .background(.ultraThinMaterial, in: Circle())
                     .help("AirPlay")
             }
         }
+    }
+
+    private var macCloseButton: some View {
+        Button("Close", systemImage: "xmark") {
+            appModel.nowPlayingPresented = false
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut(.cancelAction)
+        .labelStyle(.iconOnly)
+        .help("Close")
+        .accessibilityLabel("Close")
     }
 
     #endif
