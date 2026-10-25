@@ -45,12 +45,27 @@ extension SettingsView {
                     Slider(value: Binding(get: { controller.clarityWet }, set: { controller.updateClarity(wet: $0) }), in: 0...1)
                 }
             }
-            rows.row("Normalization", "loudness", "normalize", "track", "album", "off") {
-                Picker("Normalization", selection: Binding(get: { controller.loudnessMode }, set: { controller.updateLoudnessMode($0) })) {
-                    Text("Off").tag("OFF")
-                    Text("Track").tag("TRACK")
-                    Text("Album").tag("ALBUM")
+        }
+        rows.row("Loudness Normalization", "loudness", "normalize", "track", "album", "off", "speaker") {
+            VStack(alignment: .leading, spacing: 4) {
+                SettingsToggleLine(
+                    glyph: .loudness,
+                    title: "Loudness Normalization",
+                    subtitle: "Levels tracks to a consistent loudness",
+                    isOn: $loudness
+                )
+                if loudness {
+                    Picker("Normalization Mode", selection: $loudnessModeSelection) {
+                        Text("Track").tag("TRACK")
+                        Text("Album").tag("ALBUM")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.leading, 41)
                 }
+                #if os(iOS)
+                SettingsSubToggle(title: "Off on iPhone Speaker", isOn: $loudnessOffOnSpeaker)
+                #endif
             }
         }
         rows.row("Sound Mode", "preserves", "recording", "transparent", "clarity", "spatial") {

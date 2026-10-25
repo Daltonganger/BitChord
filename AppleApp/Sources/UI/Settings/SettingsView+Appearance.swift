@@ -70,6 +70,37 @@ extension SettingsView {
                 SettingsSubToggle(title: "Play Animated Cover over Cellular", isOn: $canvasCellular)
             }
         }
+        rows.row("Artist Signatures", "artist", "signature", "wikimedia", "commons", "url", "logo") {
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsToggleLine(
+                    glyph: .theme,
+                    title: "Artist Signatures",
+                    subtitle: "Show Wikimedia artist signatures on artist pages",
+                    isOn: Binding(
+                        get: { artistSignatures },
+                        set: { value in
+                            artistSignatures = value
+                            AppSettings.shared.setArtistSignaturesEnabled(value: value)
+                        }
+                    )
+                )
+                if artistSignatures {
+                    TextField("Wikimedia URL (optional)", text: Binding(
+                        get: { artistSignaturesWikimediaUrl },
+                        set: { value in
+                            artistSignaturesWikimediaUrl = value
+                            AppSettings.shared.setArtistSignaturesWikimediaUrl(value: value)
+                        }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.footnote)
+                    Text("Leave blank to use Wikimedia Commons by default.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 41)
+                }
+            }
+        }
         rows.row("Synced Lyrics", "lyrics", "synced", "karaoke", "words") {
             SettingsToggleLine(
                 glyph: .lyrics,

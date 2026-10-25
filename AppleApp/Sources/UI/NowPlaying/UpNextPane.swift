@@ -21,6 +21,7 @@ struct UpNextPane: View {
     var showsCurrentTrackHeader = true
     var onOpenLyrics: () -> Void = {}
     @State private var hasScrolledOnce = false
+    @AppStorage("show_queue_history") private var showQueueHistory = false
 
     /// The queue list, one layout on every platform: "Queue" with Clear, a
     /// "Now playing" section for the current track, "Up next" with drag
@@ -67,6 +68,18 @@ struct UpNextPane: View {
             } else {
                 ScrollViewReader { proxy in
                     List {
+                        if !historyRows.isEmpty {
+                            Text("Previously Played")
+                                .font(.headline.weight(.medium))
+                                .foregroundStyle(.white.opacity(0.75))
+                                .padding(.top, 12)
+                                .listRowBackground(Color.clear)
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 12, leading: 24, bottom: 6, trailing: 24))
+                            ForEach(historyRows) { item in
+                                historyQueueRow(item)
+                            }
+                        }
                         if controller.current != nil {
                             Text("Now playing")
                                 .font(.headline.weight(.medium))
@@ -158,11 +171,25 @@ struct UpNextPane: View {
                     .animation(.easeOut(duration: 0.2), value: queueSignature)
                     .onChange(of: controller.playingIndex) { _, _ in
                         if hasScrolledOnce {
-                            withAnimation { proxy.scrollTo("queueTop", anchor: .top) }
+                            withAnimation {
+                                proxy.scrollTo(showQueueHistory ? "nowPlaying" : "queueTop", anchor: .top)
+                            }
                         } else {
-                            proxy.scrollTo("queueTop", anchor: .top)
+                            proxy.scrollTo(showQueueHistory ? "nowPlaying" : "queueTop", anchor: .top)
                             hasScrolledOnce = true
                         }
+                    }
+                    .onAppear {
+                        guard showQueueHistory else { return }
+                        Task { @MainActor in
+                            await Task.yield()
+                            proxy.scrollTo("nowPlaying", anchor: .top)
+                            hasScrolledOnce = true
+                        }
+                    }
+                    .onChange(of: showQueueHistory) { _, enabled in
+                        guard enabled else { return }
+                        withAnimation { proxy.scrollTo("nowPlaying", anchor: .top) }
                     }
                 }
             }
@@ -202,6 +229,46 @@ struct UpNextPane: View {
         .buttonStyle(.plain)
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
+        .id("nowPlaying")
+    }
+
+    private var historyRows: [QueueRow] {
+        guard showQueueHistory, controller.playingIndex > 0 else { return [] }
+        return (0..<min(controller.playingIndex, controller.queue.count)).map { index in
+            QueueRow(index: index, entry: controller.queue[index])
+        }
+    }
+
+    private func historyQueueRow(_ item: QueueRow) -> some View {
+        Button {
+            controller.playQueueItem(at: item.index)
+        } label: {
+            HStack(spacing: 12) {
+                ArtworkView(entry: item.entry, side: 44)
+                    .clipShape(.rect(cornerRadius: 6, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.entry.title)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(item.entry.artist)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.65))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .accessibilityHidden(true)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Play \(item.entry.title), previously played")
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 6, leading: 24, bottom: 6, trailing: 20))
     }
 
     private func queueListRow(_ item: QueueRow, section: Int, index: Int, rows: [QueueRow]) -> some View {

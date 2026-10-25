@@ -101,6 +101,24 @@ extension SettingsView {
                 isOn: $hideSongStatus
             )
         }
+        #if os(iOS)
+        rows.row("Hide Status Bar in Player", "status bar", "immersive", "fullscreen", "player") {
+            SettingsToggleLine(
+                glyph: .hideVolume,
+                title: "Hide Status Bar in Player",
+                subtitle: "Hides the iPhone status bar while Now Playing is open",
+                isOn: $hidePlayerStatusBar
+            )
+        }
+        #endif
+        rows.row("Show Queue History", "queue", "history", "previously played", "player") {
+            SettingsToggleLine(
+                glyph: .dontRepeat,
+                title: "Show Queue History",
+                subtitle: "Shows tracks already played above Now Playing in the queue",
+                isOn: $showQueueHistory
+            )
+        }
         rows.row("JioSaavn", "jiosaavn", "saavn", "source", "bitrate", "race", "match") {
             SettingsToggleLine(
                 glyph: .sources,
@@ -113,10 +131,20 @@ extension SettingsView {
             SettingsToggleLine(
                 glyph: .video,
                 title: "Stop When Backgrounded",
-                subtitle: "Pauses playback when the app leaves the foreground",
+                subtitle: "Pauses playback when BitChord is hidden or deactivated on Mac; closing a window uses its own setting",
                 isOn: $stopBackground
             )
         }
+        #if os(macOS)
+        rows.row("Stop Music on Close", "close", "window", "quit", "pause", "stop") {
+            SettingsToggleLine(
+                glyph: .video,
+                title: "Stop Music on Close",
+                subtitle: "Pauses playback when the main window closes",
+                isOn: $stopMusicOnClose
+            )
+        }
+        #endif
         rows.row("Listen together", "listen together", "party", "jam", "invite", "party code", "party server",
                  "in sync", "synchronise", "synchronize") {
             PushLink {
