@@ -256,7 +256,12 @@ actor StreamFileCache {
 actor CanvasFileCache {
     static let shared = CanvasFileCache()
     private static let limit: Int64 = 150 * 1024 * 1024
-    private var inFlight: [URL: Task<URL, Never>] = [:]
+    private struct InFlightDownload {
+        let id: UUID
+        var task: Task<Void, Never>?
+        var waiters: [UUID: CheckedContinuation<URL, Never>]
+    }
+    private var inFlight: [URL: InFlightDownload] = [:]
 
     var folder: URL { DiskCache.cachesSubfolder("canvas") }
 
@@ -275,12 +280,63 @@ actor CanvasFileCache {
             DiskCache.touch(dest)
             return dest
         }
-        if let task = inFlight[remote] { return await task.value }
-        let task = Task { await download(remote, to: dest) }
-        inFlight[remote] = task
-        let result = await task.value
+        let waiterID = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: remote)
+                    return
+                }
+                registerWaiter(continuation, id: waiterID, remote: remote, destination: dest)
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(for: remote, waiterID: waiterID) }
+        }
+    }
+
+    private func registerWaiter(
+        _ continuation: CheckedContinuation<URL, Never>,
+        id waiterID: UUID,
+        remote: URL,
+        destination: URL
+    ) {
+        if var flight = inFlight[remote] {
+            flight.waiters[waiterID] = continuation
+            inFlight[remote] = flight
+            return
+        }
+
+        let operationID = UUID()
+        inFlight[remote] = InFlightDownload(id: operationID, task: nil, waiters: [waiterID: continuation])
+        let task = Task { [weak self] in
+            guard let self else { return }
+            let result = await self.download(remote, to: destination)
+            await self.finishDownload(for: remote, operationID: operationID, result: result)
+        }
+        if var flight = inFlight[remote], flight.id == operationID {
+            flight.task = task
+            inFlight[remote] = flight
+        }
+    }
+
+    private func cancelWaiter(for remote: URL, waiterID: UUID) {
+        guard var flight = inFlight[remote],
+              let continuation = flight.waiters.removeValue(forKey: waiterID) else { return }
+        continuation.resume(returning: remote)
+        if flight.waiters.isEmpty {
+            inFlight[remote] = nil
+            flight.task?.cancel()
+        } else {
+            inFlight[remote] = flight
+        }
+    }
+
+    private func finishDownload(for remote: URL, operationID: UUID, result: URL) {
+        guard let flight = inFlight[remote], flight.id == operationID else { return }
         inFlight[remote] = nil
-        return result
+        for continuation in flight.waiters.values {
+            continuation.resume(returning: result)
+        }
     }
 
     private func download(_ remote: URL, to dest: URL) async -> URL {

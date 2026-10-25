@@ -516,11 +516,13 @@ extension PlaybackController {
         // needs the current file, which is already loaded.
         // The shared resolver caches issued URLs for 20 seconds. Keep the work
         // within that freshness window and cap it to a visible queue-sized set.
-        let prefetch = queue.dropFirst(index + 1).prefix(3).filter {
+        let metered = NetworkQuality.shared.metered
+        let prefetchCount = metered ? 1 : 3
+        let prefetch = queue.dropFirst(index + 1).prefix(prefetchCount).filter {
             $0.source.hasPrefix("yt:") && !$0.id.hasPrefix("saavn:")
         }
         let prefs = ResolvePrefs.current()
-        let fingerprint = "\(prefs.maxKbps)|" + prefetch.map(\.id).joined(separator: "|")
+        let fingerprint = "\(prefs.maxKbps)|metered=\(metered)|" + prefetch.map(\.id).joined(separator: "|")
         guard fingerprint != urlPrefetchFingerprint else { return }
         urlPrefetchFingerprint = fingerprint
         urlPrefetchTask?.cancel()
@@ -532,7 +534,12 @@ extension PlaybackController {
                 let id = entry.id
                 let stillQueued = await MainActor.run { [weak self] in
                     guard let self else { return false }
-                    return self.playGeneration == generation && self.queue.contains { $0.id == id }
+                    guard self.playGeneration == generation,
+                          self.queue.contains(where: { $0.id == id }) else { return false }
+                    // A path change can happen while this sequential read-ahead
+                    // is running. Keep the first queued item, but stop before
+                    // resolving additional speculative URLs on a metered path.
+                    return !NetworkQuality.shared.metered || id == prefetch.first?.id
                 }
                 guard stillQueued else { continue }
                 let videoId = String(entry.source.dropFirst(3))

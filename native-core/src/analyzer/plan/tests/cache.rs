@@ -174,6 +174,106 @@ fn disk_cache_hit_skips_compute_and_corrupt_entry_is_rewritten() {
 }
 
 #[test]
+fn analysis_cache_coalesces_same_key_while_distinct_keys_compute_concurrently() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let prefix = format!(
+        "cache-single-flight-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let path_a = format!("{prefix}-a");
+    let path_b = format!("{prefix}-b");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_a_tx, release_a_rx) = mpsc::channel();
+    let (release_b_tx, release_b_rx) = mpsc::channel();
+    let duplicate_calls = Arc::new(AtomicUsize::new(0));
+
+    let entered_a = entered_tx.clone();
+    let a = thread::spawn(move || {
+        analysis_cache::get_or_compute_for_identity(
+            &path_a,
+            false,
+            0.0,
+            "flight-test".into(),
+            || {
+                entered_a.send("a").unwrap();
+                release_a_rx.recv().unwrap();
+                Analysis {
+                    bpm: 101.0,
+                    ..Analysis::default()
+                }
+            },
+        )
+    });
+    assert_eq!(
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "a"
+    );
+
+    let duplicate_path = format!("{prefix}-a");
+    let duplicate_calls_in_thread = duplicate_calls.clone();
+    let duplicate = thread::spawn(move || {
+        analysis_cache::get_or_compute_for_identity(
+            &duplicate_path,
+            false,
+            0.0,
+            "flight-test".into(),
+            || {
+                duplicate_calls_in_thread.fetch_add(1, Ordering::SeqCst);
+                Analysis {
+                    bpm: 202.0,
+                    ..Analysis::default()
+                }
+            },
+        )
+    });
+
+    let entered_b = entered_tx.clone();
+    let b = thread::spawn(move || {
+        analysis_cache::get_or_compute_for_identity(
+            &path_b,
+            false,
+            0.0,
+            "flight-test".into(),
+            || {
+                entered_b.send("b").unwrap();
+                release_b_rx.recv().unwrap();
+                Analysis {
+                    bpm: 303.0,
+                    ..Analysis::default()
+                }
+            },
+        )
+    });
+    let distinct_key_started = entered_rx.recv_timeout(Duration::from_secs(2)) == Ok("b");
+
+    // Always unblock the compute closures before asserting, including when a
+    // regression serializes independent keys behind the global cache mutex.
+    let _ = release_a_tx.send(());
+    let _ = release_b_tx.send(());
+    let a_result = a.join().unwrap();
+    let duplicate_result = duplicate.join().unwrap();
+    let b_result = b.join().unwrap();
+
+    assert!(
+        distinct_key_started,
+        "different keys should compute concurrently"
+    );
+    assert_eq!(
+        duplicate_calls.load(Ordering::SeqCst),
+        0,
+        "same-key work should coalesce"
+    );
+    assert!(Arc::ptr_eq(&a_result, &duplicate_result));
+    assert_eq!(a_result.bpm, 101.0);
+    assert_eq!(b_result.bpm, 303.0);
+}
+
+#[test]
 fn partial_whole_track_decode_is_not_published_as_a_silent_tail() {
     let rate = audio_analysis::ANALYSIS_RATE as u32;
     // 96% is above the broad coverage ratio but still leaves 0.4 s of a

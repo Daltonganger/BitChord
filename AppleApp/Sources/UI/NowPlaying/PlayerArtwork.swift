@@ -19,13 +19,14 @@ struct SleeveArt: View {
     var canvasURL: URL?
     var fallbackURL: URL? = nil
     var isPlaying: Bool
+    var canvasActive = true
     var side: CGFloat
 
     var body: some View {
         ZStack {
             ArtworkView(entry: entry, side: side)
             if let canvasURL {
-                CanvasPlayer(url: canvasURL, fallbackURL: fallbackURL, isPlaying: isPlaying)
+                CanvasPlayer(url: canvasURL, fallbackURL: fallbackURL, isPlaying: isPlaying && canvasActive)
             }
         }
         .frame(width: side, height: side)
@@ -46,6 +47,7 @@ struct HeroArtwork: View {
     var canvasURL: URL?
     var fallbackURL: URL? = nil
     var isPlaying: Bool
+    var canvasActive = true
 
     private let fadeFraction: CGFloat = 0.42
 
@@ -57,7 +59,7 @@ struct HeroArtwork: View {
                     .clipped()
                     .allowsHitTesting(false)
                 if let canvasURL {
-                    CanvasPlayer(url: canvasURL, fallbackURL: fallbackURL, isPlaying: isPlaying)
+                    CanvasPlayer(url: canvasURL, fallbackURL: fallbackURL, isPlaying: isPlaying && canvasActive)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .allowsHitTesting(false)
                 }
@@ -257,7 +259,12 @@ struct FullArtworkBlurBackdrop: View {
 /// Small, pre-blurred cover copies are cached just like upstream's 128px
 /// bitmap. The expensive Core Image work runs away from the main thread.
 private enum PlayerArtworkBlurCache {
-    private static let images = NSCache<NSString, PlatformImage>()
+    private static let images: NSCache<NSString, PlatformImage> = {
+        let cache = NSCache<NSString, PlatformImage>()
+        cache.countLimit = 128
+        cache.totalCostLimit = 24 * 1024 * 1024
+        return cache
+    }()
     private static let context = CIContext(options: [.cacheIntermediates: false])
     private static let pixelLimit: CGFloat = 256
 
@@ -275,8 +282,21 @@ private enum PlayerArtworkBlurCache {
         let prepared = await Task.detached(priority: .utility) {
             renderBlurred(source)
         }.value
-        if let prepared { images.setObject(prepared, forKey: key as NSString) }
+        if let prepared {
+            images.setObject(prepared, forKey: key as NSString, cost: decodedCost(prepared))
+        }
         return prepared
+    }
+
+    private static func decodedCost(_ image: PlatformImage) -> Int {
+        #if os(iOS)
+        guard let cgImage = image.cgImage else { return 0 }
+        return cgImage.bytesPerRow * cgImage.height
+        #else
+        var proposed = CGRect(origin: .zero, size: image.size)
+        guard let cgImage = image.cgImage(forProposedRect: &proposed, context: nil, hints: nil) else { return 0 }
+        return cgImage.bytesPerRow * cgImage.height
+        #endif
     }
 
     private static func renderBlurred(_ source: PlatformImage) -> PlatformImage? {
@@ -302,7 +322,7 @@ private enum PlayerArtworkBlurCache {
         #if os(iOS)
         return UIImage(cgImage: blurred)
         #else
-        return NSImage(cgImage: blurred, size: .zero)
+        return NSImage(cgImage: blurred, size: NSSize(width: blurred.width, height: blurred.height))
         #endif
     }
 }

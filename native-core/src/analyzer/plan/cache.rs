@@ -22,14 +22,14 @@ use std::sync::Arc;
 /// Only the analysis — the expensive, file-derived half plus its duration
 /// hint — is kept.
 ///
-/// The compute runs under the lock on purpose. Two callers asking for the same
-/// track is the common case, and serialising means the second one waits and
-/// then hits, instead of both decoding the same file at once.
+/// One in-flight marker per key coalesces duplicate analyses. The map lock is
+/// held only for lookup/insertion/eviction; independent keys can decode at the
+/// same time without allowing duplicate work for the same key.
 pub(super) mod analysis_cache {
     use super::Analysis;
     use std::collections::{HashMap, VecDeque};
     use std::io::Write;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
     use std::time::UNIX_EPOCH;
 
     /// Enough for the head and tail of a queue; beyond that, re-decoding costs
@@ -46,6 +46,40 @@ pub(super) mod analysis_cache {
         /// Insertion order, for eviction. A key never appears twice: it is only
         /// pushed on a miss, and a hit returns before that.
         order: VecDeque<Key>,
+        in_flight: HashMap<Key, Arc<InFlight>>,
+    }
+
+    #[derive(Default)]
+    struct InFlight {
+        complete: Mutex<bool>,
+        ready: Condvar,
+    }
+
+    struct InFlightOwner {
+        key: Key,
+        flight: Arc<InFlight>,
+    }
+
+    impl Drop for InFlightOwner {
+        fn drop(&mut self) {
+            let mut guard = cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard
+                .in_flight
+                .get(&self.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.flight))
+            {
+                guard.in_flight.remove(&self.key);
+            }
+            drop(guard);
+            *self
+                .flight
+                .complete
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            self.flight.ready.notify_all();
+        }
     }
 
     fn cache() -> &'static Mutex<Cache> {
@@ -201,33 +235,67 @@ pub(super) mod analysis_cache {
             model_identity,
             skip_vocals,
         );
-        // A panic while analysing must not poison the cache for the session.
-        let mut guard = cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(hit) = guard.entries.get(&key) {
-            return hit.clone();
-        }
-        if let Some(hit) = read_disk(&key) {
-            let hit = Arc::new(hit);
-            guard.entries.insert(key.clone(), hit.clone());
-            guard.order.push_back(key);
-            return hit;
-        }
-        let analysis = Arc::new(compute());
-        // A transient decode failure or a short/incomplete file can produce a
-        // default analysis. Keep it only in memory so a later call can retry.
-        if duration > 0.0 && (analysis.bpm > 0.0 || !analysis.beats.is_empty()) {
-            write_disk(&key, &analysis);
-        }
-        guard.entries.insert(key.clone(), analysis.clone());
-        guard.order.push_back(key);
-        while guard.order.len() > CAPACITY {
-            if let Some(evicted) = guard.order.pop_front() {
-                guard.entries.remove(&evicted);
+        let mut compute = Some(compute);
+        loop {
+            let (flight, owner) = {
+                let mut guard = cache()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(hit) = guard.entries.get(&key) {
+                    return hit.clone();
+                }
+                if let Some(flight) = guard.in_flight.get(&key) {
+                    (flight.clone(), false)
+                } else {
+                    let flight = Arc::new(InFlight::default());
+                    guard.in_flight.insert(key.clone(), flight.clone());
+                    (flight, true)
+                }
+            };
+
+            if !owner {
+                let mut complete = flight
+                    .complete
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                while !*complete {
+                    complete = flight
+                        .ready
+                        .wait(complete)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                continue;
             }
+
+            // A panic removes the in-flight entry and wakes waiters, which may
+            // then retry. Disk I/O and analysis both run outside the map lock.
+            let _owner = InFlightOwner {
+                key: key.clone(),
+                flight,
+            };
+            let analysis = Arc::new(if let Some(hit) = read_disk(&key) {
+                hit
+            } else {
+                compute.take().expect("only the in-flight owner computes")()
+            });
+            // A transient decode failure or a short/incomplete file can produce a
+            // default analysis. Keep it only in memory so a later call can retry.
+            if duration > 0.0 && (analysis.bpm > 0.0 || !analysis.beats.is_empty()) {
+                write_disk(&key, &analysis);
+            }
+            let mut guard = cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.entries.insert(key.clone(), analysis.clone());
+            guard.order.push_back(key.clone());
+            while guard.order.len() > CAPACITY {
+                if let Some(evicted) = guard.order.pop_front() {
+                    guard.entries.remove(&evicted);
+                }
+            }
+            drop(guard);
+            return analysis;
         }
-        analysis
     }
 
     pub(crate) fn invalidate(path: &str) {
