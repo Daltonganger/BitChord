@@ -2,10 +2,11 @@
 
 The 1.0.0 DMG is unsigned by a developer and is not notarized. The packaging
 script ad-hoc signs a staging copy so its nested code has consistent signatures.
-It removes provisioning profiles and restricted entitlements; the released Mac
-build therefore does not use iCloud Key-Value Store or shared iCloud Keychain
-sessions. The app's local lyrics choices and local sign-in continue to work.
-The widget cannot use the app-group shared container in this ad-hoc package.
+The app remains unsandboxed. It retains its source entitlements except for
+iCloud Key-Value Store and App Groups, which require a team-signed build. The
+app's local lyrics choices, local sign-in, and access to local-library folders
+continue to work. Shared iCloud Keychain sessions and the widget's app-group
+container are unavailable in this ad-hoc package.
 
 ## Build and package
 
@@ -28,13 +29,12 @@ scripts/package-mac-dmg.sh 1.0.0 "$TMPDIR/BitChord-mac-export"
 ```
 
 The script checks the app version, stages a copy, removes provisioning profiles
-and old signatures, enables the macOS app sandbox, and ad-hoc signs nested code
-inside-out. The ad-hoc entitlement set contains only the app sandbox, network
-client, and user-selected file access. It removes iCloud KVS, App Groups, shared
-Keychain groups, and generated application/team identifiers. iCloud and App
-Group capabilities need a team-signed build; the App Group-backed widget cannot
-share its container in this package. The script checks the app signature, arm64
-slice, Team ID and entitlement payload, then builds a 1x/2x Finder background,
+and old signatures, then ad-hoc signs nested code inside-out without `--deep`.
+It retains exactly the source app entitlements except for the restricted iCloud
+KVS and App Groups keys. The widget gets its own source entitlements with only
+App Groups removed; it remains sandboxed. The app remains unsandboxed. The
+script checks the app signature, arm64 slice, Team ID and entitlement payload,
+then builds a 1x/2x Finder background,
 sets the volume icon and layout, closes and reopens the Finder window to read
 back its saved `.DS_Store` state, compresses the DMG, and runs `hdiutil verify`.
 The original export is left untouched.
