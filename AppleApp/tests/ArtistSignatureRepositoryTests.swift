@@ -4,12 +4,13 @@ import Foundation
 /// a separate XCTest target just to exercise the pure URL and response parsing.
 @main
 enum ArtistSignatureRepositoryTests {
-    static func main() throws {
+    static func main() async throws {
         try testBlankOverrideBuildsCommonsSearchAt1600Pixels()
         try testSearchTermEncodesReservedCharacters()
         try testParseSelectsMatchingSvgThumbnail()
         try testParseRejectsUnrelatedOrMalformedResults()
         try testMissingThumbnailIsNotFound()
+        try await testInvalidLookupInputsAreNotFound()
         print("artist signature repository tests passed")
     }
 
@@ -46,6 +47,18 @@ enum ArtistSignatureRepositoryTests {
     private static func testMissingThumbnailIsNotFound() throws {
         let response = #"{"query":{"pages":{"1":{"title":"File:Björk_signature.svg","imageinfo":[{"url":"https://upload.wikimedia.org/original.svg","mime":"image/svg+xml"}]}}}}"#
         try expect(ArtistSignatureRepository.parseResponse(Data(response.utf8), requestedArtist: "Björk") == .notFound, "raw SVGs without a bounded thumbnail must be skipped")
+    }
+
+    private static func testInvalidLookupInputsAreNotFound() async throws {
+        let repository = ArtistSignatureRepository()
+        let emptyName = await repository.signature(for: " \n ", endpointOverride: "")
+        try expect(emptyName == .notFound, "empty artist names must be definitive misses")
+
+        let invalidURL = await repository.signature(for: "Björk", endpointOverride: "not a URL")
+        try expect(invalidURL == .notFound, "invalid endpoints must be definitive misses")
+
+        let unsupportedScheme = await repository.signature(for: "Björk", endpointOverride: "ftp://example.com/api")
+        try expect(unsupportedScheme == .notFound, "unsupported endpoint schemes must be definitive misses")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {

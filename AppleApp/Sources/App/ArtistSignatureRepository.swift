@@ -24,7 +24,7 @@ actor ArtistSignatureRepository {
 
     func signature(for artistName: String, endpointOverride: String) async -> ArtistSignatureLookupResult {
         let name = artistName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, let url = Self.requestURL(artistName: name, endpointOverride: endpointOverride) else { return .failed }
+        guard !name.isEmpty, let url = Self.requestURL(artistName: name, endpointOverride: endpointOverride) else { return .notFound }
         let key = "\(url.absoluteString)|\(name.lowercased())"
         if let cached = cache[key] {
             recency.removeAll { $0 == key }
