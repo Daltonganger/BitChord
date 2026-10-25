@@ -53,6 +53,20 @@ enum Theme {
         static let gridCard: CGFloat = 140
         static let headerArt: CGFloat = 170
     }
+
+    /// Chrome surfaces' colour tokens.
+    enum Materials {
+        /// What a chrome material becomes when Reduce Transparency is on. A
+        /// clear background behind text over artwork is unreadable, so the
+        /// material is replaced rather than dropped.
+        static var opaque: Color {
+            #if os(macOS)
+            Color(nsColor: .windowBackgroundColor).opacity(0.98)
+            #else
+            Color(uiColor: .systemBackground).opacity(0.98)
+            #endif
+        }
+    }
 }
 
 /// Animation helpers that respect Reduce Motion.
@@ -122,6 +136,11 @@ struct ChromeBackground: ViewModifier {
         content.background {
             if reduceTransparency {
                 Rectangle().fill(opaque)
+            } else if #available(iOS 26.0, macOS 26.0, *) {
+                // The system's own glass: it brings the edge treatment and
+                // highlight with it, and it is what the platform now expects of
+                // a translucent surface.
+                Rectangle().fill(.clear).glassEffect(.regular)
             } else {
                 switch weight {
                 case .thin: Rectangle().fill(.ultraThinMaterial)
@@ -131,19 +150,112 @@ struct ChromeBackground: ViewModifier {
         }
     }
 
-    private var opaque: Color {
-        #if os(macOS)
-        Color(nsColor: .windowBackgroundColor).opacity(0.98)
-        #else
-        Color(uiColor: .systemBackground).opacity(0.98)
-        #endif
-    }
+    var opaque: Color { Theme.Materials.opaque }
 }
 
 extension View {
     /// A material-backed surface that becomes opaque under Reduce Transparency.
     func chromeBackground(_ weight: ChromeBackground.Weight = .thin) -> some View {
         modifier(ChromeBackground(weight: weight))
+    }
+}
+
+/// Chrome drawn in a shape: Liquid Glass on 26+, the material before it.
+///
+/// The hand-made `.ultraThinMaterial` circles and capsules were an iOS 15 idiom.
+/// From 26 the system draws the glass itself — highlight, edge and all — and a
+/// material would read as a plain blur beside it. Below 26 nothing changes, and
+/// Reduce Transparency still gets an opaque fill on both paths, because the
+/// setting outranks the OS version.
+struct ChromeGlass<S: Shape>: ViewModifier {
+    let shape: S
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if reduceTransparency {
+            content.background(shape.fill(Theme.Materials.opaque))
+        } else if #available(iOS 26.0, macOS 26.0, *) {
+            content.glassEffect(.regular, in: shape)
+        } else {
+            content.background(shape.fill(.ultraThinMaterial))
+        }
+    }
+}
+
+/// The fill behind a control that sits in a toolbar. From iOS/macOS 26 the
+/// toolbar draws its own glass around each item, so drawing [ChromeGlass] as
+/// well stacks a second pane inside the first; there it draws nothing. Earlier
+/// systems have no toolbar glass and get the material.
+struct ToolbarChrome<S: Shape>: ViewModifier {
+    let shape: S
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *) {
+            content
+        } else if reduceTransparency {
+            content.background(shape.fill(Theme.Materials.opaque))
+        } else {
+            content
+                .background(shape.fill(.ultraThinMaterial))
+                .overlay(shape.stroke(Color.white.opacity(0.22), lineWidth: 0.6))
+        }
+    }
+}
+
+extension View {
+    /// Draws the chrome fill in `shape` behind this view.
+    func chromeGlass<S: Shape>(in shape: S) -> some View {
+        modifier(ChromeGlass(shape: shape))
+    }
+
+    /// [chromeGlass] for a control inside a toolbar item; see [ToolbarChrome].
+    func toolbarChrome<S: Shape>(in shape: S) -> some View {
+        modifier(ToolbarChrome(shape: shape))
+    }
+}
+
+/// A font whose size is a design decision that still follows Dynamic Type.
+///
+/// `@ScaledMetric` lives inside the modifier so a glyph drawn inside a 22pt
+/// circle grows with the reader's text size without every view declaring a
+/// stored property for it. For copy with a semantic role use the text style
+/// (`.title3`, `.callout`) instead; this is for the sizes that are about a shape.
+struct ScaledFont: ViewModifier {
+    @ScaledMetric private var size: CGFloat
+    private let weight: Font.Weight
+    private let design: Font.Design
+
+    init(
+        size: CGFloat,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default,
+        relativeTo: Font.TextStyle = .body
+    ) {
+        _size = ScaledMetric(wrappedValue: size, relativeTo: relativeTo)
+        self.weight = weight
+        self.design = design
+    }
+
+    func body(content: Content) -> some View {
+        // The scaled size is the `@ScaledMetric`'s job; the font is built here.
+        // Calling `scaledFont` from inside this modifier's own body would apply
+        // it to itself, for ever — which is what it briefly did.
+        content.font(.system(size: size, weight: weight, design: design))
+    }
+}
+
+extension View {
+    /// A fixed-size font that still scales, via `@ScaledMetric` (`I6`).
+    func scaledFont(
+        size: CGFloat,
+        weight: Font.Weight = .regular,
+        design: Font.Design = .default,
+        relativeTo: Font.TextStyle = .body
+    ) -> some View {
+        modifier(ScaledFont(size: size, weight: weight, design: design, relativeTo: relativeTo))
     }
 }
 

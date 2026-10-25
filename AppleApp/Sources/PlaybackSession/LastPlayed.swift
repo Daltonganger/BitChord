@@ -12,6 +12,11 @@ enum LastPlayed {
         var volume: Double
         var contextID: String?
         var contextTitle: String?
+        var contextEntries: [QueueEntry]
+        var orderedContextEntries: [QueueEntry]
+        var contextContinuation: String?
+        var contextCursor: Int
+        var contextBaseIndex: Int
     }
 
     private static let key = "bitchord_last_played"
@@ -26,7 +31,12 @@ enum LastPlayed {
         shuffleEnabled: Bool,
         volume: Double,
         contextID: String? = nil,
-        contextTitle: String? = nil
+        contextTitle: String? = nil,
+        contextEntries: [QueueEntry] = [],
+        orderedContextEntries: [QueueEntry] = [],
+        contextContinuation: String? = nil,
+        contextCursor: Int = 0,
+        contextBaseIndex: Int = 0
     ) {
         guard !tracks.isEmpty, tracks.indices.contains(index) else { return }
         let start = max(0, min(index - keepBehind, max(0, tracks.count - maxTracks)))
@@ -40,7 +50,12 @@ enum LastPlayed {
             shuffle: shuffleEnabled,
             volume: volume,
             contextID: contextID,
-            contextTitle: contextTitle
+            contextTitle: contextTitle,
+            contextEntries: contextEntries.map(StoredTrack.init),
+            orderedContextEntries: orderedContextEntries.map(StoredTrack.init),
+            contextContinuation: contextContinuation,
+            contextCursor: contextCursor,
+            contextBaseIndex: contextBaseIndex
         )
         if let data = try? JSONEncoder().encode(stored) {
             UserDefaults.standard.set(data, forKey: key)
@@ -60,7 +75,12 @@ enum LastPlayed {
             shuffleEnabled: stored.shuffle,
             volume: stored.volume > 0 ? min(stored.volume, 1) : 0.9,
             contextID: stored.contextID,
-            contextTitle: stored.contextTitle
+            contextTitle: stored.contextTitle,
+            contextEntries: stored.contextEntries?.map(\.entry) ?? [],
+            orderedContextEntries: stored.orderedContextEntries?.map(\.entry) ?? [],
+            contextContinuation: stored.contextContinuation,
+            contextCursor: stored.contextCursor ?? 0,
+            contextBaseIndex: stored.contextBaseIndex ?? 0
         )
     }
 
@@ -73,6 +93,11 @@ enum LastPlayed {
         var volume: Double
         var contextID: String?
         var contextTitle: String?
+        var contextEntries: [StoredTrack]?
+        var orderedContextEntries: [StoredTrack]?
+        var contextContinuation: String?
+        var contextCursor: Int?
+        var contextBaseIndex: Int?
     }
 
     private struct StoredTrack: Codable {
@@ -89,6 +114,7 @@ enum LastPlayed {
         var albumId: String?
         var setVideoId: String?
         var contextOrder: Int?
+        var isVideo: Bool?
 
         init(_ entry: QueueEntry) {
             id = entry.id
@@ -104,6 +130,7 @@ enum LastPlayed {
             albumId = entry.albumId
             setVideoId = entry.setVideoId
             contextOrder = entry.contextOrder
+            isVideo = entry.isVideo
         }
 
         var entry: QueueEntry {
@@ -112,7 +139,7 @@ enum LastPlayed {
                 thumbnailUrl: thumbnailUrl, durationText: durationText,
                 albumName: albumName, artworkData: nil, isLocal: isLocal,
                 fromAutoplay: fromAutoplay, artistId: artistId, albumId: albumId,
-                setVideoId: setVideoId, contextOrder: contextOrder
+                setVideoId: setVideoId, contextOrder: contextOrder, isVideo: isVideo ?? false
             )
         }
     }

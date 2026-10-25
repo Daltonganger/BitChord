@@ -6,6 +6,12 @@
 //! cargo run --example automix_render -- --score-dir <fixtures_dir>
 //! ```
 //!
+//! `AUTOMIX_FORCE_STYLE=<EqualPower|DjFilter|DjBlend|Gapless|EchoOut|LoopRoll|
+//! ReverbWash|DropCut>` renders the pair with that style instead of the
+//! planner's, laid on the planner's blend, so each technique can be heard (and
+//! measured) on the same transition. `AUTOMIX_START=<seconds>` fixes where the
+//! render starts in the outgoing track, so renders line up sample for sample.
+//!
 //! `--score-dir` expects pairs named `NN-out.*` / `NN-in.*` (same stem prefix)
 //! and prints a Smoothness Index line per pair without rendering audio.
 
@@ -16,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use native_core::decode::{SourceKind, SymphoniaDecoder};
 use native_core::mixer::{
-    run_mixer, Command, EngineEvents, NerdSnapshot, TrackInfo, TrackSource, TransitionPlan,
+    run_mixer, technique_window_seconds, TransitionStyle, Command, EngineEvents, NerdSnapshot, TrackInfo, TrackSource, TransitionPlan,
 };
 use native_core::{PlaybackState, TrackEndReason};
 
@@ -140,6 +146,64 @@ fn print_plan(plan: &TransitionPlan) {
     }
 }
 
+/// The planner's blend, dressed as `name` would dress it: the same end and
+/// fade, with the fields that style reads set as the planner sets them.
+fn force_style(plan: &mut TransitionPlan, name: &str, out_duration: f64) {
+    let style = match name {
+        "EqualPower" => TransitionStyle::EqualPower,
+        "DjFilter" => TransitionStyle::DjFilter,
+        "DjBlend" => TransitionStyle::DjBlend,
+        "Gapless" => TransitionStyle::Gapless,
+        "EchoOut" => TransitionStyle::EchoOut,
+        "LoopRoll" => TransitionStyle::LoopRoll,
+        "ReverbWash" => TransitionStyle::ReverbWash,
+        "DropCut" => TransitionStyle::DropCut,
+        other => panic!("unknown style {other}"),
+    };
+    let beat = if plan.beat_seconds > 0.0 { plan.beat_seconds } else { 0.5 };
+    let end = if plan.transition_end_seconds > 0.0 { plan.transition_end_seconds } else { out_duration };
+    plan.style = style;
+    plan.beat_seconds = beat;
+    plan.transition_end_seconds = end;
+    plan.fade_seconds = plan.fade_seconds.max(8.0);
+    plan.effect_seconds = 0.0;
+    plan.effect_start_seconds = 0.0;
+    plan.bed_fraction = 0.0;
+    plan.bed_gain_db = 0.0;
+    plan.dip_depth = 0.0;
+    plan.filter_sweep = 0.0;
+    plan.bass_swap = false;
+    plan.outgoing_hold_seconds = 0.0;
+    plan.bridge_seconds = 0.0;
+    plan.bridge_repeats = 0;
+    match style {
+        TransitionStyle::DjFilter => {
+            plan.filter_sweep = 1.0;
+            plan.bass_swap = true;
+        }
+        TransitionStyle::DjBlend => {
+            plan.bass_swap = true;
+            plan.bed_fraction = 0.5;
+            plan.bed_gain_db = -14.0;
+        }
+        TransitionStyle::Gapless => plan.fade_seconds = 0.05,
+        TransitionStyle::DropCut => {
+            plan.fade_seconds = plan.fade_seconds.clamp(0.5, 4.0 * beat);
+            plan.effect_seconds = (beat / 4.0).max(0.06);
+        }
+        TransitionStyle::EchoOut | TransitionStyle::LoopRoll | TransitionStyle::ReverbWash => {
+            plan.effect_seconds = technique_window_seconds(style, beat).unwrap_or(2.0).min(plan.fade_seconds);
+        }
+        _ => {}
+    }
+    if plan.effect_seconds > 0.0 {
+        plan.effect_start_seconds = (end - plan.effect_seconds).max(0.0);
+        // As `technique_plan` does: the outgoing holds until its effect.
+        plan.outgoing_hold_seconds = (plan.fade_seconds - plan.effect_seconds).max(0.0);
+    }
+    plan.reason = format!("forced {name}");
+}
+
 fn plan_for(outgoing: &str, incoming: &str) -> TransitionPlan {
     native_core::analyzer::plan_pair(
         outgoing,
@@ -152,6 +216,9 @@ fn plan_for(outgoing: &str, incoming: &str) -> TransitionPlan {
         file_duration(incoming),
         false,
         "render",
+        // The app allows an effect on one transition in four; an audition
+        // shows what the planner picks when it may.
+        true,
         decode_window,
         file_duration,
     )
@@ -262,7 +329,10 @@ fn main() {
 
     let out_duration = file_duration(&outgoing);
     let in_duration = file_duration(&incoming);
-    let plan = plan_for(&outgoing, &incoming);
+    let mut plan = plan_for(&outgoing, &incoming);
+    if let Ok(name) = std::env::var("AUTOMIX_FORCE_STYLE") {
+        force_style(&mut plan, &name, out_duration);
+    }
     print_plan(&plan);
 
     let fade = plan.fade_seconds.max(0.5);
@@ -274,7 +344,10 @@ fn main() {
     // Arming looks four seconds ahead of the fade. Starting six seconds
     // before it leaves the decoder time to open the incoming file.
     let lead = 6.0;
-    let start_at = (end - fade - lead).max(0.0);
+    let start_at = std::env::var("AUTOMIX_START")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or((end - fade - lead).max(0.0));
     let capture_seconds = (end + plan.post_glide_seconds + 2.0 - start_at).max(8.0);
 
     let rate = 44_100u32;

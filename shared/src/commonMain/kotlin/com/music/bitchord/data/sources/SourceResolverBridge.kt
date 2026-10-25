@@ -88,6 +88,32 @@ object SourceResolverBridge {
     }
 
     /**
+     * The stream for one addon search row, by its `src:` key — the path a search
+     * result takes when it is tapped.
+     *
+     * [SourceResolver.resolve] opens the row's own source first and may fall
+     * through to another enabled one, so a row whose source has since died is
+     * still a playable track rather than a dead click.
+     */
+    fun resolveAddonTrack(
+        key: String,
+        title: String,
+        artist: String,
+        durationSec: Int?,
+        callback: StreamCallback,
+    ) = launch(callback) {
+        val parsed = SourceRegistry.parseTrackKey(key)
+        if (parsed == null) {
+            callback.onResult(null, "Not a source track")
+            return@launch
+        }
+        val target = TrackMatcher.Target(title, artist, durationSec)
+        SourceResolver.resolve(parsed.first, parsed.second, target)
+            ?.let { callback.onResult(it.encode(), null) }
+            ?: callback.onResult(null, "No stream from that source")
+    }
+
+    /**
      * The unhurried second look for a track already playing.
      *
      * @param playingJson what the listener is hearing now, as a
@@ -331,6 +357,13 @@ object SourceResolverBridge {
      */
     fun rankOf(kind: String): Int =
         SourceKind.entries.firstOrNull { it.name == kind }?.rank ?: Int.MAX_VALUE
+
+    /**
+     * How many addons are enabled. Counted the same way [SourceBridge.searchAddons]
+     * asks them — `AddonSource` only — so a tab that says "no addons yet" and a
+     * search that finds none can never disagree.
+     */
+    fun addonCount(): Int = SourceRegistry.active().count { it is AddonSource }
 
     fun setEnabled(configId: String, enabled: Boolean, callback: ActionCallback) {
         SourceRegistry.setEnabled(configId, enabled)

@@ -58,15 +58,17 @@ actor SponsorBlockStore {
 /// analysis is deliberately transient and retried as bytes finish arriving.
 actor PlaybackRegionStore {
     static let shared = PlaybackRegionStore()
-    private struct Edges: Codable { var version = 1; var start: Double; var end: Double? }
+    // v2 is the relative-gate detection (C); v1 edges were absolute-gate
+    // results and must not be reused.
+    private struct Edges: Codable { var version = 2; var start: Double; var end: Double? }
     func regions(path: String, videoId: String?, trimEdges: Bool, skipSegments: Bool) async -> PlaybackRegions {
         var result = PlaybackRegions(audibleStartSeconds: 0, audibleEndSeconds: nil, excluded: [])
         if trimEdges, !path.hasPrefix("http") {
             let complete = !FileManager.default.fileExists(atPath: path + ".grow") || FileManager.default.fileExists(atPath: path + ".complete")
             let hash = complete ? DownloadStore.hashFile(path) : nil
             let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("BitChord/Boundaries", isDirectory: true)
-            let file = hash.map { directory.appendingPathComponent($0 + "-v1.json") }
-            if let file, let data = try? Data(contentsOf: file), let cached = try? JSONDecoder().decode(Edges.self, from: data), cached.version == 1 {
+            let file = hash.map { directory.appendingPathComponent($0 + "-v2.json") }
+            if let file, let data = try? Data(contentsOf: file), let cached = try? JSONDecoder().decode(Edges.self, from: data), cached.version == 2 {
                 result.audibleStartSeconds = cached.start; result.audibleEndSeconds = cached.end
             } else if let detected = try? detectPlaybackRegions(source: path, complete: complete) {
                 result = detected

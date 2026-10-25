@@ -15,6 +15,9 @@ struct SearchHitDTO: Codable, Identifiable, Hashable {
     let albumId: String?
     let isVideo: Bool?
     let setVideoId: String?
+    /// The tier the source offered, for the addon-search quality badge; nil for
+    /// YouTube hits, which do not advertise one.
+    var sourceQuality: String? = nil
 
     var id: String { videoId ?? browseId ?? title }
 
@@ -65,6 +68,15 @@ struct SearchHitDTO: Codable, Identifiable, Hashable {
                 artworkData: nil, isLocal: false
             )
         }
+        // An addon row keeps its packed `src:` key in both id and source, so the
+        // player resolves it through the source resolver rather than as a video.
+        if let videoId, videoId.hasPrefix("src:") {
+            return QueueEntry(
+                id: videoId, title: title, artist: artistName, source: videoId,
+                thumbnailUrl: thumbnailUrl, durationText: durationText, albumName: albumName,
+                artworkData: nil, isLocal: false
+            )
+        }
         return QueueEntry.youtube(
             videoId: videoId ?? id,
             title: title,
@@ -79,25 +91,61 @@ struct SearchHitDTO: Codable, Identifiable, Hashable {
     }
 }
 
+/// One page of a search: the rows plus the token for the next page, if there
+/// is one. The token is null once the result set is exhausted.
+struct SearchPageDTO {
+    let hits: [SearchHitDTO]
+    let continuation: String?
+}
+
 final class InnertubeSearch: Sendable {
     static let shared = InnertubeSearch()
 
+    /// The first page's rows only — the shape most callers need. Callers that
+    /// page (the search screen) use [searchPage] instead.
     func search(_ term: String, scope: String) async throws -> [SearchHitDTO] {
+        try await searchPage(term, scope: scope).hits
+    }
+
+    func searchPage(_ term: String, scope: String) async throws -> SearchPageDTO {
         try await withCheckedThrowingContinuation { continuation in
             SearchBridge.shared.search(
                 query: term,
                 scope: scope,
-                callback: BridgeCallbackAdapter { json, message in
+                callback: BridgeCallbackAdapter { json, token, message in
                     if let json {
                         do {
                             let hits = try JSONDecoder()
                                 .decode([SearchHitDTO].self, from: Data(json.utf8))
-                            continuation.resume(returning: hits)
+                            continuation.resume(returning: SearchPageDTO(hits: hits, continuation: token))
                         } catch {
                             continuation.resume(throwing: error)
                         }
                     } else {
                         continuation.resume(throwing: SearchError(message: message ?? "search failed"))
+                    }
+                }
+            )
+        }
+    }
+
+    /// The next page of a search, keyed by the token the previous page returned.
+    func searchContinuation(_ token: String, scope: String) async throws -> SearchPageDTO {
+        try await withCheckedThrowingContinuation { continuation in
+            SearchBridge.shared.searchContinuation(
+                token: token,
+                scope: scope,
+                callback: BridgeCallbackAdapter { json, nextToken, message in
+                    if let json {
+                        do {
+                            let hits = try JSONDecoder()
+                                .decode([SearchHitDTO].self, from: Data(json.utf8))
+                            continuation.resume(returning: SearchPageDTO(hits: hits, continuation: nextToken))
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    } else {
+                        continuation.resume(throwing: SearchError(message: message ?? "search continuation failed"))
                     }
                 }
             )
@@ -117,13 +165,43 @@ final class InnertubeSearch: Sendable {
         }
     }
 
-    struct SearchError: Error { let message: String }
+    /// Live media rows for the typeahead dropdown — the same hits as a search,
+    /// but unauthenticated so a slow typist's intermediate queries don't land
+    /// in the account's server-side search history.
+    func typeahead(_ input: String) async throws -> [SearchHitDTO] {
+        try await withCheckedThrowingContinuation { continuation in
+            SearchBridge.shared.searchTypeahead(
+                query: input,
+                callback: BridgeCallbackAdapter { json, _, message in
+                    if let json {
+                        do {
+                            let hits = try JSONDecoder()
+                                .decode([SearchHitDTO].self, from: Data(json.utf8))
+                            continuation.resume(returning: hits)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    } else {
+                        continuation.resume(throwing: SearchError(message: message ?? "typeahead failed"))
+                    }
+                }
+            )
+        }
+    }
+
+    /// A bridge failure. `LocalizedError` so `localizedDescription` carries the
+    /// store's text — the session-expiry check reads it, and a plain `Error`
+    /// would report "couldn't be completed… (SearchError error 1.)".
+    struct SearchError: Error, LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
 }
 
 private final class BridgeCallbackAdapter: SearchBridgeSearchCallback {
-    private let onResult: (String?, String?) -> Void
-    init(onResult: @escaping (String?, String?) -> Void) { self.onResult = onResult }
-    func onResult(json: String?, message: String?) { onResult(json, message) }
+    private let onResult: (String?, String?, String?) -> Void
+    init(onResult: @escaping (String?, String?, String?) -> Void) { self.onResult = onResult }
+    func onResult(json: String?, continuation: String?, message: String?) { onResult(json, continuation, message) }
 }
 
 private final class SuggestAdapter: SuggestionsBridgeSuggestionsCallback {

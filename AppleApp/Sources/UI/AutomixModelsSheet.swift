@@ -29,7 +29,7 @@ struct AutomixModelRow: View {
                         .fill(iconColor.opacity(0.12))
                         .frame(width: 32, height: 32)
                     Image(systemName: iconName)
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(iconColor)
                 }
 
@@ -47,6 +47,10 @@ struct AutomixModelRow: View {
                     Label("Installed", systemImage: "checkmark.circle.fill")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.green)
+                } else if store.isUsingPreviousGraph(id) {
+                    Label("Update available", systemImage: "arrow.down.circle.fill")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.orange)
                 }
             }
 
@@ -55,24 +59,21 @@ struct AutomixModelRow: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if store.isUsingPreviousGraph(id) {
+                Text("Update available. Using the previous version")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             controls(spec: spec, status: status)
         }
         .padding(.vertical, 4)
     }
 
-    private var iconName: String {
-        switch id {
-        case .beat: return "metronome"
-        case .vocals: return "waveform.badge.mic"
-        }
-    }
+    private var iconName: String { "metronome" }
 
-    private var iconColor: Color {
-        switch id {
-        case .beat: return .blue
-        case .vocals: return .purple
-        }
-    }
+    private var iconColor: Color { .blue }
 
     @ViewBuilder
     private func controls(spec: AutomixModelStore.ModelSpec, status: AutomixModelStore.Status) -> some View {
@@ -131,6 +132,15 @@ struct AutomixModelRow: View {
                     .foregroundStyle(.red)
             }
 
+        case .outdated:
+            HStack(spacing: 12) {
+                action("Update") { store.start(id, allowMetered: AutomixModelsPolicy.allowMetered) }
+                Button("Remove") { store.remove(id) }
+                    .font(.footnote)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+            }
+
         case .blockedByWifi:
             HStack(spacing: 10) {
                 Text("Waiting for Wi‑Fi")
@@ -176,7 +186,7 @@ private struct AutomixModelCard: View {
                         .fill(iconBgColor.opacity(0.12))
                         .frame(width: 40, height: 40)
                     Image(systemName: iconName)
-                        .font(.system(size: 18, weight: .semibold))
+                        .scaledFont(size: 18, weight: .semibold)
                         .foregroundStyle(iconBgColor)
                 }
 
@@ -237,6 +247,16 @@ private struct AutomixModelCard: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            } else if case .outdated = status {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Text("Update available. Using the previous version")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
             } else if case .blockedByWifi = status {
                 HStack(spacing: 8) {
                     Image(systemName: "wifi.slash")
@@ -287,68 +307,53 @@ private struct AutomixModelCard: View {
         }
     }
 
-    private var cardTitle: String {
-        switch id {
-        case .beat: return "Beat Detection"
-        case .vocals: return "Vocal Detection"
-        }
-    }
+    private var cardTitle: String { "Beat Detection" }
 
-    private var cardSubtitle: String {
-        switch id {
-        case .beat: return "Beat This! AI"
-        case .vocals: return "open-unmix UMX-L"
-        }
-    }
+    private var cardSubtitle: String { "Beat This! AI" }
 
     private var cardDescription: String {
-        switch id {
-        case .beat:
-            return "Analyzes beat grids and downbeats so song transitions land perfectly in time with the music."
-        case .vocals:
-            return "Detects vocals in real time to avoid overlapping singing during track transitions."
-        }
+        "Analyzes beat grids and downbeats so song transitions land perfectly in time with the music."
     }
 
-    private var iconName: String {
-        switch id {
-        case .beat: return "metronome"
-        case .vocals: return "waveform.badge.mic"
-        }
-    }
+    private var iconName: String { "metronome" }
 
-    private var iconBgColor: Color {
-        switch id {
-        case .beat: return .blue
-        case .vocals: return .purple
-        }
-    }
+    private var iconBgColor: Color { .blue }
 
     @ViewBuilder
     private func trailingIndicator(spec: AutomixModelStore.ModelSpec, status: AutomixModelStore.Status) -> some View {
         switch status {
         case .installed:
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 20))
+                .scaledFont(size: 20)
                 .foregroundStyle(.green)
         case .downloading:
             Button {
                 store.cancel(id)
             } label: {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
+                    .scaledFont(size: 18)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .help("Cancel download")
         case .verifying:
             EmptyView()
+        case .outdated:
+            Button {
+                store.start(id, allowMetered: AutomixModelsPolicy.allowMetered)
+            } label: {
+                Image(systemName: "arrow.down.circle.fill")
+                    .scaledFont(size: 22)
+                    .foregroundStyle(iconBgColor)
+            }
+            .buttonStyle(.plain)
+            .help("Update \(spec.displayName)")
         case .notInstalled, .paused, .blockedByWifi, .failed:
             Button {
                 store.start(id, allowMetered: AutomixModelsPolicy.allowMetered)
             } label: {
                 Image(systemName: "arrow.down.circle.fill")
-                    .font(.system(size: 22))
+                    .scaledFont(size: 22)
                     .foregroundStyle(iconBgColor)
             }
             .buttonStyle(.plain)
@@ -402,7 +407,7 @@ struct AutomixModelsSheet: View {
                                     .shadow(color: Color.purple.opacity(0.3), radius: 12, y: 6)
 
                                 Image(systemName: "waveform.badge.sparkles")
-                                    .font(.system(size: 28, weight: .semibold))
+                                    .scaledFont(size: 28, weight: .semibold)
                                     .foregroundStyle(.white)
                             }
                             .padding(.top, 16)
@@ -423,7 +428,6 @@ struct AutomixModelsSheet: View {
                         // Model Cards
                         VStack(spacing: 12) {
                             AutomixModelCard(id: .beat, store: store)
-                            AutomixModelCard(id: .vocals, store: store)
                         }
                         .padding(.horizontal, 20)
 
@@ -433,11 +437,11 @@ struct AutomixModelsSheet: View {
                                 Image(systemName: "lock.shield.fill")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
-                                Text("123.5 MB total · Runs 100% on-device · Private")
+                                Text("23.5 MB beat model · Vocal detection built in · 100% on-device")
                                     .font(.caption2.weight(.medium))
                                     .foregroundStyle(.secondary)
                             }
-                            Text("Models are downloaded once and verified via SHA-256. Manage anytime in Settings.")
+                            Text("The beat model is downloaded once and verified via SHA-256. Vocal detection ships with the app. Manage anytime in Settings.")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                                 .multilineTextAlignment(.center)
@@ -520,7 +524,7 @@ struct AutomixModelsSheet: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             } else {
-                Button("Download Models (~123 MB)") {
+                Button("Download Beat Model (~23.5 MB)") {
                     downloadAllMissing()
                 }
                 .buttonStyle(.borderedProminent)
@@ -561,7 +565,7 @@ struct AutomixModelsSheet: View {
                 Button {
                     downloadAllMissing()
                 } label: {
-                    Text("Download Models (~123 MB)")
+                    Text("Download Beat Model (~23.5 MB)")
                         .font(.body.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 4)
@@ -631,16 +635,16 @@ struct AutomixModelsPage: View {
             } header: {
                 Text("Models")
             } footer: {
-                Text("Downloaded once and kept in BitChord's storage. Removing a model takes effect immediately: Automix falls back to tempo analysis without the beat model, and stops watching for vocal clashes without the vocal one.")
+                Text("Downloaded once and kept in BitChord's storage. Removing the beat model takes effect immediately: Automix falls back to tempo analysis. Vocal detection is built in and always runs.")
             }
             Section {
                 if store.totalBytesOnDisk > 0 {
                     LabeledContent("On disk", value: AutomixModelStore.bytes(store.totalBytesOnDisk))
                 }
-                LabeledContent("Source", value: "Hugging Face")
-                LabeledContent("Licence", value: "MIT")
+                LabeledContent("Source", value: "GitHub releases")
+                LabeledContent("Licence", value: "MIT (beat + vocals)")
             } footer: {
-                Text("Beat This! (beat and downbeat detection) and open-unmix UMX-L (vocal detection). Both are verified against a pinned checksum after download.")
+                Text("Beat This! (beat and downbeat detection, MIT) is downloaded and verified against a pinned checksum. open-unmix UMX-L (vocal detection, MIT) ships inside the app.")
             }
         }
         .formStyle(.grouped)

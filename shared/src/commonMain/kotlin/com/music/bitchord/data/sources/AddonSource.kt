@@ -22,6 +22,16 @@ class AddonSource(override val config: SourceConfig) : MusicSource, ConfigBacked
 
     private val client = AddonClient(SourceRegistry.baseUrlOf(config))
 
+    /** The manifest's policy flags, once read; the manifest call is cached anyway. */
+    private suspend fun manifestFlags() = client.manifest().getOrNull()
+
+    /** `allowDownloads`: false keeps this addon to playback only. */
+    suspend fun allowsDownloads(): Boolean = manifestFlags()?.downloadsAllowed ?: true
+
+    /** `checkValidLossless` against the output in use right now. */
+    private suspend fun outputPermitted(): Boolean =
+        PlaybackCodecCapabilities.losslessOutput || manifestFlags()?.requiresLosslessOutput != true
+
     override val configId: String get() = config.id
     override val kind: SourceKind get() = config.kind
     override val displayName: String get() = config.displayName
@@ -75,6 +85,9 @@ class AddonSource(override val config: SourceConfig) : MusicSource, ConfigBacked
         waitForAll: Boolean,
         request: StreamRequest?,
     ): List<Song> {
+        // An addon that asks to be used only on a lossless-capable output sits
+        // out while the listener is on, say, AirPods — its own rule, not ours.
+        if (request != null && !outputPermitted()) return emptyList()
         val tier = request?.tier ?: AddonClient.TIER_HIGH
         val result = client.search(query, tier)
         result.exceptionOrNull()?.let { failure ->
@@ -93,6 +106,7 @@ class AddonSource(override val config: SourceConfig) : MusicSource, ConfigBacked
     }
 
     override suspend fun stream(trackId: String, request: StreamRequest): SourceStream? {
+        if (!outputPermitted()) return null
         val result = client.stream(trackId, request.tier)
         result.exceptionOrNull()?.let { failure ->
             if (failure !is AddonNotFound) {

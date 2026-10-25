@@ -129,7 +129,7 @@ final class AppleDolbyRenderer {
     var nerd: NerdStatsRec? {
         guard let info else { return nil }
         return NerdStatsRec(codec: info.codec, sampleRate: info.sampleRate, bitDepth: 0,
-            channels: info.channels, kbps: info.kbps, loudnessGainDb: nil, swapCorrelation: nil,
+            channels: info.channels, kbps: info.kbps, loudnessGainDb: nil, transitionMatchDb: nil, swapCorrelation: nil,
             activeStages: ["Apple system rendering"], converterDelayFrames: 0,
             protectionReductionDb: 0, protectionInterventions: 0, buildRevision: "AVFoundation",
             decoderImplementation: "Apple AVFoundation", decodedLayout: "\(info.channels) channels",

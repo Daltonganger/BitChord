@@ -1,6 +1,7 @@
 import SwiftUI
 import BitChordShared
 import AVKit
+import AVFoundation
 #if os(iOS)
 import UIKit
 #else
@@ -41,6 +42,8 @@ struct AudioPipelineSheet: View {
                         .foregroundStyle(.white.opacity(0.45))
                         .padding(.bottom, 14)
                     stage(0, "doc.text", "Track Info") {
+                        row("Claimed Quality", claimedQuality)
+                        row("Measured Stream", measuredStream)
                         row("Source", sourceName)
                         row("Format", codec)
                         row("Bit Depth", bitDepth)
@@ -83,8 +86,14 @@ struct AudioPipelineSheet: View {
                         row("Bit-perfect", bitPerfectStatus)
                     }
                     rule
+                    stage(5, "shuffle", "Automix") {
+                        row("Next Transition", controller.analysisTier ?? "—")
+                        row("Why", controller.transitionReason ?? "—")
+                        row("Analysis", controller.analysisSources ?? "—")
+                    }
+                    rule
                     TimelineView(.periodic(from: .now, by: 1)) { _ in
-                        stage(5, "waveform.path.ecg", "Playback Diagnostics") {
+                        stage(6, "waveform.path.ecg", "Playback Diagnostics") {
                             row("Buffered", "\(controller.outputHealth.bufferedFrames) frames")
                             row("Silent callbacks", "\(controller.outputHealth.callbackUnderruns)")
                             row("Output rebuilds", "\(controller.outputHealth.outputRebuilds)")
@@ -169,7 +178,7 @@ struct AudioPipelineSheet: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .foregroundStyle(.white.opacity(0.7))
                     .frame(width: 28, height: 28)
                     .background(.white.opacity(0.10), in: Circle())
@@ -231,6 +240,14 @@ struct AudioPipelineSheet: View {
     private var bitDepth: String { (nerd?.bitDepth ?? 0) > 0 ? "\(nerd!.bitDepth)-bit" : "—" }
     private var bitrate: String { (nerd?.kbps ?? 0) > 0 ? "\(nerd!.kbps) kbps" : "—" }
     private var sourceRate: String { (nerd?.sampleRate ?? 0) > 0 ? "\(nerd!.sampleRate) Hz" : "—" }
+    private var claimedQuality: String {
+        let quality = AppSettings.shared.effectiveAudioQuality(metered: NetworkQuality.shared.metered).name
+        return "\(quality) · up to \(NetworkQuality.shared.maxKbps) kbps"
+    }
+    private var measuredStream: String {
+        let values = [codec, bitrate, sourceRate, bitDepth].filter { $0 != "—" }
+        return values.isEmpty ? "—" : values.joined(separator: " · ")
+    }
     /// The last quality upgrade's measured correlation, and what it implies for
     /// the fade. The swap uses a linear gain pair, which is flat when the two
     /// encodings are identical; `10·log10((1+ρ)/2)` is how far from flat it sits
@@ -299,7 +316,7 @@ struct AudioPipelineSheet: View {
     private var bitPerfectStatus: String {
         guard device.started else { return "Waiting for output" }
         if device.bitPerfectActive { return "Active · \(pcmFormat)" }
-        guard PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: false) else {
+        guard PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: true) else {
             return "Off"
         }
         return "Unavailable · \(device.bitPerfectReason)"
@@ -340,7 +357,7 @@ struct AudioPipelineSheet: View {
         if device.bitPerfectActive {
             return "Yes — exclusive integer PCM; engine DSP and system mixing bypassed"
         }
-        if PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: false) {
+        if PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: true) {
             return "No — \(device.bitPerfectReason)"
         }
         let src = nerd?.sampleRate ?? 0
@@ -367,7 +384,7 @@ struct AudioOutputRow: View {
         Button(action: onOpen) {
             HStack(spacing: 13) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 16, weight: .medium))
+                    .scaledFont(size: 16, weight: .medium)
                     .foregroundStyle(.white.opacity(0.7))
                     .frame(width: 40, height: 40)
                     .background(.white.opacity(0.08), in: Circle())
@@ -383,7 +400,7 @@ struct AudioOutputRow: View {
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
+                    .scaledFont(size: 13, weight: .semibold)
                     .foregroundStyle(.white.opacity(0.35))
             }
             .contentShape(Rectangle())
@@ -415,43 +432,87 @@ struct AudioOutputRow: View {
     }
 }
 
-/// Upstream `AudioOutputSheet`: where the music is coming out.
-///
-/// iOS sandboxes route selection — no app can enumerate or switch outputs
-/// itself — so this is the system route picker (`AVRoutePickerView`, the
-/// AirPlay control) plus the live pipeline readout, not a custom device list.
-/// A custom list would be a second switcher that routes nothing; the system
-/// control is the one that actually takes effect.
+/// Upstream `AudioOutputSheet`: current outputs, AirPlay, app volume, then the
+/// live pipeline. Output routes are read-only because Apple's system picker
+/// owns route selection.
 struct OutputDeviceSheet: View {
     @Environment(PlaybackController.self) private var controller
     @Environment(\.dismiss) private var dismiss
+    @State private var showPipeline = false
+    @State private var routeRevision = 0
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    row("Device", deviceName)
-                    #if os(iOS)
-                    row("System Route", AudioRouteState.shared.name)
-                    row("Apple spatial playback", AudioRouteState.shared.spatialDescription)
-                    #endif
-                    row("Sample Rate", deviceRate)
-                    row("Channels", deviceChannels)
-                    row("Pipeline", pipelineSummary)
+                    TimelineView(.periodic(from: .now, by: 1)) { _ in
+                        ForEach(routeRows) { route in
+                            HStack(spacing: 12) {
+                                Image(systemName: route.symbol)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(route.name)
+                                    if !route.kind.isEmpty {
+                                        Text(route.kind)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.tint)
+                                    .accessibilityLabel("Playing")
+                            }
+                            .accessibilityElement(children: .combine)
+                        }
+                    }
+                    AirPlayOutputRow()
                 } header: {
-                    Text("Current Route")
-                } footer: {
-                    Text("Read from the engine as it runs. “—” is a figure the system does not report.")
+                    Text("Audio Output")
                 }
                 Section {
-                    SystemRoutePickerRow()
-                    #if os(iOS)
-                    SystemVolumeRouteRow()
-                    #endif
+                    HStack(spacing: 12) {
+                        Image(systemName: controller.volume == 0 ? "speaker.slash.fill" : "speaker.fill")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24)
+                        Slider(value: Binding(
+                            get: { controller.volume },
+                            set: { controller.volume = $0 }
+                        ), in: 0...1)
+                        .accessibilityLabel("Volume")
+                        Text("\(Int(controller.volume * 100))%")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(minWidth: 42, alignment: .trailing)
+                    }
                 } header: {
-                    Text("Choose Output")
-                } footer: {
-                    Text("The system picker routes this app's audio — AirPlay, Bluetooth and the device speaker.")
+                    Text("Volume")
+                }
+                Section {
+                    Button { showPipeline = true } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "slider.horizontal.3")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Audio Pipeline")
+                                    .foregroundStyle(.primary)
+                                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                                    Text(pipelineSummary)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
                     Section {
@@ -482,6 +543,16 @@ struct OutputDeviceSheet: View {
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 380)
         #endif
+        .sheet(isPresented: $showPipeline) {
+            AudioPipelineSheet()
+                .environment(controller)
+        }
+        #if os(iOS)
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { _ in
+            routeRevision &+= 1
+            AudioRouteState.shared.refresh()
+        }
+        #endif
     }
 
     private func row(_ label: String, _ value: String) -> some View {
@@ -501,14 +572,25 @@ struct OutputDeviceSheet: View {
         return String(format: "ρ=%.3f (%.2f dB from flat)", rho, deviationDb)
     }
 
-    private var deviceName: String {
-        device.started && !device.name.isEmpty ? device.name : "Not open yet"
-    }
-    private var deviceRate: String {
-        device.started && device.sampleRate > 0 ? "\(device.sampleRate) Hz" : "—"
-    }
-    private var deviceChannels: String {
-        device.started && device.channels > 0 ? "\(device.channels)" : "—"
+    private var routeRows: [OutputRouteRowModel] {
+        _ = routeRevision
+        #if os(iOS)
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+        if outputs.isEmpty {
+            let route = AudioRouteState.shared
+            return [OutputRouteRowModel(name: route.name, kind: route.kind, symbol: "speaker.wave.2.fill")]
+        }
+        return outputs.map { output in
+            OutputRouteRowModel(
+                name: output.portName,
+                kind: outputLabel(output.portType),
+                symbol: outputSymbol(output.portType)
+            )
+        }
+        #else
+        let route = MacAudioRoutes.current()
+        return [OutputRouteRowModel(name: route.name, kind: route.kind, symbol: "speaker.wave.2.fill")]
+        #endif
     }
     private var pipelineSummary: String {
         guard device.started else { return "—" }
@@ -516,6 +598,35 @@ struct OutputDeviceSheet: View {
         if device.sampleRate > 0 { parts.append("\(device.sampleRate) Hz") }
         return parts.joined(separator: " · ")
     }
+
+    #if os(iOS)
+    private func outputLabel(_ type: AVAudioSession.Port) -> String {
+        switch type {
+        case .builtInSpeaker: String(localized: "Speaker")
+        case .headphones, .headsetMic, .lineOut: String(localized: "Headphones")
+        case .bluetoothA2DP, .bluetoothLE, .bluetoothHFP: String(localized: "Bluetooth")
+        case .airPlay: String(localized: "AirPlay")
+        case .usbAudio: String(localized: "USB Audio")
+        case .HDMI: String(localized: "HDMI")
+        case .carAudio: String(localized: "CarPlay")
+        case .builtInReceiver: String(localized: "Receiver")
+        default: String(localized: "Output")
+        }
+    }
+
+    private func outputSymbol(_ type: AVAudioSession.Port) -> String {
+        switch type {
+        case .builtInSpeaker: "speaker.wave.2.fill"
+        case .builtInReceiver: "phone"
+        case .headphones, .headsetMic, .lineOut: "headphones"
+        case .bluetoothA2DP, .bluetoothLE, .bluetoothHFP: "airpodspro"
+        case .airPlay: "airplayaudio"
+        case .usbAudio, .HDMI: "hifispeaker.fill"
+        case .carAudio: "car.fill"
+        default: "hifispeaker"
+        }
+    }
+    #endif
 
     private static func formatLabel(_ format: String) -> String {
         switch format {
@@ -526,22 +637,26 @@ struct OutputDeviceSheet: View {
     }
 }
 
-/// The system AirPlay route picker, hosted as a row.
-///
-/// `AVRoutePickerView` is the only control iOS offers that actually changes the
-/// route — a custom list of devices would display without switching anything,
-/// because route selection is a system decision apps can only request through
-/// this control.
-private struct SystemRoutePickerRow: View {
+private struct OutputRouteRowModel: Identifiable {
+    let name: String
+    let kind: String
+    let symbol: String
+    var id: String { "\(kind):\(name)" }
+}
+
+private struct AirPlayOutputRow: View {
     var body: some View {
-        HStack {
-            Text("AirPlay & Bluetooth")
-            Spacer(minLength: 12)
+        HStack(spacing: 12) {
+            Image(systemName: "airplayaudio")
+                .foregroundStyle(.secondary)
+                .frame(width: 24)
+            Text("AirPlay")
+            Spacer()
             SystemRoutePickerView()
-                .frame(width: 44, height: 44)
+                .frame(width: 44, height: 36)
+            .accessibilityLabel("AirPlay")
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Choose audio output")
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -556,20 +671,6 @@ private struct SystemRoutePickerView: UIViewRepresentable {
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }
 
-/// A second entry point to the system output picker, for the output control
-/// presented alongside the pipeline settings.
-private struct SystemVolumeRouteRow: View {
-    var body: some View {
-        HStack {
-            Text("Output Switcher")
-            Spacer(minLength: 12)
-            SystemRoutePickerView()
-                .frame(width: 44, height: 44)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Open system output switcher")
-    }
-}
 #else
 private struct SystemRoutePickerView: NSViewRepresentable {
     func makeNSView(context: Context) -> AVRoutePickerView {

@@ -1,6 +1,7 @@
 import SwiftUI
 import Observation
 import BitChordShared
+import Foundation
 
 /// The remote file library, as one observable value.
 ///
@@ -44,6 +45,7 @@ final class WebDavStore {
     private(set) var state: State = .notConfigured
     private(set) var albums: [RemoteAlbum] = []
     private(set) var trackCount = 0
+    private(set) var uploadingEntryIDs: Set<String> = []
 
     /// The share as it is configured right now.
     ///
@@ -131,6 +133,88 @@ final class WebDavStore {
         }
     }
 
+    /// Copy one local audio file to the share. PUTs stream from the file URL and
+    /// carry `If-None-Match: *`; a collision gets a numbered sibling rather than
+    /// replacing somebody else's recording.
+    func upload(
+        path: String,
+        title: String,
+        artist: String,
+        refreshAfterUpload: Bool = true
+    ) async throws -> String {
+        guard isConfigured, !path.hasPrefix("http://"), !path.hasPrefix("https://") else {
+            throw WebDavUploadError.notAvailable
+        }
+        let fileURL = URL(fileURLWithPath: path)
+        guard FileManager.default.isReadableFile(atPath: fileURL.path) else {
+            throw WebDavUploadError.unreadable
+        }
+        let ext = fileURL.pathExtension.lowercased()
+        let bridge = WebDavBridge.shared
+        guard bridge.supportsUploadExtension(fileExtension: ext) else { throw WebDavUploadError.notAvailable }
+        let baseName = bridge.uploadFileName(title: title, artist: artist, fileExtension: ext)
+        let suffix = ".\(ext)"
+        let stem = baseName.hasSuffix(suffix) ? String(baseName.dropLast(suffix.count)) : baseName
+        uploadingEntryIDs.insert(path)
+        defer { uploadingEntryIDs.remove(path) }
+
+        for number in 0..<1_000 {
+            let fileName = number == 0 ? baseName : "\(stem) (\(number))\(suffix)"
+            guard let target = URL(string: bridge.uploadFileUrl(fileName: fileName)) else {
+                throw WebDavUploadError.invalidAddress
+            }
+            var request = URLRequest(url: target)
+            request.httpMethod = "PUT"
+            request.setValue("*", forHTTPHeaderField: "If-None-Match")
+            request.setValue(Self.mimeType(for: ext), forHTTPHeaderField: "Content-Type")
+            if let authorization = bridge.uploadAuthorizationHeader(fileUrl: target.absoluteString) {
+                request.setValue(authorization, forHTTPHeaderField: "Authorization")
+            }
+
+            let response: URLResponse
+            do {
+                (_, response) = try await URLSession.shared.upload(for: request, fromFile: fileURL)
+            } catch {
+                throw WebDavUploadError.unreachable
+            }
+            guard let http = response as? HTTPURLResponse else { throw WebDavUploadError.unreachable }
+            if http.statusCode == 412 { continue }
+            guard (200..<300).contains(http.statusCode) else {
+                throw WebDavUploadError.refused(http.statusCode)
+            }
+            if refreshAfterUpload {
+                await load(force: true)
+            }
+            return fileName
+        }
+        throw WebDavUploadError.tooManyConflicts
+    }
+
+    /// Local paths only. A WebDAV row is local to the queue, but its source is a
+    /// server URL and copying it back to that same share would be a loop.
+    func canUpload(path: String, id: String) -> Bool {
+        guard isConfigured, !path.isEmpty, !uploadingEntryIDs.contains(path), !bridgeIsRemote(id) else { return false }
+        let ext = URL(fileURLWithPath: path).pathExtension
+        return WebDavBridge.shared.supportsUploadExtension(fileExtension: ext)
+    }
+
+    private func bridgeIsRemote(_ id: String) -> Bool {
+        WebDavBridge.shared.isRemoteId(videoId: id)
+    }
+
+    private static func mimeType(for ext: String) -> String {
+        switch ext {
+        case "mp3": "audio/mpeg"
+        case "m4a", "mp4": "audio/mp4"
+        case "flac": "audio/flac"
+        case "ogg", "opus": "audio/ogg"
+        case "aac": "audio/aac"
+        case "wav": "audio/wav"
+        case "webm": "audio/webm"
+        default: "application/octet-stream"
+        }
+    }
+
     // MARK: - Grouping
 
     /// A folder's worth of tracks, with the cover filed beside them.
@@ -199,6 +283,23 @@ final class WebDavStore {
             return "Couldn’t reach \(url.host() ?? "that server")."
         }
         return "Couldn’t reach that server."
+    }
+}
+
+private enum WebDavUploadError: LocalizedError {
+    case notAvailable, unreadable, invalidAddress, unreachable, refused(Int), tooManyConflicts
+
+    var errorDescription: String? {
+        switch self {
+        case .notAvailable: "This track cannot be uploaded to WebDAV."
+        case .unreadable: "Could not read this audio file."
+        case .invalidAddress, .unreachable: "Could not reach the WebDAV share."
+        case .refused(401): "The server did not accept the WebDAV username and password."
+        case .refused(403): "The server refused the upload."
+        case .refused(507): "The WebDAV share is out of storage."
+        case let .refused(status): "The WebDAV server refused the upload (\(status))."
+        case .tooManyConflicts: "Could not find an unused name for this upload."
+        }
     }
 }
 

@@ -10,7 +10,7 @@ import Foundation
 //
 // Run: scripts/check-models.sh
 // Set MODELS_LIVE=1 to also download the real pinned beat model and check its
-// SHA-256, which is how manifest drift against Hugging Face gets caught.
+// SHA-256, which is how manifest drift against the release asset gets caught.
 
 let environment = ProcessInfo.processInfo.environment
 guard let base = environment["MODELS_FIXTURE"], let baseURL = URL(string: base) else {
@@ -117,6 +117,116 @@ do {
     store.remove(.beat)
     check("remove leaves notInstalled", store.status(of: .beat) == .notInstalled)
     check("remove deletes the file", store.installedPath(.beat) == nil)
+}
+
+// MARK: - 1b. A stale install of the same name is not "installed"
+
+print("\nmigration from a stale graph")
+do {
+    let directory = temporaryDirectory("stale")
+    let newSpec = spec(.beat, path: "good.bin", name: "beat.fixture", sha: fixture.goodSHA, size: fixture.size)
+    let store = AutomixModelStore(directory: directory, specs: [newSpec])
+    // The previous small graph: the same file name, a different length, and no
+    // record that it was ever verified. It is not usable; remove it.
+    let stale = directory.appendingPathComponent("beat.fixture")
+    try Data(repeating: 0xAB, count: 1024).write(to: stale)
+    store.refresh()
+    check("unverified stale graph is not installed", store.status(of: .beat) == .notInstalled, "\(store.status(of: .beat))")
+    check("unverified stale graph is removed", !FileManager.default.fileExists(atPath: stale.path))
+    await store.download(.beat, allowMetered: true)
+    check("the new graph installs under the old name", store.status(of: .beat).isInstalled, "\(store.status(of: .beat))")
+    if let path = store.installedPath(.beat) {
+        check("the installed graph is the new one", sha256(of: URL(fileURLWithPath: path)) == fixture.goodSHA)
+    }
+}
+
+// MARK: - 1c. A graph this store verified under the previous manifest stays in use
+
+print("\nprevious graph stays in use")
+do {
+    let directory = temporaryDirectory("previous")
+    let name = "beat.fixture"
+    let oldFile = directory.appendingPathComponent(name)
+    try Data(repeating: 0x5A, count: 2048).write(to: oldFile)
+    let oldSha = sha256(of: oldFile)
+    // The previous manifest's record: the same name, an older size and digest.
+    let record = "{\"sha256\":\"\(oldSha)\",\"bytes\":2048,\"installedAt\":0}"
+    try Data("{\"\(name)\":\(record)}".utf8)
+        .write(to: directory.appendingPathComponent("installed.json"))
+    let newSpec = spec(.beat, path: "good.bin", name: name, sha: fixture.goodSHA, size: fixture.size)
+    let store = AutomixModelStore(directory: directory, specs: [newSpec])
+    store.refresh()
+    let previous = directory.appendingPathComponent(name + ".prev")
+    check("old graph is kept as the fallback", FileManager.default.fileExists(atPath: previous.path))
+    check("the fallback is visible as an update", store.status(of: .beat) == .outdated, "\(store.status(of: .beat))")
+    check(
+        "the old graph stays in use until the new one verifies",
+        store.analyzerPaths.beat == previous.path
+            && sha256(of: URL(fileURLWithPath: store.analyzerPaths.beat)) == oldSha,
+        store.analyzerPaths.beat
+    )
+
+    // A relaunch rediscovers the parked graph, not just the store that made it.
+    let relaunched = AutomixModelStore(directory: directory, specs: [newSpec])
+    relaunched.refresh()
+    check("a relaunch still reports the update", relaunched.status(of: .beat) == .outdated, "\(relaunched.status(of: .beat))")
+    check("a relaunch still uses the old graph", relaunched.analyzerPaths.beat == previous.path)
+
+    // A failed replacement download must not take the working graph away.
+    let failing = AutomixModelStore(
+        directory: directory,
+        specs: [spec(.beat, path: "corrupt.bin", name: name, sha: fixture.goodSHA, size: fixture.size)]
+    )
+    failing.refresh()
+    await failing.download(.beat, allowMetered: true)
+    check("the failed update is reported", {
+        if case .failed = failing.status(of: .beat) { return true }
+        return false
+    }(), "\(failing.status(of: .beat))")
+    check(
+        "a failed download keeps the old graph",
+        FileManager.default.fileExists(atPath: previous.path)
+            && failing.analyzerPaths.beat == previous.path
+            && failing.isUsingPreviousGraph(.beat)
+    )
+
+    // A verified replacement swaps atomically and drops the fallback.
+    await relaunched.download(.beat, allowMetered: true)
+    check("the replacement installs", relaunched.status(of: .beat).isInstalled, "\(relaunched.status(of: .beat))")
+    check("the fallback is removed once the replacement verifies", !FileManager.default.fileExists(atPath: previous.path))
+    if let path = relaunched.installedPath(.beat) {
+        check(
+            "the analyser points at the new graph",
+            relaunched.analyzerPaths.beat == path && sha256(of: URL(fileURLWithPath: path)) == fixture.goodSHA
+        )
+    }
+}
+
+// MARK: - 1e. The old 113 MB vocal download is removed
+
+print("\nlegacy vocal download")
+do {
+    let directory = temporaryDirectory("legacy-vocals")
+    let legacy = directory.appendingPathComponent("vocals_umxhq.onnx")
+    let part = directory.appendingPathComponent("vocals_umxhq.onnx.part")
+    let previous = directory.appendingPathComponent("vocals_umxhq.onnx.prev")
+    try Data(repeating: 0xAB, count: 4096).write(to: legacy)
+    try Data(repeating: 0xAB, count: 1024).write(to: part)
+    try Data(repeating: 0xAB, count: 1024).write(to: previous)
+    let record = "{\"sha256\":\"\(sha256(of: legacy))\",\"bytes\":4096,\"installedAt\":0}"
+    try Data("{\"vocals_umxhq.onnx\":\(record)}".utf8)
+        .write(to: directory.appendingPathComponent("installed.json"))
+    let store = AutomixModelStore(
+        directory: directory,
+        specs: [spec(.beat, path: "good.bin", name: "beat.fixture", sha: fixture.goodSHA, size: fixture.size)]
+    )
+    store.refresh()
+    check("the old vocal download is removed", !FileManager.default.fileExists(atPath: legacy.path))
+    check("its resume file is removed", !FileManager.default.fileExists(atPath: part.path))
+    check("its fallback is removed", !FileManager.default.fileExists(atPath: previous.path))
+    let after = (try? Data(contentsOf: directory.appendingPathComponent("installed.json")))
+        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+    check("its record is removed", after["vocals_umxhq.onnx"] == nil)
 }
 
 // MARK: - 2. The right length with the wrong bytes is refused

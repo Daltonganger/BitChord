@@ -29,11 +29,11 @@ struct SongActionButtons: View {
         Button("Start Radio") { controller.playRadio(entry) }
         if auth.signedIn, let vid = entry.videoId {
             Divider()
-            Button(likeTitle(vid)) {
-                Task { await toggleLike(vid) }
+            Button(SongRatingActions.likeTitle(vid)) {
+                Task { await SongRatingActions.toggleLike(videoId: vid, controller: controller, toast: toast) }
             }
-            Button(dislikeTitle(vid)) {
-                Task { await toggleDislike(vid) }
+            Button(SongRatingActions.dislikeTitle(vid)) {
+                Task { await SongRatingActions.toggleDislike(videoId: vid, controller: controller, toast: toast) }
             }
             Button("Add to Playlist…") {
                 appModel.playlistPicker = PlaylistPickerRequest(videoId: vid, title: entry.title)
@@ -70,6 +70,12 @@ struct SongActionButtons: View {
         // answers so the menu cannot disagree with the resolution path about
         // what a revert means.
         if entry.id == controller.current?.id {
+            if controller.songVersions[entry.id] != nil {
+                Divider()
+                Button("Convert to Audio", systemImage: "music.note") {
+                    controller.playSongVersion()
+                }
+            }
             if controller.canRevertToOriginal {
                 Divider()
                 Button("Revert to Original") { controller.revertToOriginal() }
@@ -80,16 +86,20 @@ struct SongActionButtons: View {
             }
         }
         if !entry.isLocal {
-            Button("Download") {
-                switch DownloadStore.shared.download(entry) {
-                case .started:
-                    toast.show("Downloading \(entry.title)")
-                case .blockedByWifiOnly:
-                    toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
-                case .alreadyExists:
-                    toast.show("\(entry.title) is already downloading or downloaded", kind: .info)
-                case .ignoredLocalTrack:
-                    break
+            downloadRow(entry)
+        }
+        if WebDavStore.shared.canUpload(path: entry.source, id: entry.id) {
+            Button("Upload to WebDAV", systemImage: "arrow.up.doc") {
+                toast.show("Uploading \(entry.title)…", kind: .info)
+                Task {
+                    do {
+                        let fileName = try await WebDavStore.shared.upload(
+                            path: entry.source, title: entry.title, artist: entry.artist
+                        )
+                        toast.show("Uploaded \(fileName)", kind: .success)
+                    } catch {
+                        toast.show(error.localizedDescription, kind: .failure)
+                    }
                 }
             }
         }
@@ -123,32 +133,97 @@ struct SongActionButtons: View {
         return URL(string: "https://music.youtube.com")!
     }
 
-    private func likeTitle(_ videoId: String) -> String {
+    /// Upstream's `DownloadRow`: the one row that tells the truth about where
+    /// this song's download is — queued (Cancel), running (Count), failed
+    /// (Retry), saved (Delete) — instead of a Download button that lies the
+    /// moment a download exists. The label is read when the menu opens; a
+    /// context menu does not re-render live.
+    @ViewBuilder
+    private func downloadRow(_ entry: QueueEntry) -> some View {
+        let store = DownloadStore.shared
+        let asset = store.asset(for: entry)
+        let activeJob = store.jobs.first { job in
+            job.entry.source == entry.source && job.entry.id == entry.id
+                && (job.status == .queued || job.status == .running)
+        }
+        let failedJob = store.jobs.first { job in
+            job.entry.source == entry.source && job.entry.id == entry.id && job.status == .failed
+        }
+        if let activeJob {
+            Button("Cancel Download") {
+                store.cancel(activeJob.id)
+                toast.show("Cancelled \(entry.title)")
+            }
+        } else if let failedJob {
+            Button("Retry Download") {
+                // The same switch the fresh download shows: a retry can be
+                // refused on metered data like anything else.
+                switch store.download(entry) {
+                case .started:
+                    toast.show("Retrying \(entry.title)")
+                case .blockedByWifiOnly:
+                    toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
+                case .alreadyExists:
+                    toast.show("\(entry.title) is already downloading or downloaded", kind: .info)
+                case .ignoredLocalTrack:
+                    break
+                }
+            }
+        } else if let asset {
+            Button("Delete Download", role: .destructive) {
+                let title = entry.title
+                toast.requestConfirmation(ConfirmationRequest(
+                    title: "Delete the download?",
+                    message: "“\(title)” will be removed from this device. It will download again when played.",
+                    confirm: "Delete Download"
+                ) {
+                    DownloadStore.shared.delete(asset.path)
+                    toast.show("Deleted \(title)")
+                })
+            }
+        } else {
+            Button("Download") {
+                SongRatingActions.startDownload(entry, toast: toast)
+            }
+        }
+    }
+}
+
+/// One implementation of "rate the playing track" and "download it".
+///
+/// A context menu and the Mac's menu bar both act on the current track, and the
+/// dislike rule — the second tap is an undo and must **not** skip — is exactly the
+/// kind of rule that drifts when it is written twice. Same for the download
+/// switches, whose four answers (started, refused on metered data, already there,
+/// local track) each have their own answer to the listener.
+@MainActor
+enum SongRatingActions {
+    /// The label, which is upstream's: the second tap is an undo and says so.
+    static func likeTitle(_ videoId: String) -> String {
         LibraryActions.cachedLike(videoId) == "LIKE" ? "Remove Like" : "Like"
     }
 
-    private func toggleLike(_ videoId: String) async {
-        // Same shape as `toggleDislike` below: the optimistic write and its
-        // rollback live in `LibraryActions.toggleLike`, and a refusal is said
-        // out loud instead of being written to `_`.
+    static func dislikeTitle(_ videoId: String) -> String {
+        LibraryActions.cachedLike(videoId) == "DISLIKE" ? "Undo Dislike" : "Dislike"
+    }
+
+    static func toggleLike(videoId: String, controller: PlaybackController, toast: ToastCenter) async {
+        // The optimistic write and its rollback live in
+        // `LibraryActions.toggleLike`, and a refusal is said out loud instead of
+        // being written to `_`.
         if let failure = await controller.toggleLikeAndWait(videoId: videoId) {
             toast.show(failure, kind: .failure)
         }
     }
 
-    /// The label, which is upstream's: the second tap is an undo and says so.
-    private func dislikeTitle(_ videoId: String) -> String {
-        LibraryActions.cachedLike(videoId) == "DISLIKE" ? "Undo Dislike" : "Dislike"
-    }
-
     /// Thumb down, and move on if this is the track that is playing.
     ///
     /// The decision is `shouldSkipAfterDislike` in the shared module rather than
-    /// anything written here, because it is a rule with an edge case — the second tap
-    /// is an undo and must *not* skip — and the edge case is the whole reason the rule
-    /// exists. The previous status is read before the write, so the answer describes
-    /// what the track was and not what it became.
-    private func toggleDislike(_ videoId: String) async {
+    /// anything written here, because it is a rule with an edge case — the second
+    /// tap is an undo and must *not* skip — and the edge case is the whole reason
+    /// the rule exists. The previous status is read before the write, so the answer
+    /// describes what the track was and not what it became.
+    static func toggleDislike(videoId: String, controller: PlaybackController, toast: ToastCenter) async {
         let wasDisliked = LibraryActions.cachedLike(videoId) == "DISLIKE"
         let previous = wasDisliked
             ? LikeStatus.dislike
@@ -167,6 +242,145 @@ struct SongActionButtons: View {
             controller.next()
         }
     }
+
+    /// Ask for a download and say what came of it.
+    static func startDownload(_ entry: QueueEntry, toast: ToastCenter) {
+        switch DownloadStore.shared.download(entry) {
+        case .started:
+            toast.show("Downloading \(entry.title)")
+        case .blockedByWifiOnly:
+            toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
+        case .alreadyExists:
+            toast.show("\(entry.title) is already downloading or downloaded", kind: .info)
+        case .ignoredLocalTrack:
+            break
+        }
+    }
+}
+
+/// The card iOS draws above a lifted row's actions, the way Apple Music does:
+/// artwork big enough to recognise, then the title and its second line.
+///
+/// System context menus take an arbitrary view here, and every song, album and
+/// playlist menu in the app passes through the modifiers below, so a long press
+/// looks the same wherever the row lives.
+struct ContextMenuPreview: View {
+    var artworkUrl: String?
+    var artworkData: Data?
+    var title: String
+    var subtitle: String?
+    /// Artists are drawn round and everything else square, as in the app.
+    var roundArtwork: Bool = false
+
+    /// 280 wide, less the 16pt padding either side: the sleeve is the card.
+    private let side: CGFloat = 248
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ArtworkView(url: artworkUrl, data: artworkData, side: side)
+                .clipShape(roundArtwork
+                    ? AnyShape(.circle)
+                    : AnyShape(.rect(cornerRadius: 12, style: .continuous)))
+                .shadow(color: .black.opacity(0.28), radius: 14, y: 6)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                    .lineLimit(2)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 280, alignment: .leading)
+    }
+
+    init(artworkUrl: String?, artworkData: Data? = nil, title: String, subtitle: String?, roundArtwork: Bool = false) {
+        self.artworkUrl = artworkUrl
+        self.artworkData = artworkData
+        self.title = title
+        self.subtitle = subtitle
+        self.roundArtwork = roundArtwork
+    }
+
+    init(entry: QueueEntry) {
+        self.init(
+            artworkUrl: entry.thumbnailUrl, artworkData: entry.artworkData,
+            title: entry.title, subtitle: entry.artist
+        )
+    }
+
+    init(card: ShelfCard, roundArtwork: Bool = false) {
+        self.init(
+            artworkUrl: card.thumbnailUrl, title: card.title,
+            subtitle: card.subtitle, roundArtwork: roundArtwork
+        )
+    }
+}
+
+extension View {
+    /// A menu with an Apple Music style lift preview on iOS.
+    ///
+    /// macOS keeps the plain right-click menu: its context menus are a pointer
+    /// gesture with no lift, and the preview view has nothing to attach to.
+    @ViewBuilder
+    func liftPreview<Menu: View, Preview: View>(
+        @ViewBuilder menu: () -> Menu,
+        @ViewBuilder preview: () -> Preview
+    ) -> some View {
+        #if os(iOS)
+        contextMenu(menuItems: menu, preview: preview)
+        #else
+        contextMenu(menuItems: menu)
+        #endif
+    }
+
+    /// The shared song actions, with the lifted sleeve on iOS.
+    func songContextMenu(
+        _ entry: QueueEntry,
+        playlistBrowseId: String? = nil,
+        playlistOwned: Bool = false
+    ) -> some View {
+        liftPreview {
+            SongActionButtons(
+                entry: entry, playlistBrowseId: playlistBrowseId,
+                setVideoId: entry.setVideoId, playlistOwned: playlistOwned
+            )
+        } preview: {
+            ContextMenuPreview(entry: entry)
+        }
+    }
+
+    /// A shelf card's actions: the track menu when the card is a track, the
+    /// browse menu (play, shuffle, pin, save) when it is a collection.
+    func shelfCardContextMenu(_ card: ShelfCard, roundArtwork: Bool = false) -> some View {
+        liftPreview {
+            ShelfCardActionButtons(card: card)
+        } preview: {
+            ContextMenuPreview(card: card, roundArtwork: roundArtwork)
+        }
+    }
+}
+
+/// A shelf card's actions, whichever kind of card it is: a card carrying a
+/// video id is a track and gets the track menu; everything else is a
+/// collection and gets play/shuffle/pin/save.
+struct ShelfCardActionButtons: View {
+    let card: ShelfCard
+
+    var body: some View {
+        if let videoId = card.videoId, !videoId.isEmpty {
+            SongActionButtons(entry: QueueEntry.youtube(
+                videoId: videoId, title: card.title, artist: card.subtitle ?? "",
+                thumbnailUrl: card.thumbnailUrl
+            ))
+        } else {
+            BrowseActionButtons(card: card)
+        }
+    }
 }
 
 struct BrowseActionButtons: View {
@@ -175,6 +389,9 @@ struct BrowseActionButtons: View {
     @Environment(AuthController.self) private var auth
     @Environment(AppModel.self) private var appModel
     @Environment(ToastCenter.self) private var toast
+    #if os(macOS)
+    @Environment(\.openWindow) private var openWindow
+    #endif
 
     var body: some View {
         if let videoId = card.videoId, !videoId.isEmpty {
@@ -187,53 +404,89 @@ struct BrowseActionButtons: View {
             Button("Add to Queue") { controller.addToQueue(entry) }
         }
         if let browseId = card.browseId, !browseId.isEmpty {
-            Button("Open") {
-                appModel.pendingDetail = .detail(browseId: browseId, title: card.title)
+            #if os(macOS)
+            Button("Open in New Window") {
+                openWindow(
+                    id: MacBrowseWindow.sceneID,
+                    value: MacBrowseWindowRoute.detail(browseId: browseId, title: card.title)
+                )
             }
-            Button("Play") {
-                Task { await playCollection(browseId, shuffle: false) }
-            }
-            Button("Shuffle") {
-                Task { await playCollection(browseId, shuffle: true) }
-            }
-            if auth.signedIn {
-                let pinned = PlatformSettings.shared.getString(key: "pinned_playlists", default: "")
-                    .split(separator: ",").map(String.init)
-                Button(pinned.contains(browseId) ? "Unpin" : "Pin") {
-                    if !PlaylistPinning.toggle(browseId: browseId) {
-                        appModel.pinLimitAlert = true
-                    }
+            #endif
+            if browseId.hasPrefix("UC") {
+                // Upstream leaves artists out of the browse menu entirely
+                // (MainActivity.kt:1851) — there is nothing to download, pin,
+                // rename or save about a channel from a card. Ours keeps the
+                // one action a card can honestly offer, because a context
+                // menu with no rows is worse than a short one.
+                Button("Open") {
+                    appModel.pendingDetail = .detail(browseId: browseId, title: card.title)
                 }
-                if browseId.hasPrefix("VL") || browseId.hasPrefix("PL") {
-                    Button("Rename Playlist…") {
-                        appModel.playlistRename = PlaylistRenameRequest(browseId: browseId, title: card.title)
-                    }
-                }
-                if browseId.hasPrefix("VL") || browseId.hasPrefix("MPRE") || browseId.hasPrefix("OLAK") {
-                    Button("Save to Library") {
-                        Task {
-                            let pid = browseId.hasPrefix("VL") ? String(browseId.dropFirst(2)) : browseId
-                            _ = await LibraryActions.ratePlaylist(playlistId: pid, saved: true)
-                        }
-                    }
+            } else {
+                browseRows(browseId)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func browseRows(_ browseId: String) -> some View {
+        Button("Open") {
+            appModel.pendingDetail = .detail(browseId: browseId, title: card.title)
+        }
+        Button("Play") {
+            Task { await playCollection(browseId, shuffle: false) }
+        }
+        Button("Shuffle") {
+            Task { await playCollection(browseId, shuffle: true) }
+        }
+        // Pinning is a local list of ids, not an account write — upstream
+        // offers it signed out too, and only for playlists
+        // (MainActivity.kt:4672).
+        if isPlaylist(browseId) {
+            let pinned = PlatformSettings.shared.getString(key: "pinned_playlists", default: "")
+                .split(separator: ",").map(String.init)
+            Button(pinned.contains(browseId) ? "Unpin" : "Pin") {
+                if !PlaylistPinning.toggle(browseId: browseId) {
+                    appModel.pinLimitAlert = true
                 }
             }
-            Button("Download") {
-                Task {
-                    let result = await DownloadStore.shared.downloadCollection(browseId: browseId)
-                    switch result {
-                    case .started:
-                        toast.show("Downloading \(card.title)")
-                    case .blockedByWifiOnly:
-                        toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
-                    case .alreadyExists:
-                        toast.show("\(card.title) is already downloading or downloaded", kind: .info)
-                    case .ignoredLocalTrack:
-                        break
+        }
+        if auth.signedIn {
+            if browseId.hasPrefix("VL") || browseId.hasPrefix("PL") {
+                Button("Rename Playlist…") {
+                    appModel.playlistRename = PlaylistRenameRequest(browseId: browseId, title: card.title)
+                }
+            }
+            if browseId.hasPrefix("VL") || browseId.hasPrefix("MPRE") || browseId.hasPrefix("OLAK") {
+                Button("Save to Library") {
+                    Task {
+                        let pid = browseId.hasPrefix("VL") ? String(browseId.dropFirst(2)) : browseId
+                        _ = await LibraryActions.ratePlaylist(playlistId: pid, saved: true)
                     }
                 }
             }
         }
+        downloadRow(browseId)
+        // Album and playlist only, like upstream's share gate
+        // (MainActivity.kt:4747): a channel link is not a thing to pass
+        // around, and the other browse kinds have no page of their own.
+        if isPlaylist(browseId) {
+            ShareLink(item: URL(string: "https://music.youtube.com/playlist?list=\(browseId.hasPrefix("VL") ? String(browseId.dropFirst(2)) : browseId)")!) {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
+        } else if browseId.hasPrefix("MPRE") || browseId.hasPrefix("OLAK") {
+            ShareLink(item: URL(string: "https://music.youtube.com/browse/\(browseId)")!) {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
+        }
+    }
+
+    private func isPlaylist(_ browseId: String) -> Bool {
+        browseId.hasPrefix("VL") || browseId.hasPrefix("PL")
+    }
+
+    /// Shared with the release page's overflow — see [CollectionDownloadActions].
+    private func downloadRow(_ browseId: String) -> some View {
+        CollectionDownloadActions(browseId: browseId, title: card.title)
     }
 
     private func playCollection(_ browseId: String, shuffle: Bool) async {
@@ -241,6 +494,69 @@ struct BrowseActionButtons: View {
         let entries = page.songs.map { $0.asEntry(fallbackArt: page.thumbnailUrl) }
         if !entries.isEmpty {
             controller.play(entries, context: page.title, contextID: browseId, shuffleRequested: shuffle || controller.shuffleEnabled, shuffleStart: true)
+        }
+    }
+}
+
+/// Upstream's download-all row carries the collection's state in its label
+/// (BrowseActionsSheet.kt:259), and a downloaded collection offers its delete
+/// (:309). The label is read when the menu opens — a context menu does not
+/// re-render live — and downloading again over an existing collection is a
+/// re-sync, which the store dedupes. Shared by the browse menu and the
+/// release page's overflow.
+struct CollectionDownloadActions: View {
+    let browseId: String
+    let title: String
+    @Environment(ToastCenter.self) private var toast
+
+    var body: some View {
+        let store = DownloadStore.shared
+        let owner = store.collections.first { $0.browseId == browseId }
+        let downloading = owner.map { downloadOwner in
+            store.jobs.contains { downloadOwner.requests.contains($0.id) && ($0.status == .queued || $0.status == .running) }
+        } ?? false
+        let requests = owner?.requests ?? []
+        let downloadedCount = store.savedEntries(for: browseId).count
+        let downloaded = !requests.isEmpty && downloadedCount == requests.count
+        let stateLabel = downloading ? "Waiting" : downloaded ? "Downloaded" : nil
+
+        Button {
+            Task {
+                switch await DownloadStore.shared.downloadCollection(browseId: browseId) {
+                case .started:
+                    toast.show("Downloading \(title)")
+                case .blockedByWifiOnly:
+                    toast.show("Downloads are limited to Wi-Fi. Turn that off in Settings to use mobile data.", kind: .failure)
+                case .alreadyExists:
+                    toast.show("\(title) is already downloading or downloaded", kind: .info)
+                case .ignoredLocalTrack:
+                    break
+                }
+            }
+        }
+        label: {
+            HStack {
+                Label("Download All", systemImage: "arrow.down.to.line")
+                Spacer()
+                if let stateLabel {
+                    Text(stateLabel).foregroundStyle(.secondary)
+                }
+            }
+        }
+
+        if let owner, !downloading, owner.requests.allSatisfy({ request in
+            store.jobs.first { $0.id == request }?.status != .failed
+        }) {
+            Button("Delete Download", role: .destructive) {
+                toast.requestConfirmation(ConfirmationRequest(
+                    title: "Delete the download?",
+                    message: "The downloaded songs from “\(title)” will be removed from this device and will stream again when played.",
+                    confirm: "Delete Download"
+                ) {
+                    DownloadStore.shared.removeOwner(owner.id)
+                    toast.show("Deleted \(title)")
+                })
+            }
         }
     }
 }
@@ -258,6 +574,9 @@ struct PlaylistPickerView: View {
     @State private var title = ""
     @State private var privacy = "PRIVATE"
     @State private var error: String?
+    /// Several at once (upstream v1.8): tick the playlists, then Add.
+    @State private var selected: Set<String> = []
+    @State private var adding = false
 
     var body: some View {
         NavigationStack {
@@ -284,21 +603,28 @@ struct PlaylistPickerView: View {
                 Section("Your playlists") {
                     ForEach(playlists) { list in
                         Button {
-                            Task {
-                                if let err = await LibraryActions.addToPlaylist(playlistId: list.playlistId, videoId: request.videoId) {
-                                    error = err
-                                } else {
-                                    dismiss()
-                                }
+                            if selected.contains(list.playlistId) {
+                                selected.remove(list.playlistId)
+                            } else {
+                                selected.insert(list.playlistId)
                             }
                         } label: {
-                            VStack(alignment: .leading) {
-                                Text(list.title)
-                                if !list.subtitle.isEmpty {
-                                    Text(list.subtitle).font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(list.title)
+                                    if !list.subtitle.isEmpty {
+                                        Text(list.subtitle).font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
+                                Spacer()
+                                Image(systemName: selected.contains(list.playlistId) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selected.contains(list.playlistId) ? Color.accentColor : .secondary)
+                                    .font(.title3)
                             }
+                            .contentShape(.rect)
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selected.contains(list.playlistId) ? .isSelected : [])
                     }
                 }
                 if let error {
@@ -308,12 +634,42 @@ struct PlaylistPickerView: View {
             .navigationTitle("Add to Playlist")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(selected.count > 1 ? "Add to \(selected.count)" : "Add") { addToSelected() }
+                        .disabled(selected.isEmpty || adding)
+                }
             }
             .task { playlists = await LibraryActions.userPlaylists() }
         }
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 480)
         #endif
+    }
+
+    /// Adds to every ticked playlist in parallel; stays open naming any that
+    /// refused, so a partial success is not reported as a whole one.
+    private func addToSelected() {
+        adding = true
+        let ids = selected
+        let videoId = request.videoId
+        Task {
+            let failures = await withTaskGroup(of: (String, String?).self) { group in
+                for id in ids {
+                    group.addTask { (id, await LibraryActions.addToPlaylist(playlistId: id, videoId: videoId)) }
+                }
+                var failed: [String] = []
+                for await (id, err) in group where err != nil { failed.append(id) }
+                return failed
+            }
+            adding = false
+            if failures.isEmpty {
+                dismiss()
+            } else {
+                let names = playlists.filter { failures.contains($0.playlistId) }.map(\.title)
+                error = "Couldn't add to " + names.joined(separator: ", ")
+                selected = Set(failures)
+            }
+        }
     }
 }
 

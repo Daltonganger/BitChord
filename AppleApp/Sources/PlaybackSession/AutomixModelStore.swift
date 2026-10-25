@@ -2,21 +2,21 @@ import Foundation
 import CryptoKit
 import Observation
 
-/// The two ONNX graphs Automix leans on, fetched on first run rather than shipped.
+/// The beat graph Automix fetches, and the vocals graph the app ships.
 ///
-/// The upstream Android app copies its graphs out of the APK's own assets, so the
-/// models are a build input there. Here they are a *download*: 123 MB of graphs in
-/// an app bundle is 123 MB that every listener pays for whether or not they turn
-/// Automix on, and the beat model alone is what unlocks real beat/downbeat grids
-/// (10.4 MB). So the beat model is offered first and the 113 MB vocal model is a
-/// separate opt-in — Automix works without it, it just cannot avoid a clash between
-/// two vocals without it.
+/// The beat model is a *download*: 23.5 MB of graph in every app bundle is
+/// 23.5 MB that every listener pays for, and Automix works without it on the
+/// tempo fallback. The vocals model is different: the exported open-unmix
+/// `umxhq` graph is 23.2 MB, MIT, and so much of the transition decision (vocal
+/// clash, ducking, a vocal-free outro) reads it that it ships inside the app.
+/// It used to be a 113 MB download; this store removes that file on the first
+/// launch after the update.
 ///
-/// Every source is pinned to a revision and verified against a SHA-256 that was
-/// read off the repository before it was written down here. A redirect to a CDN is
-/// followed by the system, but the bytes are only ever trusted after the hash is
-/// recomputed on this device, so neither a moved tag nor a truncated transfer can
-/// put a bad graph in the analyzer.
+/// Every download is pinned to a revision and verified against a SHA-256 that
+/// was read off the repository before it was written down here. A redirect to a
+/// CDN is followed by the system, but the bytes are only ever trusted after the
+/// hash is recomputed on this device, so neither a moved tag nor a truncated
+/// transfer can put a bad graph in the analyzer.
 ///
 /// Deliberately free of `BitChordShared` and SwiftUI:
 /// `scripts/check-models.sh` compiles this file alone with the real network and
@@ -32,7 +32,6 @@ final class AutomixModelStore {
 
     enum ModelID: String, CaseIterable, Identifiable {
         case beat
-        case vocals
 
         var id: String { rawValue }
     }
@@ -51,33 +50,20 @@ final class AutomixModelStore {
             ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)
         }
 
+        // Beat This! final0 (CPJKU, MIT). Dynamic int8 quantization of the
+        // official final0 checkpoint (81,058,141 B, sha256 8c328b45…), exported
+        // with torch 2.14.1 + onnxscript, opset 18. 20.25M parameters, 23.5 MB.
+        // Provenance: https://github.com/CPJKU/beat_this (final0 checkpoint).
         static let beat = ModelSpec(
             id: .beat,
             fileName: "beat_this.onnx",
             displayName: "Beat + downbeat detection",
             detail: "Beat This! reads the beat grid and downbeats, so transitions land on the music rather than near it.",
-            byteCount: 10_401_044,
-            sha256: "c462b064a4033050ca6a5354bf866ff4610ab1fd8f1dec1e494b20b22d870aea",
-            // Pinned to the revision, not `main`: a branch can move, a commit cannot.
-            url: URL(string: "https://huggingface.co/ashudesai/songbird-models/resolve/345312bf5604913b3c0d05815f93c81c4b114e4d/small0.onnx")!
+            byteCount: 23_478_460,
+            sha256: "9f10e5efa37d3e120da2121141825fe54b23b487b32dd25a54f89039fd8f85cb",
+            // The owner's release asset; the tag is the pin, not a branch.
+            url: URL(string: "https://github.com/bagumamartin/BitChord/releases/download/model-beat-this-final0-v1/beat_this_full_int8.onnx")!
         )
-
-        static let vocals = ModelSpec(
-            id: .vocals,
-            fileName: "vocals_umxhq.onnx",
-            displayName: "Vocal detection",
-            detail: "open-unmix measures how much singing is in an instant, so Automix can avoid blending two vocals over each other.",
-            byteCount: 113_115_263,
-            sha256: "da6c48a21f1231eef0ea61dc00e8e4c6e5c29d37f86685323d68de1e6836c4cb",
-            url: URL(string: "https://huggingface.co/nsosu/demucs-onnx/resolve/571310473535558f41c1bcd8ed4955515b983490/umxl_vocals.onnx")!
-        )
-
-        static func spec(for id: ModelID) -> ModelSpec {
-            switch id {
-            case .beat: return .beat
-            case .vocals: return .vocals
-            }
-        }
     }
 
     struct Record: Codable {
@@ -95,6 +81,10 @@ final class AutomixModelStore {
         case downloading(Double)
         case verifying
         case installed
+        /// The pinned graph is not installed, but the graph this store verified under
+        /// the previous manifest is on disk as `.prev` and is what the analyser loads.
+        /// The update is offered; the old graph stays in use until the new one verifies.
+        case outdated
         /// Refused because the connection is metered and the caller did not allow it.
         case blockedByWifi
         case failed(String)
@@ -121,7 +111,7 @@ final class AutomixModelStore {
 
     /// The manifest in use. Injectable so the download path can be exercised end to
     /// end against a fixture server — `scripts/check-models.sh` — rather than only
-    /// against the two real graphs, which are 123 MB and somebody else's uptime.
+    /// against the real graph, which is 23.5 MB and somebody else's uptime.
     private let specs: [ModelID: ModelSpec]
     private var records: [String: Record] = [:]
     private var tasks: [ModelID: Task<Void, Never>] = [:]
@@ -133,7 +123,7 @@ final class AutomixModelStore {
     init(directory: URL? = nil, specs: [ModelSpec]? = nil) {
         self.directory = directory ?? Self.defaultDirectory
         self.specs = Dictionary(
-            (specs ?? [ModelSpec.beat, .vocals]).map { ($0.id, $0) },
+            (specs ?? [ModelSpec.beat]).map { ($0.id, $0) },
             uniquingKeysWith: { _, last in last }
         )
         for id in ModelID.allCases {
@@ -141,7 +131,7 @@ final class AutomixModelStore {
         }
     }
 
-    /// Application Support, not Caches: a 113 MB graph that the system may purge at
+    /// Application Support, not Caches: a 23.5 MB graph that the system may purge at
     /// any moment is a graph the listener downloads twice. Excluded from backup for
     /// the same reason — it is reproducible, and iCloud backup is not the place to
     /// put it.
@@ -157,7 +147,7 @@ final class AutomixModelStore {
     /// each, invalidated when the transfer ends.
     private static func makeSession(delegate: URLSessionDataDelegate) -> URLSession {
         let configuration = URLSessionConfiguration.default
-        // A 113 MB fetch over a slow connection is minutes, not seconds; the default
+        // A 23.5 MB fetch over a slow connection is minutes, not seconds; the default
         // per-request timeout would abandon it halfway and turn a slow download into
         // a failed one.
         configuration.timeoutIntervalForRequest = 120
@@ -172,19 +162,30 @@ final class AutomixModelStore {
 
     // MARK: - Queries
 
-    func spec(_ id: ModelID) -> ModelSpec { specs[id] ?? ModelSpec.spec(for: id) }
+    func spec(_ id: ModelID) -> ModelSpec { specs[id] ?? .beat }
 
     func status(of id: ModelID) -> Status { status[id] ?? .notInstalled }
 
+    /// The pinned graph is installed. The launch offer uses this meaning: a fallback
+    /// is usable but still an update waiting to happen, so it keeps offering.
     var beatInstalled: Bool { status(of: .beat).isInstalled }
-    var vocalsInstalled: Bool { status(of: .vocals).isInstalled }
+
+    /// A graph the analyser can load — the pinned one, or the previous manifest's.
+    var beatAvailable: Bool { status(of: .beat).isInstalled || isUsingPreviousGraph(.beat) }
+
+    /// True when the pinned graph is missing but the previous manifest's verified
+    /// graph is on disk and is what `analyzerPaths` returns.
+    func isUsingPreviousGraph(_ id: ModelID) -> Bool {
+        guard !status(of: id).isInstalled else { return false }
+        let previous = directory.appendingPathComponent(previousName(for: spec(id)), isDirectory: false)
+        return FileManager.default.fileExists(atPath: previous.path)
+    }
 
     var anyBusy: Bool { ModelID.allCases.contains { status(of: $0).isBusy } }
 
     var totalBytesOnDisk: Int64 {
         ModelID.allCases.reduce(0) { total, id in
-            guard status(of: id).isInstalled else { return total }
-            return total + sizeOnDisk(of: spec(id).fileName)
+            total + sizeOnDisk(of: spec(id).fileName) + sizeOnDisk(of: previousName(for: spec(id)))
         }
     }
 
@@ -195,18 +196,26 @@ final class AutomixModelStore {
 
     /// Where the analyzer should load from.
     ///
-    /// Downloaded copies win over the bundle, and the bundle lookup stays for the
-    /// development flow: `scripts/fetch-automix-models.sh` drops graphs into
-    /// `Resources/Models`, which is how the port has been built until now and is
-    /// how CI gets a model without a network step at test time. An empty string is
-    /// what `configureAnalyzer` already means by "unload" — so a listener with no
-    /// models gets today's tempo fallback and no vocal mask, unchanged.
+    /// The beat entry is the downloaded copy, then the previous manifest's copy,
+    /// then the bundle (`scripts/fetch-automix-models.sh` drops a graph into
+    /// `Resources/Models` for the development/CI flow). The vocal entry is always
+    /// the graph shipped in the app bundle: open-unmix umxhq, MIT, exported to the
+    /// same `[1, 2, 2049, 960]` contract the Rust front end speaks. An empty
+    /// string is what `configureAnalyzer` already means by "unload" — a dev build
+    /// without the resource gets the DSP vocal heuristic only.
+    ///
+    /// A **previous** beat graph wins over the bundle too: when the manifest moves
+    /// to a new model, the old file is kept as `.prev` and stays in use until the
+    /// new download hashes correctly. Losing a working beat model for the length
+    /// of a download is worse than any transition it plans.
     var analyzerPaths: (beat: String, vocal: String) {
-        (analyzerPath(for: .beat), analyzerPath(for: .vocals))
+        (analyzerPath(for: .beat), Self.bundledVocalsPath)
     }
 
     private func analyzerPath(for id: ModelID) -> String {
         if let downloaded = installedPath(id) { return downloaded }
+        let previous = directory.appendingPathComponent(previousName(for: spec(id)), isDirectory: false)
+        if FileManager.default.fileExists(atPath: previous.path) { return previous.path }
         guard let bundled = Self.bundleURL(for: spec(id).fileName) else { return "" }
         return bundled.path
     }
@@ -218,12 +227,21 @@ final class AutomixModelStore {
             ?? Bundle.main.url(forResource: base, withExtension: ext)
     }
 
+    /// The vocals graph ships inside the app bundle rather than being downloaded.
+    /// It is `AppleApp/Resources/Models/vocals_umxhq_int8.onnx`, exported from the
+    /// official open-unmix umxhq vocals weights (MIT); see `THIRD_PARTY_NOTICES.md`.
+    static let bundledVocalsName = "vocals_umxhq_int8"
+
+    static var bundledVocalsPath: String {
+        bundleURL(for: bundledVocalsName + ".onnx")?.path ?? ""
+    }
+
     // MARK: - Refresh
 
     /// Reconcile the directory with the manifest.
     ///
     /// A file whose size is right and whose sidecar record matches is trusted: the
-    /// hash was checked when it was installed, and re-reading 113 MB on every launch
+    /// hash was checked when it was installed, and re-reading 23.5 MB on every launch
     /// to rediscover that is a launch cost with no answer behind it. A file with no
     /// record — copied in by hand, say — is hashed once and recorded, because the
     /// alternative is either trusting it blindly or deleting something the listener
@@ -231,32 +249,69 @@ final class AutomixModelStore {
     func refresh() {
         ensureDirectory()
         records = loadRecords()
-        var changed = false
+        // The bundled vocals graph replaced the 113 MB download. Removing the old
+        // file is the migration; it runs before the beat reconcile so a launch
+        // after the update frees the space even when the beat model is missing.
+        var changed = removeLegacyVocals()
 
         for id in ModelID.allCases where !status(of: id).isBusy {
             let spec = spec(id)
             let file = fileURL(for: spec)
             let part = partURL(for: spec)
+            let fallback = directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+            var hasPrevious = FileManager.default.fileExists(atPath: fallback.path)
 
             if FileManager.default.fileExists(atPath: file.path) {
                 let size = sizeOnDisk(of: spec.fileName)
                 if size == spec.byteCount, records[spec.fileName]?.sha256 == spec.sha256 {
+                    // The new graph is in place; the fallback copy is dead weight.
+                    if hasPrevious {
+                        try? FileManager.default.removeItem(at: fallback)
+                        hasPrevious = false
+                        changed = true
+                    }
                     status[id] = .installed
                     continue
                 }
                 if size == spec.byteCount, hashMatches(file, spec: spec) {
                     records[spec.fileName] = Record(sha256: spec.sha256, bytes: spec.byteCount, installedAt: Date())
                     saveRecords()
+                    if hasPrevious {
+                        try? FileManager.default.removeItem(at: fallback)
+                        hasPrevious = false
+                    }
                     status[id] = .installed
                     changed = true
                     continue
                 }
-                // Wrong length, or a length that does not survive its own hash: the
-                // only states worth having are "usable" and "absent".
-                try? FileManager.default.removeItem(at: file)
-                records[spec.fileName] = nil
-                saveRecords()
-                changed = true
+                // Not the current graph. If it is the graph this store verified
+                // under the previous manifest, keep it as the fallback — the
+                // analyser keeps working while the replacement downloads. An
+                // unverified file (a hand copy, a truncated transfer) is still
+                // removed: only "usable" and "absent" are safe.
+                if let previous = records[spec.fileName],
+                   previous.bytes == size,
+                   hashMatches(file, sha256: previous.sha256) {
+                    do {
+                        // Whatever is already parked cannot be more recent than the
+                        // graph that was just verified; the move replaces it.
+                        try? FileManager.default.removeItem(at: fallback)
+                        try FileManager.default.moveItem(at: file, to: fallback)
+                        records[spec.fileName] = nil
+                        saveRecords()
+                        hasPrevious = true
+                        changed = true
+                    } catch {
+                        // The verified old graph could not be parked. Leave it and
+                        // its record alone; deleting a working graph because a rename
+                        // failed is worse than retrying the move next launch.
+                    }
+                } else {
+                    try? FileManager.default.removeItem(at: file)
+                    records[spec.fileName] = nil
+                    saveRecords()
+                    changed = true
+                }
             }
 
             let partSize = sizeOnDisk(of: spec.fileName + ".part")
@@ -269,12 +324,12 @@ final class AutomixModelStore {
                     if case .installed = outcome { changed = true }
                 } else if partSize > spec.byteCount {
                     try? FileManager.default.removeItem(at: part)
-                    status[id] = .notInstalled
+                    status[id] = hasPrevious ? .outdated : .notInstalled
                 } else {
                     status[id] = .paused(partSize)
                 }
             } else {
-                status[id] = .notInstalled
+                status[id] = hasPrevious ? .outdated : .notInstalled
             }
         }
 
@@ -299,7 +354,7 @@ final class AutomixModelStore {
     /// system temporary file, which is what makes a dropped connection resumable:
     /// the truncated transfer is the part file, and the next attempt asks for
     /// `bytes=<n>-` and carries on. Waiting for the whole body and only then writing
-    /// it would mean a 113 MB download that fails at 112 MB starts over.
+    /// it would mean a 23.5 MB download that fails at 23 MB starts over.
     func download(_ id: ModelID, allowMetered: Bool) async {
         let spec = spec(id)
         guard !status(of: id).isInstalled else { return }
@@ -405,6 +460,9 @@ final class AutomixModelStore {
         let spec = spec(id)
         try? FileManager.default.removeItem(at: fileURL(for: spec))
         try? FileManager.default.removeItem(at: partURL(for: spec))
+        try? FileManager.default.removeItem(
+            at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+        )
         records[spec.fileName] = nil
         saveRecords()
         status[id] = .notInstalled
@@ -418,19 +476,30 @@ final class AutomixModelStore {
         let spec = spec(id)
         let file = fileURL(for: spec)
         guard FileManager.default.fileExists(atPath: file.path) else {
-            status[id] = .notInstalled
-            return false
+            let hasPrevious = isUsingPreviousGraph(id)
+            status[id] = hasPrevious ? .outdated : .notInstalled
+            return hasPrevious
         }
         status[id] = .verifying
         if sizeOnDisk(of: spec.fileName) == spec.byteCount, hashMatches(file, spec: spec) {
             records[spec.fileName] = Record(sha256: spec.sha256, bytes: spec.byteCount, installedAt: Date())
             saveRecords()
+            // The pinned graph is verified; a fallback, if any, is dead weight.
+            try? FileManager.default.removeItem(
+                at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+            )
             status[id] = .installed
             return true
         }
         try? FileManager.default.removeItem(at: file)
         records[spec.fileName] = nil
         saveRecords()
+        // A verified old graph is not "not usable"; the analyser can stay on it.
+        if isUsingPreviousGraph(id) {
+            status[id] = .outdated
+            onChanged?()
+            return true
+        }
         status[id] = .failed("The downloaded file did not match its checksum and was removed.")
         onChanged?()
         return false
@@ -453,6 +522,36 @@ final class AutomixModelStore {
 
     private func partURL(for spec: ModelSpec) -> URL {
         directory.appendingPathComponent(spec.fileName + ".part", isDirectory: false)
+    }
+
+    /// The graph this store used under a previous manifest; it stays in use until
+    /// the current graph hashes correctly.
+    private func previousName(for spec: ModelSpec) -> String {
+        spec.fileName + ".prev"
+    }
+
+    /// The vocals graph this store used to download (113 MB). It is bundled now;
+    /// the download, its resume file and its fallback are removed once, freeing
+    /// the space. The record was keyed by the old file name, so it goes too.
+    static let legacyVocalsFileName = "vocals_umxhq.onnx"
+
+    @discardableResult
+    private func removeLegacyVocals() -> Bool {
+        var changed = false
+        for suffix in ["", ".part", ".prev"] {
+            let name = Self.legacyVocalsFileName + suffix
+            let url = directory.appendingPathComponent(name, isDirectory: false)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: url)
+                changed = true
+            }
+            if records[name] != nil {
+                records[name] = nil
+                changed = true
+            }
+        }
+        if changed { saveRecords() }
+        return changed
     }
 
     private func ensureDirectory() {
@@ -481,18 +580,31 @@ final class AutomixModelStore {
         let destination = fileURL(for: spec)
         do {
             if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
+                // One filesystem operation: the pinned name never disappears, so a
+                // running analyser cannot look up a path that does not exist.
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: part)
+            } else {
+                // The migration case: the old graph was parked as `.prev` during
+                // refresh, so this is a plain rename on the same volume.
+                try FileManager.default.moveItem(at: part, to: destination)
             }
-            try FileManager.default.moveItem(at: part, to: destination)
         } catch {
             return .failed(error.localizedDescription)
         }
+        // Only now is the fallback spent: the verified pinned graph is in place.
+        try? FileManager.default.removeItem(
+            at: directory.appendingPathComponent(previousName(for: spec), isDirectory: false)
+        )
         records[spec.fileName] = Record(sha256: spec.sha256, bytes: spec.byteCount, installedAt: Date())
         saveRecords()
         return .installed
     }
 
     private func hashMatches(_ url: URL, spec: ModelSpec) -> Bool {
+        hashMatches(url, sha256: spec.sha256)
+    }
+
+    private func hashMatches(_ url: URL, sha256 expected: String) -> Bool {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -500,7 +612,7 @@ final class AutomixModelStore {
             hasher.update(data: chunk)
         }
         let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        return digest == spec.sha256
+        return digest == expected
     }
 
     // MARK: - Sidecar
@@ -543,7 +655,7 @@ enum AutomixModelError: LocalizedError {
 /// reason: the download API only hands over a file once the body is complete, so an
 /// interrupted transfer leaves nothing behind to resume from. Here every chunk is on
 /// disk the moment it is received, which is what makes "Try again" continue a
-/// 113 MB download instead of restarting it.
+/// 23.5 MB download instead of restarting it.
 ///
 /// The response decides the file's fate: `206` appends to what is already there, and
 /// `200` — a server that ignored the range — means the bytes on disk are the wrong

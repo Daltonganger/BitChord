@@ -31,7 +31,9 @@ import kotlinx.serialization.Serializable
  */
 object BiniLyrics {
 
-    private const val BASE = "https://lyrics-api.binimum.org/"
+    // The old BINI hostname redirects here with a Location that omits the
+    // query string; using the canonical path directly preserves search fields.
+    private const val BASE = "https://lrc.red/api/v1"
 
     /** Lyrics, and the ISRC of the recording they were matched to. */
     data class Match(val isrc: String?, val lines: List<LyricLineDto>)

@@ -80,6 +80,7 @@ final class DownloadStore {
         var sampleRate: Int? = nil
         var bitDepth: Int? = nil
         var quality: String? = nil
+        var entryKeys: Set<String>? = nil
     }
     private struct Index: Codable {
         var version = 1
@@ -98,6 +99,7 @@ final class DownloadStore {
     private var refreshTask: Task<Void, Never>?
     private var refreshID = UUID()
     private(set) var items: [DownloadedTrack] = []
+    private(set) var downloadedEntryKeys: Set<String> = []
     var jobs: [Job] = []
     var onChange: (() -> Void)?
     private var tasks: [String: Task<Void, Never>] = [:]
@@ -145,6 +147,7 @@ final class DownloadStore {
                         if job.status == .running { job.status = .queued; job.runID = UUID().uuidString }
                         return job
                     }
+                    self.refreshDownloadedEntryKeys()
                     self.writable = true
                 case .failure:
                     PlaybackDebugLog.shared.record("download index unavailable; downloads kept unchanged")
@@ -177,6 +180,7 @@ final class DownloadStore {
             PlaybackDebugLog.shared.record("download index unavailable: \(error)")
         }
         if startWorker || legacyDirectory != nil { migrateLegacy() }
+        refreshDownloadedEntryKeys()
         if startWorker {
             refresh()
             timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -248,6 +252,28 @@ final class DownloadStore {
         return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
     }
     private func requestId(_ entry: QueueEntry, quality: String) -> String { Self.digest(entry.source + "|" + entry.id + "|" + quality) }
+    func isDownloaded(_ entry: QueueEntry) -> Bool {
+        downloadedEntryKeys.contains(entryKey(entry))
+    }
+    private func entryKey(_ entry: QueueEntry) -> String { canonicalPath(entry.source) + "|" + entry.id }
+    /// A presence snapshot for rows; menus still validate the rendition with asset(for:).
+    /// Keep request aliases on the asset because several songs can share one recording.
+    private func refreshDownloadedEntryKeys() {
+        for job in jobs {
+            if let assetId = index.bindings[job.id], var asset = index.assets[assetId] {
+                var keys = asset.entryKeys ?? []
+                keys.insert(entryKey(job.entry))
+                asset.entryKeys = keys
+                index.assets[assetId] = asset
+            }
+        }
+        var keys: Set<String> = []
+        for asset in index.assets.values where FileManager.default.fileExists(atPath: asset.path) {
+            keys.insert(entryKey(asset.entry))
+            keys.formUnion(asset.entryKeys ?? [])
+        }
+        if keys != downloadedEntryKeys { downloadedEntryKeys = keys }
+    }
     private func valid(_ asset: Asset) -> Bool {
         guard let bytes = (try? FileManager.default.attributesOfItem(atPath: asset.path)[.size]) as? NSNumber,
               bytes.int64Value == asset.bytes else { return false }
@@ -272,10 +298,11 @@ final class DownloadStore {
             index.bindings[id] = id
             index.owners[id] = Owner(id: id, browseId: nil, accountId: "", title: entry.title, requests: [id])
         }
-        index.migrated = true; persist()
+        index.migrated = true; refreshDownloadedEntryKeys(); persist()
     }
     func refresh() {
         guard !restoring else { return }
+        refreshDownloadedEntryKeys()
         let assets = Array(index.assets.values)
         let id = UUID(); refreshID = id
         refreshTask?.cancel()
@@ -334,13 +361,35 @@ final class DownloadStore {
     }
     private func enqueue(_ entry: QueueEntry, quality: String) -> RequestResult {
         let id = requestId(entry, quality: quality)
-        if let existing = asset(for: entry, quality: quality) { index.bindings[id] = existing.id; return .alreadyExists }
+        if var existing = asset(for: entry, quality: quality) {
+            index.bindings[id] = existing.id
+            var keys = existing.entryKeys ?? []
+            keys.insert(entryKey(entry))
+            existing.entryKeys = keys; index.assets[existing.id] = existing
+            refreshDownloadedEntryKeys()
+            return .alreadyExists
+        }
         if jobs.contains(where: { $0.id == id && ($0.status == .queued || $0.status == .running) }) { return .alreadyExists }
         jobs.removeAll { $0.id == id }
         jobs.append(Job(id: id, runID: UUID().uuidString, title: entry.title, status: .queued, entry: entry, quality: quality))
         return .started
     }
     func hasCollection(_ browseId: String) -> Bool { index.owners[collectionId(browseId)] != nil }
+
+    /// The saved entries of a downloaded collection, in the order the download
+    /// recorded them. The offline stand-in for a page whose network copy has
+    /// not arrived (upstream's `downloadedCopyOf`).
+    func savedEntries(for browseId: String) -> [QueueEntry] {
+        guard let owner = index.owners[collectionId(browseId)] else { return [] }
+        return owner.requests.compactMap { request in
+            index.bindings[request].flatMap { index.assets[$0]?.entry }
+        }
+    }
+
+    /// The title the download recorded, for the offline page's header.
+    func savedTitle(for browseId: String) -> String? {
+        index.owners[collectionId(browseId)]?.title
+    }
     private func collectionId(_ browseId: String) -> String { Self.digest(accountId + "|" + browseId) }
     func syncIfOwned(browseId: String) async {
         await waitUntilReady()
@@ -407,6 +456,7 @@ final class DownloadStore {
         jobs.removeAll { !requests.contains($0.id) }
         index.bindings = index.bindings.filter { requests.contains($0.key) }
         let assets = Set(index.bindings.values)
+        var removedAsset = false
         for asset in Array(index.assets.values) where !assets.contains(asset.id) && !leasePaths.contains(canonicalPath(asset.path)) && !sourceHasPlaybackReaders(source: asset.path) {
             if asset.managed || index.pendingDeletes?.contains(asset.id) == true {
                 do {
@@ -415,8 +465,10 @@ final class DownloadStore {
                 try? FileManager.default.removeItem(atPath: URL(fileURLWithPath: asset.path).deletingPathExtension().appendingPathExtension("lrc").path)
             }
             index.assets.removeValue(forKey: asset.id)
+            removedAsset = true
             index.pendingDeletes?.remove(asset.id)
         }
+        if removedAsset { refreshDownloadedEntryKeys() }
         persist()
     }
     func networkPolicyChanged() { pump() }
@@ -511,6 +563,7 @@ final class DownloadStore {
     private func finishJob(_ job: Job, asset: Asset) {
         guard let i = jobs.firstIndex(where: { $0.id == job.id && $0.runID == job.runID }) else { return }
         index.bindings[job.id] = asset.id; jobs[i].status = .done; jobs[i].message = nil
+        refreshDownloadedEntryKeys()
     }
     private func discardTemporary(_ path: String) { for path in [path, path + ".len", path + ".grow", path + ".complete"] { try? FileManager.default.removeItem(atPath: path) } }
     private struct ResolvedDownload: Decodable {

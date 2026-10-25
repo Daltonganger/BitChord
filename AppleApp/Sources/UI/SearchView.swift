@@ -67,15 +67,6 @@ enum RecentSearchStore {
         save(Array(list.prefix(maxEntries)))
     }
 
-    /// The raw submitted query, for when no result has been tapped yet.
-    /// A later tap on a real hit records the rich entity alongside it, which
-    /// is what carries the artwork — same as upstream's `recordSearch`.
-    static func recordQuery(_ query: String) {
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty else { return }
-        record(RecentSearchEntity(id: "q:\(term.lowercased())", title: term))
-    }
-
     static func remove(id: String) {
         save(load().filter { !$0.id.equalsIgnoringCase(id) })
     }
@@ -95,10 +86,52 @@ private extension String {
     }
 }
 
+/// The words the Addons tab has searched, newest first. Kept apart from the
+/// entity-based recents because there is no song behind them — upstream keeps
+/// them in their own list for the same reason.
+enum AddonSearchHistory {
+    private static let key = "addon_search_history"
+    private static let maxEntries = 20
+
+    static func load() -> [String] {
+        guard let data = PlatformSettings.shared.getString(key: key, default: "[]").data(using: .utf8),
+              let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return list
+    }
+
+    static func record(_ query: String) {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return }
+        var list = load().filter { $0.compare(term, options: .caseInsensitive) != .orderedSame }
+        list.insert(term, at: 0)
+        save(Array(list.prefix(maxEntries)))
+    }
+
+    static func remove(_ query: String) {
+        save(load().filter { $0.compare(query, options: .caseInsensitive) != .orderedSame })
+    }
+
+    static func clear() { save([]) }
+
+    private static func save(_ list: [String]) {
+        guard let data = try? JSONEncoder().encode(list),
+              let json = String(data: data, encoding: .utf8) else { return }
+        PlatformSettings.shared.putString(key: key, value: json)
+    }
+}
+
 struct SearchView: View {
+    /// Upstream `TYPEAHEAD_MAX_RESULTS` in MainViewModel.kt.
+    private static let typeaheadMaxResults = 15
     @Environment(PlaybackController.self) private var controller
     @Environment(AppModel.self) private var appModel
+    #if os(macOS)
+    /// Settings is a scene on the Mac, not an in-app cover.
+    @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
+    #endif
     @State private var query = ""
+    private let initialQuery: String?
     @State private var categories = MoodGenreLoader()
     @State private var historyRevision = 0
     /// Starts on the mixed page, which is what YouTube Music opens on and the only
@@ -114,6 +147,11 @@ struct SearchView: View {
     /// Focus for the native search field, including tab reselect and deep links.
     @FocusState private var searchFieldFocused: Bool
     @State private var suggestTask: Task<Void, Never>?
+    /// Live media rows for the typeahead dropdown, fetched in parallel with the
+    /// text suggestions on its own, longer debounce (upstream's
+    /// `TYPEAHEAD_MEDIA_DEBOUNCE_MS`).
+    @State private var typeaheadHits: [SearchHitDTO] = []
+    @State private var typeaheadTask: Task<Void, Never>?
     /// The in-flight search, so leaving the screen or starting a new one can
     /// abandon it. Without a handle the late answer from an abandoned search
     /// writes its results into whatever the screen is showing by then.
@@ -130,11 +168,47 @@ struct SearchView: View {
     /// one-character edit left the old results up under a shorter query, and
     /// editing after a search never offered completions again.
     @State private var searchedTerm = ""
+    /// The token for the next page of the committed search, null once the
+    /// result set is exhausted or no search has run.
+    @State private var searchContinuationToken: String?
+    /// True while a continuation page is in flight, so the end-of-list sentinel
+    /// doesn't fire a second request for the same token.
+    @State private var loadingMore = false
+    /// Which catalogue the field answers: YouTube Music, or the addons the
+    /// listener enabled. Upstream's YouTube / Addons switcher.
+    @State private var searchSource: SearchSource = .youtube
+    @State private var addonHits: [SearchHitDTO] = []
+    @State private var addonError: String?
+    @State private var searchingAddons = false
+    @State private var addonHistory: [String] = AddonSearchHistory.load()
+    /// How many addons are enabled, so the Addons tab can say "no addons yet"
+    /// before a query has to fail to prove it.
+    @State private var addonCount = 0
+    @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
 
-    enum Scope: String, CaseIterable, Identifiable {
+    init(
+        initialQuery: String? = nil,
+        initialScope: Scope = .all,
+        initialSource: SearchSource = .youtube
+    ) {
+        self.initialQuery = initialQuery
+        _query = State(initialValue: initialQuery ?? "")
+        _scope = State(initialValue: initialScope)
+        _searchSource = State(initialValue: initialSource)
+    }
+
+    /// Which catalogue the field answers. Upstream's three-way switcher also has
+    /// Local Music; our Local Music lives in Library, so this one is two.
+    enum SearchSource: String, CaseIterable, Identifiable, Codable {
+        case youtube, addons
+        var id: String { rawValue }
+        var label: String { self == .youtube ? "YouTube" : "Addons" }
+    }
+
+    enum Scope: String, CaseIterable, Identifiable, Codable {
         /// YouTube Music's mixed page — the only one with a promoted card, and so
         /// the only one a top result is shown for.
         case all, songs, videos, albums, artists, playlists
@@ -157,7 +231,7 @@ struct SearchView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        PageStack {
             resultsColumn
                 .navigationTitle("Search")
                 .toolbar {
@@ -166,6 +240,22 @@ struct SearchView: View {
                         TopBarLeadingMark()
                     }
                     ToolbarItem(placement: .topBarTrailing) { TopBarAccountButton() }
+                    #elseif os(macOS)
+                    if !searchedTerm.isEmpty {
+                        ToolbarItem(placement: .primaryAction) {
+                            Button {
+                                openWindow(
+                                    id: MacBrowseWindow.sceneID,
+                                    value: MacBrowseWindowRoute.search(
+                                        query: searchedTerm, scope: scope, source: searchSource
+                                    )
+                                )
+                            } label: {
+                                Label("Open in New Window", systemImage: "macwindow.badge.plus")
+                            }
+                            .help("Open these search results in a new window")
+                        }
+                    }
                     #endif
                 }
                 #if os(iOS)
@@ -184,6 +274,11 @@ struct SearchView: View {
                         await performSearch()
                         searchFieldFocused = false
                     }
+                }
+                .task(id: initialQuery) {
+                    guard let initialQuery,
+                          !initialQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    await performSearch()
                 }
                 // Upstream's `searchFocusTrigger`: re-tapping the tab that is
                 // already selected focuses the field instead of doing nothing.
@@ -232,10 +327,16 @@ struct SearchView: View {
         searchTask?.cancel()
         searchTask = nil
         searching = false
+        searchingAddons = false
         attempted = false
         hits = []
+        addonHits = []
+        addonError = nil
         searchError = nil
         suggestions = []
+        typeaheadHits = []
+        searchContinuationToken = nil
+        loadingMore = false
         // Nothing on screen is for any term now, which is what stops the
         // old results reappearing under a field that has been emptied.
         searchedTerm = ""
@@ -268,17 +369,73 @@ struct SearchView: View {
     private func cancelSuggestions() {
         suggestTask?.cancel()
         suggestTask = nil
+        typeaheadTask?.cancel()
+        typeaheadTask = nil
     }
 
     private var resultsColumn: some View {
         VStack(spacing: 0) {
+            // Upstream's source picker is up only while the field is empty: once
+            // something is typed the page is about the results, and the picker
+            // would only push them down.
+            if term.isEmpty {
+                sourceSwitcher
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            }
+            if searchSource == .addons {
+                addonResultsColumn
+            } else {
+                youtubeResultsColumn
+            }
+        }
+        .onChange(of: scenePhase) { _, _ in refreshAddonCount() }
+        #if os(macOS)
+        // Settings is its own window here, so the tab is not told when the
+        // sources screen closes; the window coming back is the next best signal.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            refreshAddonCount()
+        }
+        #endif
+    }
+
+    /// The field's catalogue picker, YouTube Music or the addons the listener
+    /// enabled. Flipping answers whatever is already in the field again with the
+    /// source just picked, rather than clearing it.
+    private var sourceSwitcher: some View {
+        Picker("Search source", selection: $searchSource) {
+            ForEach(SearchSource.allCases) { source in
+                Text(source.label).tag(source)
+            }
+        }
+        .pickerStyle(.segmented)
+        // macOS draws the picker's own label beside the segments; the label is
+        // still right for VoiceOver, so it is hidden rather than removed.
+        .labelsHidden()
+        .onChange(of: searchSource) { _, _ in
+            refreshAddonCount()
+            guard !term.isEmpty else { return }
+            Task { await performSearch() }
+        }
+    }
+
+    /// Re-reads how many addons are enabled. Cheap (an in-memory registry walk),
+    /// and refreshed from every place the registry can have changed while this
+    /// screen stayed up — Settings is a separate window on the Mac, so a tab
+    /// left open would otherwise keep saying "No addons yet" after one was added.
+    private func refreshAddonCount() {
+        addonCount = Int(SourceResolverBridge.shared.addonCount())
+    }
+
+    private var youtubeResultsColumn: some View {
+        VStack(spacing: 0) {
             // Upstream's rule for the filter tabs, and the reason it is a rule
-            // rather than a detail: they only mean something once there is a
-            // result set to narrow, and they stay hidden while suggestions are up
+            // rather than a detail: they only mean something once a search has
+            // been committed, and they stay hidden while suggestions are up
             // because everything below them is for whatever was searched before
-            // this edit began. They also stay hidden for a search that failed —
-            // "pick a filter that finds nothing" would take away the control
-            // needed to leave it.
+            // this edit began. They stay up for an empty or failed search too —
+            // "pick a filter that finds nothing" is exactly when the chips are
+            // the only way out, so hiding them would trap the reader.
             if showsFilters {
                 filterChips
                     .padding(.bottom, 6)
@@ -334,8 +491,26 @@ struct SearchView: View {
                             }
                         }
                     }
+                    // End-of-list sentinel: a continuation page is fetched only
+                    // when the reader reaches the last row, so the first page
+                    // stays instant and later pages ride in as needed.
+                    if searchContinuationToken != nil {
+                        Section {
+                            HStack {
+                                Spacer()
+                                if loadingMore { ProgressView().controlSize(.small) }
+                                Spacer()
+                            }
+                            .listRowInsets(EdgeInsets(top: 12, leading: 0, bottom: 12, trailing: 0))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .onAppear { loadMore() }
+                        }
+                    }
                 }
                 .listStyle(.plain)
+                .listSectionSeparator(.hidden)
+                .scrollContentBackground(.hidden)
                 // Upstream's `scrollResetTrigger`: one list whose contents change,
                 // reset for each new request, so choosing a recent search cannot
                 // inherit the history's previous scroll position — or a previous
@@ -348,6 +523,180 @@ struct SearchView: View {
             }
         }
     }
+
+    /// The Addons source's column: the words searched there before while the
+    /// field is empty, otherwise the sources' answers.
+    @ViewBuilder
+    private var addonResultsColumn: some View {
+        if searchingAddons {
+            ScrollView {
+                VStack(spacing: 10) {
+                    ForEach(0..<8, id: \.self) { _ in SkeletonBlock(height: 52) }
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 12)
+            }
+        } else if isEditing {
+            addonHistoryView
+        } else if let addonError {
+            EmptyStateView(icon: Image(.bchSearch), title: "Sources unavailable", subtitle: addonError, buttonTitle: nil, action: nil)
+        } else if !addonHits.isEmpty {
+            List {
+                ForEach(Array(addonHits.enumerated()), id: \.element.id) { index, hit in
+                    addonRow(hit, index: index)
+                }
+            }
+            .listStyle(.plain)
+            .listSectionSeparator(.hidden)
+            .scrollContentBackground(.hidden)
+            .id(requestToken)
+        } else if attempted && !query.isEmpty {
+            EmptyStateView(icon: Image(.bchSearch), title: "No results", subtitle: "Nothing in your sources for “\(query)”.", buttonTitle: nil, action: nil)
+        } else {
+            addonHistoryView
+        }
+    }
+
+    private var addonHistoryView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if addonCount == 0 {
+                    // Said before a query can fail rather than after: with no
+                    // addon configured there is nothing to search, and the fix
+                    // is one screen away.
+                    EmptyStateView(
+                        icon: Image(.bchSearch),
+                        title: "No addons yet",
+                        subtitle: "Add an addon in Settings ▸ Sources to search it here.",
+                        buttonTitle: "Open Sources"
+                    ) {
+                        #if os(macOS)
+                        openSettings()
+                        #else
+                        appModel.settingsPresented = true
+                        #endif
+                    }
+                } else if addonHistory.isEmpty {
+                    Text("Search your addons. Their addresses and order live in Settings ▸ Sources.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 8)
+                } else {
+                    HStack {
+                        Text("Recently Searched")
+                            .font(.title3.weight(.bold))
+                        Spacer()
+                        Button("Clear") {
+                            AddonSearchHistory.clear()
+                            addonHistory = []
+                        }
+                        .font(.callout)
+                    }
+                    ForEach(addonHistory, id: \.self) { term in
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock")
+                                .foregroundStyle(.secondary)
+                            Text(term)
+                                .lineLimit(1)
+                                .contentShape(.rect)
+                                .onTapGesture {
+                                    query = term
+                                    Task { await performSearch() }
+                                }
+                            Spacer(minLength: 8)
+                            Button {
+                                AddonSearchHistory.remove(term)
+                                addonHistory = AddonSearchHistory.load()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .scaledFont(size: 11, weight: .semibold)
+                                    .foregroundStyle(.tertiary)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove \(term) from addon searches")
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onAppear {
+            refreshAddonCount()
+        }
+    }
+
+    /// One addon search row: sleeve, title, the tier the source offered, and the
+    /// artist. Tapping plays it; the engine resolves its `src:` key.
+    private func addonRow(_ hit: SearchHitDTO, index: Int) -> some View {
+        HStack(spacing: 12) {
+            ArtworkView(url: hit.thumbnailUrl, data: nil, side: 44)
+                .clipShape(.rect(cornerRadius: 6, style: .continuous))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(hit.title)
+                    .font(.body)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    if let badge = qualityBadge(hit.sourceQuality) {
+                        Text(badge)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.accentColor.opacity(0.16), in: Capsule())
+                            .foregroundStyle(.tint)
+                    }
+                    if let artist = hit.subtitle, !artist.isEmpty {
+                        Text(artist)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            Spacer(minLength: 8)
+            if let text = hit.durationText, !text.isEmpty {
+                Text(text)
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .contentShape(.rect)
+        .onTapGesture {
+            // Play the whole answer list, not one row, so Next has somewhere to
+            // go — the same context the YouTube song rows use.
+            controller.play(addonHits.map { $0.asEntry() }, at: index, context: "Search")
+        }
+        .accessibilityAddTraits(.isButton)
+        .searchRowChrome()
+    }
+
+    /// The search badge for the tier a source offered. LOW and unlabelled rows
+    /// get none, as upstream's `sourceQualityBadge` does.
+    private func qualityBadge(_ raw: String?) -> String? {
+        switch raw?.uppercased() {
+        case "DOLBY": return "Dolby Atmos"
+        case "HI-RES", "HIRES": return "Hi-Res"
+        case "LOSSLESS", "FLAC", "ALAC", "WAV": return "Lossless"
+        case "HIGH", "320": return "High"
+        default: return nil
+        }
+    }
+
+    /// Search hits may identify the playing item by its catalogue id or by the
+    /// source id retained after a quality upgrade/addon resolution.
+    private func isCurrentlyPlaying(_ hit: SearchHitDTO) -> Bool {
+        guard let current = controller.current else { return false }
+        let entry = hit.asEntry()
+        return current.id == entry.id
+            || (hit.videoId != nil && current.videoId == hit.videoId)
+    }
+
 
     private struct SearchSectionModel: Identifiable {
         var id: String { title ?? "all" }
@@ -380,7 +729,7 @@ struct SearchView: View {
     private func searchHitRow(_ hit: SearchHitDTO) -> some View {
         Group {
             if hit.isBrowse, let browseId = hit.browseId {
-                NavigationLink(destination: DetailView(browseId: browseId, initialTitle: hit.title)) {
+                PushLink(destination: DetailView(browseId: browseId, initialTitle: hit.title)) {
                     browseRow(hit)
                 }
                 .buttonStyle(.plain)
@@ -394,15 +743,18 @@ struct SearchView: View {
                         entityType: browseEntityType(hit)
                     ))
                 })
-                .contextMenu {
-                    BrowseActionButtons(card: ShelfCard(
+                .shelfCardContextMenu(
+                    ShelfCard(
                         title: hit.title, subtitle: hit.subtitle,
                         thumbnailUrl: hit.thumbnailUrl, browseId: browseId
-                    ))
-                }
+                    ),
+                    // An artist's sleeve is round wherever it appears.
+                    roundArtwork: hit.browseType?.uppercased() == "ARTIST"
+                )
             } else {
                 SongRow(
                     entry: hit.asEntry(),
+                    isCurrent: isCurrentlyPlaying(hit),
                     play: {
                         recordTrackEntity(hit)
                         let tracks = listHits.filter(\.isTrack).map { $0.asEntry() }
@@ -419,6 +771,51 @@ struct SearchView: View {
             }
         }
         .listRowInsets(EdgeInsets(top: 2, leading: 24, bottom: 2, trailing: 24))
+        .searchRowChrome()
+    }
+
+    /// One live media row in the typeahead dropdown. A track starts a radio from
+    /// itself (upstream's `onTopResultPlay` — the dropdown is a set of answers,
+    /// not a running order); a browse hit opens its page. Shares the result-row
+    /// chrome so the dropdown reads as one column with the committed results.
+    @ViewBuilder
+    private func typeaheadRow(_ hit: SearchHitDTO) -> some View {
+        Group {
+            if hit.isBrowse, let browseId = hit.browseId {
+                PushLink(destination: DetailView(browseId: browseId, initialTitle: hit.title)) {
+                    browseRow(hit)
+                }
+                .buttonStyle(.plain)
+                .simultaneousGesture(TapGesture().onEnded {
+                    RecentSearchStore.record(RecentSearchEntity(
+                        id: browseId, title: hit.title,
+                        subtitle: hit.subtitle ?? "",
+                        artworkUrl: hit.thumbnailUrl,
+                        entityType: browseEntityType(hit)
+                    ))
+                })
+                .shelfCardContextMenu(
+                    ShelfCard(
+                        title: hit.title, subtitle: hit.subtitle,
+                        thumbnailUrl: hit.thumbnailUrl, browseId: browseId
+                    ),
+                    roundArtwork: hit.browseType?.uppercased() == "ARTIST"
+                )
+            } else {
+                SongRow(
+                    entry: hit.asEntry(),
+                    isCurrent: isCurrentlyPlaying(hit),
+                    play: {
+                        recordTrackEntity(hit)
+                        controller.playRadio(hit.asEntry())
+                    },
+                    playNext: { controller.playNext(hit.asEntry()) },
+                    addToQueue: { controller.addToQueue(hit.asEntry()) }
+                )
+            }
+        }
+        .listRowInsets(EdgeInsets(top: 2, leading: 24, bottom: 2, trailing: 24))
+        .searchRowChrome()
     }
 
     /// The trimmed query, in one place. Everywhere below asks the same question
@@ -438,10 +835,11 @@ struct SearchView: View {
         !term.isEmpty && term != searchedTerm
     }
 
-    /// See [resultsColumn]. Hidden for an empty search, a failed one, and while
-    /// typing.
+    /// See [resultsColumn]. Hidden only while a search is in flight or the field
+    /// is being edited — upstream keeps them up for an empty or failed search
+    /// too, since the chips are the only way out of an empty result set.
     private var showsFilters: Bool {
-        attempted && !searching && searchError == nil && !hits.isEmpty && !isEditing
+        attempted && !searching && !isEditing
     }
 
     private var suggestionList: some View {
@@ -453,13 +851,25 @@ struct SearchView: View {
                     }
                 }
             }
+            // Upstream's `searchTypeaheadDropdown`: live media rows while the
+            // field is still being edited, so a half-typed query already answers
+            // the question. They sit above the recents — the recents list is long
+            // and used to push the answers below the fold, where nobody saw them.
+            // Capped at 15 because a dropdown is not a results page.
+            let media = Array(typeaheadHits.prefix(Self.typeaheadMaxResults))
+            if !media.isEmpty {
+                Section {
+                    ForEach(media) { hit in
+                        typeaheadRow(hit)
+                    }
+                }
+            }
             // Upstream keeps recent searches in the same column as the
             // suggestions, so a query too short to produce any — or one the
             // service has nothing for — leaves something to tap rather than an
             // empty "Suggestions" header and no way onward.
-            let recent = RecentSearchStore.load()
+            let recent = recentSuggestions
             if !suggestions.isEmpty || !recent.isEmpty {
-                if !suggestions.isEmpty { Divider() }
                 Section("Recent") {
                     ForEach(recent) { entity in
                         suggestionRow(entity.title)
@@ -468,6 +878,19 @@ struct SearchView: View {
             }
         }
         .listStyle(.plain)
+        .listSectionSeparator(.hidden)
+        .scrollContentBackground(.hidden)
+    }
+
+    /// The recents under the dropdown. While a term is typed they narrow to the
+    /// three that match it (or the three most recent when none do), because the
+    /// full twenty-row list was competing with the answers for the same space.
+    private var recentSuggestions: [RecentSearchEntity] {
+        let all = RecentSearchStore.load()
+        let term = self.term
+        guard !term.isEmpty else { return all }
+        let matching = all.filter { $0.title.localizedCaseInsensitiveContains(term) }
+        return Array((matching.isEmpty ? all : matching).prefix(3))
     }
 
     /// One typeahead row: tapping the text searches it, tapping the arrow
@@ -503,6 +926,8 @@ struct SearchView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Fill search with \(term)")
         }
+        .padding(.vertical, 4)
+        .searchRowChrome()
     }
 
     private func browseRow(_ hit: SearchHitDTO) -> some View {
@@ -632,7 +1057,7 @@ struct SearchView: View {
                                 .fill(.quaternary)
                                 .overlay {
                                     Image(systemName: "magnifyingglass")
-                                        .font(.system(size: 18, weight: .medium))
+                                        .scaledFont(size: 18, weight: .medium)
                                         .foregroundStyle(.secondary)
                                 }
                                 .frame(width: 52, height: 52)
@@ -667,7 +1092,7 @@ struct SearchView: View {
                 historyRevision &+= 1
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
+                    .scaledFont(size: 11, weight: .semibold)
                     .foregroundStyle(.tertiary)
                     .frame(width: 28, height: 28)
                     .contentShape(Circle())
@@ -718,7 +1143,7 @@ struct SearchView: View {
                 } else {
                     LazyVGrid(columns: categoryColumns, spacing: 12) {
                         ForEach(items) { category in
-                            NavigationLink {
+                            PushLink {
                                 MoodGenrePlaylistsView(category: category)
                             } label: {
                                 SearchCategoryTile(category: category)
@@ -780,12 +1205,22 @@ struct SearchView: View {
 
     private func scheduleSuggestions(_ value: String) {
         suggestTask?.cancel()
+        typeaheadTask?.cancel()
         let term = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The Addons source has no completion service of its own, and YouTube's
+        // completions under an addon query would be answers from the wrong
+        // catalogue. Its own history stands in while the field is being edited.
+        guard searchSource == .youtube else {
+            suggestions = []
+            typeaheadHits = []
+            return
+        }
         // A committed search sets the field to the term it just ran. Fetching
         // completions for that same string puts the suggestion list back on
         // top of the results.
         guard term.count >= 2, term != searchedTerm else {
             suggestions = []
+            typeaheadHits = []
             return
         }
         suggestTask = Task {
@@ -795,6 +1230,28 @@ struct SearchView: View {
             await MainActor.run {
                 guard !Task.isCancelled, self.term == term, term != self.searchedTerm else { return }
                 suggestions = list
+            }
+        }
+        // The media dropdown debounces a little longer than the text
+        // completions so the pricier request doesn't fire per keystroke; a
+        // late answer for a term the reader has moved past is dropped, not shown.
+        typeaheadTask = Task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            // A failure here is not shown in the UI (a dropdown that explains
+            // itself in a list of suggestions is noise), but it must not be
+            // swallowed either: the rows simply not appearing is the symptom
+            // this logged line exists to explain.
+            let hits: [SearchHitDTO]
+            do {
+                hits = try await InnertubeSearch.shared.typeahead(term)
+            } catch {
+                DebugLog.shared.w(message: "search typeahead failed for \"\(term)\": \(error.localizedDescription)")
+                hits = []
+            }
+            await MainActor.run {
+                guard !Task.isCancelled, self.term == term, term != self.searchedTerm else { return }
+                typeaheadHits = hits
             }
         }
     }
@@ -841,6 +1298,10 @@ struct SearchView: View {
     private func performSearch() async {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return }
+        if searchSource == .addons {
+            await performAddonSearch(term)
+            return
+        }
         // A new request abandons the previous one. Two searches in flight meant
         // the slower one could land last and overwrite the newer results, which
         // is the bug a listener sees as "I searched for the right thing and got
@@ -851,15 +1312,18 @@ struct SearchView: View {
         attempted = true
         searchError = nil
         suggestions = []
+        typeaheadHits = []
+        searchContinuationToken = nil
+        loadingMore = false
         // A new list identity per request, so the results open at the top rather
         // than at the previous set's offset.
         requestToken &+= 1
-        RecentSearchStore.recordQuery(term)
         searchedTerm = term
         let wanted = scope
         let task = Task { @MainActor in
             do {
-                var found = try await InnertubeSearch.shared.search(term, scope: wanted.rawValue)
+                let page = try await InnertubeSearch.shared.searchPage(term, scope: wanted.rawValue)
+                var found = page.hits
                 if PlatformSettings.shared.getBoolean(key: "jiosaavn_enabled", default: true), wanted == .songs {
                     let extra = await JioSaavn.search(term)
                     found.insert(contentsOf: extra, at: 0)
@@ -869,16 +1333,83 @@ struct SearchView: View {
                 // checked before the request.
                 guard !Task.isCancelled else { return }
                 hits = found
+                searchContinuationToken = page.continuation
             } catch {
                 guard !Task.isCancelled else { return }
+                AuthController.reportIfSessionExpired(error)
                 searchError = "Couldn't reach the music service. Check your connection and try again."
                 hits = []
+                searchContinuationToken = nil
             }
             searching = false
             searchTask = nil
         }
         searchTask = task
         _ = await task.value
+    }
+
+    /// One query answered by every enabled addon. The bridge merges the rows
+    /// round-robin and drops an addon slower than 12 s, so one dead catalogue
+    /// costs only its own rows.
+    private func performAddonSearch(_ term: String) async {
+        searchTask?.cancel()
+        cancelSuggestions()
+        searchingAddons = true
+        attempted = true
+        addonError = nil
+        suggestions = []
+        typeaheadHits = []
+        searchContinuationToken = nil
+        loadingMore = false
+        requestToken &+= 1
+        searchedTerm = term
+        AddonSearchHistory.record(term)
+        addonHistory = AddonSearchHistory.load()
+        let task = Task { @MainActor in
+            do {
+                let found = try await SourceSearch.shared.addons(term)
+                guard !Task.isCancelled else { return }
+                addonHits = found
+            } catch {
+                guard !Task.isCancelled else { return }
+                addonError = "Couldn't reach your sources. \(error.localizedDescription)"
+                addonHits = []
+            }
+            searchingAddons = false
+            searchTask = nil
+        }
+        searchTask = task
+        _ = await task.value
+    }
+
+    /// Appends the next page of the committed search when the list reaches its
+    /// end. A continuation is a separate, deliberately cheap request — the
+    /// first page stays instant and the later pages ride in only when asked.
+    private func loadMore() {
+        guard let token = searchContinuationToken, !loadingMore, !searching else { return }
+        loadingMore = true
+        let term = searchedTerm
+        let wanted = scope
+        Task { @MainActor in
+            defer { loadingMore = false }
+            do {
+                let page = try await InnertubeSearch.shared.searchContinuation(token, scope: wanted.rawValue)
+                // The reader may have moved on to a new term or filter while the
+                // page was in flight; a stale page must not append to it.
+                guard searchedTerm == term, scope == wanted, !Task.isCancelled else { return }
+                let existing = Set(hits.map(\.id))
+                let newRows = page.hits.filter { !existing.contains($0.id) }
+                hits.append(contentsOf: newRows)
+                // Keep the token only when there is a real next step. A page
+                // that adds no new rows, or that echoes the token it was given
+                // back, cannot lead anywhere further — and without this the
+                // sentinel re-fires on every appear, fetching forever.
+                searchContinuationToken = (page.continuation == token || newRows.isEmpty) ? nil : page.continuation
+            } catch {
+                // A failed page is silent: the rows already on screen stay, and
+                // the sentinel can try again on the next pass.
+            }
+        }
     }
 }
 
@@ -945,5 +1476,16 @@ private struct SearchCategoryTile: View {
         }
         .aspectRatio(1.75, contentMode: .fit)
         .accessibilityLabel(category.title)
+    }
+}
+
+private extension View {
+    /// Search rows are spaced, not ruled. A plain `List` draws a hairline under
+    /// every row (and macOS a second one under each section header), which is
+    /// the "lines drawn across the page" look; artwork and spacing already
+    /// separate the rows.
+    func searchRowChrome() -> some View {
+        listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
     }
 }

@@ -36,6 +36,7 @@ struct ListenTogetherView: View {
     @Environment(ToastCenter.self) private var toast
     @Environment(PartyStore.self) private var party
     @Environment(AppModel.self) private var appModel
+    @Environment(AuthController.self) private var auth
 
     /// Which sheet is up, if any.
     ///
@@ -50,6 +51,11 @@ struct ListenTogetherView: View {
     /// Set by a link, so the code cell is pre-filled rather than the sheet opening blank.
     @State private var codeFromLink: String?
     @State private var serverEditorPresented = false
+    /// Sign-in, presented here rather than through the root's sheet: this
+    /// screen is usually already a sheet, and SwiftUI will not raise a second
+    /// sheet on the same presenter — the root's "Sign in" button would sit
+    /// there doing nothing.
+    @State private var signInPresented = false
 
     /// How long the newly made party sits on screen before the invite rises over it.
     ///
@@ -72,6 +78,13 @@ struct ListenTogetherView: View {
                     activitySection(entries)
                 }
             } else {
+                if !auth.signedIn {
+                    // Upstream shows a sign-in group instead of party controls
+                    // when signed out (ListenTogetherScreen.kt:487): hosting is
+                    // an account act — the party rides the host's YouTube
+                    // identity, and a member's presence has to be attributable.
+                    signInSection
+                }
                 landingSection
             }
             if sheet == nil, let message = party.failure ?? party.state.error?.message {
@@ -89,6 +102,25 @@ struct ListenTogetherView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Listen together")
+        .sheet(isPresented: $signInPresented) {
+            // The same presentation RootView mounts, moved to the screen that
+            // asks for it, so it works inside this sheet, in iOS Settings and
+            // in the Mac Settings window alike.
+            NavigationStack {
+                YtMusicLoginView(
+                    onCaptured: { session, done in
+                        auth.accept(session) { accepted in
+                            if accepted { signInPresented = false }
+                            done(accepted)
+                        }
+                    },
+                    onDismiss: { signInPresented = false }
+                )
+            }
+            #if os(macOS)
+            .frame(minWidth: 720, minHeight: 640)
+            #endif
+        }
         #if os(macOS)
         .frame(minWidth: 520, idealWidth: 600)
         #endif
@@ -153,11 +185,36 @@ struct ListenTogetherView: View {
 
     // MARK: - Not in a party
 
+    /// Upstream's sign-in group (`listen_together_sign_in_footer`): the row
+    /// opens the same sign-in the rest of the app uses, and the landing below
+    /// stays visible but inert.
+    private var signInSection: some View {
+        Section {
+            Button {
+                signInPresented = true
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Sign in")
+                            .foregroundStyle(.primary)
+                        Text("Not signed in")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "rectangle.portrait.and.arrow.right")
+                }
+            }
+        } footer: {
+            Text("Listening together needs an account, so everyone in the party can see who else is in it.")
+        }
+    }
+
     private var landingSection: some View {
         Section {
             PartyLanding(
                 avatarUrl: party.avatarUrl,
-                enabled: party.hasServer && !party.busy,
+                enabled: auth.signedIn && party.hasServer && !party.busy,
                 serverMissing: !party.hasServer,
                 busy: party.busy,
                 onCreate: { sheet = .create },
@@ -172,7 +229,7 @@ struct ListenTogetherView: View {
         Section {
             VStack(spacing: 10) {
                 Text(party.code)
-                    .font(.system(size: 32, weight: .semibold, design: .monospaced))
+                    .scaledFont(size: 32, weight: .semibold, design: .monospaced)
                     .tracking(6)
                     .textSelection(.enabled)
                     .padding(.vertical, 8)
@@ -653,7 +710,7 @@ private struct PartyTransportButton: View {
         Button(action: action) {
             VStack(spacing: 4) {
                 Image(systemName: systemImage)
-                    .font(.system(size: prominent ? 22 : 18, weight: .semibold))
+                    .scaledFont(size: prominent ? 22 : 18, weight: .semibold)
                 Text(label)
                     .font(.caption2)
                     .lineLimit(1)
@@ -826,7 +883,7 @@ struct PartyAvatar: View {
 
     private var initial: some View {
         Text(name.trimmingCharacters(in: .whitespaces).first.map(String.init)?.uppercased() ?? "?")
-            .font(.system(size: size * 0.42, weight: .medium))
+            .scaledFont(size: size * 0.42, weight: .medium)
             .foregroundStyle(.secondary)
     }
 }

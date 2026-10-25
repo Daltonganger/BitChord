@@ -78,6 +78,14 @@ final class CanvasVideoView: PlatformCanvasView {
     private var currentURL: URL?
     private var cachedRemoteRetryURL: URL?
     private var generation = 0
+    private struct PendingLoad {
+        let url: URL
+        let invalidateCachedFile: Bool
+        let cachedRemoteRetryURL: URL?
+    }
+    private var pendingLoad: PendingLoad?
+    private var activeLoad: PendingLoad?
+    private var cacheTask: Task<Void, Never>?
     private var triedFallback = false
     private var triedCachedRemoteRetry = false
     private var readyObserver: NSKeyValueObservation?
@@ -111,33 +119,43 @@ final class CanvasVideoView: PlatformCanvasView {
         if sourceChanged {
             currentURL = value.url
             generation += 1
-            let requestGeneration = generation
+            cacheTask?.cancel()
+            cacheTask = nil
+            activeLoad = nil
             triedFallback = false
             triedCachedRemoteRetry = false
             cachedRemoteRetryURL = nil
             clearItem()
             value.onRendered(false)
             value.onAspect(0)
-            Task { [weak self] in
-                let local = value.url.isFileURL ? value.url : await CanvasFileCache.shared.cachedFile(for: value.url)
-                guard let self, self.generation == requestGeneration else { return }
-                self.mount(local, cachedRemoteRetryURL: local == value.url ? nil : value.url)
+            pendingLoad = PendingLoad(url: value.url, invalidateCachedFile: false, cachedRemoteRetryURL: nil)
+        }
+        if wasActive && !value.active {
+            cacheTask?.cancel()
+            cacheTask = nil
+            if player.currentItem == nil, let activeLoad {
+                pendingLoad = activeLoad
             }
+            activeLoad = nil
         }
         layoutVideo()
         if value.active {
+            if pendingLoad != nil { startPendingLoad() }
             if !wasActive { lastSampleTime = -.infinity }
             player.play()
-            startFrameTimer()
+            if value.sampleFrames { startFrameTimer() } else { stopFrameTimer() }
         } else {
             player.pause()
-            frameTimer?.invalidate()
-            frameTimer = nil
+            stopFrameTimer()
         }
     }
 
     func teardown() {
         generation += 1
+        cacheTask?.cancel()
+        cacheTask = nil
+        pendingLoad = nil
+        activeLoad = nil
         frameTimer?.invalidate()
         frameTimer = nil
         clearItem()
@@ -216,7 +234,37 @@ final class CanvasVideoView: PlatformCanvasView {
             }
         }
         player.replaceCurrentItem(with: item)
-        if configuration?.active == true { player.play(); startFrameTimer() }
+        if configuration?.active == true {
+            player.play()
+            if configuration?.sampleFrames == true { startFrameTimer() }
+        }
+    }
+
+    private func startPendingLoad() {
+        guard configuration?.active == true, let pendingLoad else { return }
+        self.pendingLoad = nil
+        activeLoad = pendingLoad
+        cacheTask?.cancel()
+        let requestGeneration = generation
+        cacheTask = Task { [weak self] in
+            if pendingLoad.invalidateCachedFile {
+                await CanvasFileCache.shared.invalidate(pendingLoad.url)
+            }
+            let local = pendingLoad.url.isFileURL
+                ? pendingLoad.url
+                : await CanvasFileCache.shared.cachedFile(for: pendingLoad.url)
+            guard !Task.isCancelled, let self,
+                  self.generation == requestGeneration, self.configuration?.active == true else { return }
+            self.cacheTask = nil
+            self.activeLoad = nil
+            let retryURL = pendingLoad.cachedRemoteRetryURL ?? (local == pendingLoad.url ? nil : pendingLoad.url)
+            self.mount(local, cachedRemoteRetryURL: retryURL)
+        }
+    }
+
+    private func stopFrameTimer() {
+        frameTimer?.invalidate()
+        frameTimer = nil
     }
 
     private func useFallback() {
@@ -232,14 +280,9 @@ final class CanvasVideoView: PlatformCanvasView {
             // Some clip hosts ignore Range requests. AVPlayer cannot stream
             // their MP4s, but it can decode a complete cached download.
             generation += 1
-            let requestGeneration = generation
             clearItem()
-            Task { [weak self] in
-                await CanvasFileCache.shared.invalidate(remote)
-                let local = await CanvasFileCache.shared.cachedFile(for: remote)
-                guard let self, self.generation == requestGeneration else { return }
-                self.mount(local)
-            }
+            pendingLoad = PendingLoad(url: remote, invalidateCachedFile: true, cachedRemoteRetryURL: nil)
+            startPendingLoad()
             return
         }
         guard !triedFallback, let fallback = configuration?.fallback else {
@@ -249,13 +292,9 @@ final class CanvasVideoView: PlatformCanvasView {
         triedFallback = true
         triedCachedRemoteRetry = false
         generation += 1
-        let requestGeneration = generation
         clearItem()
-        Task { [weak self] in
-            let local = fallback.isFileURL ? fallback : await CanvasFileCache.shared.cachedFile(for: fallback)
-            guard let self, self.generation == requestGeneration else { return }
-            self.mount(local, cachedRemoteRetryURL: local == fallback ? nil : fallback)
-        }
+        pendingLoad = PendingLoad(url: fallback, invalidateCachedFile: false, cachedRemoteRetryURL: nil)
+        startPendingLoad()
     }
 
     private func revealIfReady() {
@@ -277,7 +316,6 @@ final class CanvasVideoView: PlatformCanvasView {
     }
 
     private func sampleFrameIfNeeded() {
-        revealIfReady()
         guard ready, configuration?.active == true, configuration?.sampleFrames == true,
               !sampling, CACurrentMediaTime() - lastSampleTime >= 3,
               let output = videoOutput else { return }

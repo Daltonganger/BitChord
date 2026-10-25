@@ -1,5 +1,13 @@
 import Foundation
+import Observation
 import BitChordShared
+
+final class ObservationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var changed = false
+    func set() { lock.withLock { changed = true } }
+    var value: Bool { lock.withLock { changed } }
+}
 
 // UI-independent collaborators. DownloadStore itself and QueueEntry are the app sources.
 struct LocalTrack { var path = ""; var title = ""; var artist = ""; var durationSeconds = 0.0; var album = ""; var artwork: Data? }
@@ -83,6 +91,21 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         let index = root.appendingPathComponent("index.json")
         try JSONEncoder().encode(fixture).write(to: index)
         let store = DownloadStore(directory: root, startWorker: false)
+        assert(store.isDownloaded(entry) && !store.isDownloaded(other), "row presence index restores exact song identities")
+        let absent = QueueEntry.youtube(videoId: "missing-file", title: entry.title, artist: entry.artist)
+        var missingAsset = asset; missingAsset.id = "missing"; missingAsset.entry = absent; missingAsset.path = root.appendingPathComponent("absent.wav").path
+        var missingFixture = fixture; missingFixture.assets[missingAsset.id] = missingAsset
+        let missingRoot = root.appendingPathComponent("missing")
+        try FileManager.default.createDirectory(at: missingRoot, withIntermediateDirectories: true)
+        try JSONEncoder().encode(missingFixture).write(to: missingRoot.appendingPathComponent("index.json"))
+        let missingStore = DownloadStore(directory: missingRoot, startWorker: false)
+        assert(!missingStore.isDownloaded(absent), "row presence index excludes missing files on restore")
+        let rowInvalidated = ObservationFlag()
+        withObservationTracking { _ = store.isDownloaded(entry) } onChange: { rowInvalidated.set() }
+        store.jobs.append(.init(id: "progress", runID: "fixture", title: "Progress", status: .running, entry: other, quality: "HIGH"))
+        store.jobs[0].attempts += 1
+        assert(!rowInvalidated.value, "download job updates do not invalidate row presence reads")
+        store.jobs.removeAll()
         assert(store.asset(for: entry) != nil, "verified download found")
         assert(store.selectedYouTubeVideoId(for: path) == entry.videoId, "saved YouTube origin survives local-file playback")
         assert(store.selectedYouTubeVideoId(for: exported) == nil, "an unrelated local file has no invented YouTube origin")
@@ -103,6 +126,7 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         store.retainPlayback(paths: [path])
         store.removeOwner("single:" + request); assert(FileManager.default.fileExists(atPath: path), "reader reservation defers deletion")
         store.retainPlayback(paths: []); assert(!FileManager.default.fileExists(atPath: path), "last owner and reader release deletes private copy")
+        assert(!store.isDownloaded(entry) && rowInvalidated.value, "asset removal updates observable row presence")
         assert(FileManager.default.fileExists(atPath: exported), "export survives private asset cleanup")
         let legacyRoot = root.appendingPathComponent("legacy")
         try FileManager.default.createDirectory(at: legacyRoot, withIntermediateDirectories: true)
@@ -113,6 +137,9 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         migrated.refresh()
         await migrated.waitForRefresh()
         assert(migrated.items.count == 1 && FileManager.default.fileExists(atPath: oldFile.path), "legacy migration preserves the original file")
+        let migratedIndex = try JSONDecoder().decode(FixtureIndex.self, from: Data(contentsOf: migrationRoot.appendingPathComponent("index.json")))
+        let legacyEntry = migratedIndex.assets.values.first!.entry
+        assert(migrated.isDownloaded(legacyEntry), "legacy migration populates row presence")
         assert(migrated.provenance(for: oldFile.path) == nil, "legacy names do not establish YouTube provenance")
         migrated.retainPlayback(paths: [oldFile.path]); migrated.delete(oldFile.path)
         let delayed = DownloadStore(directory: migrationRoot, startWorker: false)
@@ -159,6 +186,7 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         entries.forEach { _ = worker.download($0) }
         for _ in 0..<100 { if !worker.restoring && worker.jobs.count == 3 && worker.jobs.allSatisfy({ $0.status == .done }) { break }; try await Task.sleep(for: .milliseconds(50)) }
         assert(worker.jobs.count == 3 && worker.jobs.allSatisfy { $0.status == .done }, "pending worker completes independent jobs")
+        assert(entries.allSatisfy { worker.isDownloaded($0) }, "completed downloads populate row presence")
         assert(backend.counts().0 == 2 && backend.counts().1 == 3, "worker permits exactly two concurrent transfers")
         let joiningBackend = FixtureBackend(); joiningBackend.sharedRecording = true
         let joining = DownloadStore(directory: root.appendingPathComponent("joining"), legacyDirectory: legacyRoot, backend: joiningBackend)
@@ -166,6 +194,12 @@ final class FixtureBackend: DownloadBackend, @unchecked Sendable {
         for _ in 0..<100 { if !joining.restoring && joining.jobs.count == 2 && joining.jobs.allSatisfy({ $0.status == .done }) { break }; try await Task.sleep(for: .milliseconds(50)) }
         assert(joiningBackend.counts().1 == 1, "matching resolved renditions join one transfer")
         assert(joining.asset(for: entries[0])?.path == joining.asset(for: entries[1])?.path, "shared recording is used during playback for each request")
+        assert(joining.isDownloaded(entries[0]) && joining.isDownloaded(entries[1]), "shared recording badges include each request identity")
+        joining.clearFinishedJobs()
+        let rejoined = DownloadStore(directory: root.appendingPathComponent("joining"), startWorker: false)
+        assert(rejoined.isDownloaded(entries[0]) && rejoined.isDownloaded(entries[1]), "request badges survive clearing jobs and relaunch")
+        joining.clearDownloads()
+        assert(!joining.isDownloaded(entries[0]) && !joining.isDownloaded(entries[1]), "clearing downloads removes all shared recording badges")
         let previousWifi = PlatformSettings.shared.getBoolean(key: "wifi_only_downloads", default: true)
         PlatformSettings.shared.putBoolean(key: "wifi_only_downloads", value: true)
         NetworkQuality.shared.metered = true

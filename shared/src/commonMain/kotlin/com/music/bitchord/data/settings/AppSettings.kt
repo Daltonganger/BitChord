@@ -16,6 +16,10 @@ import com.music.bitchord.data.lyrics.LyricsSource
 import com.music.bitchord.data.lyrics.normalizePaxSenixApiKey
 import com.music.bitchord.data.remote.WebDavConfig
 
+/** Providers enabled for a fresh install; explicit saved choices are handled separately. */
+internal fun defaultEnabledLyricsSources(): Set<LyricsSource> =
+    LyricsSource.entries.filter { it != LyricsSource.SIMP_MUSIC }.toSet()
+
 /**
  * The stream ceiling for a connection, and — via [permits] — which sources that
  * ceiling is willing to pay for.
@@ -102,6 +106,7 @@ object AppSettings {
     private const val KEY_WEBDAV_URL = "webdav_url"
     private const val KEY_WEBDAV_USERNAME = "webdav_username"
     private const val KEY_WEBDAV_PASSWORD = "webdav_password"
+    private const val KEY_UPGRADE_LENGTH_SLACK_SECONDS = "upgrade_length_slack_seconds"
 
     /**
      * The longest nickname stored.
@@ -330,15 +335,29 @@ object AppSettings {
         setPrioritizeSyllableSync(false)
     }
 
+    /** The "Unlimited" cache setting: a ceiling no disk will ever reach. */
+    const val UNLIMITED_CACHE_LIMIT_BYTES = Long.MAX_VALUE
+
     private val _audioCacheLimitBytes = MutableStateFlow(
         settings.getLong("audio_cache_limit_bytes", DEFAULT_CACHE_LIMIT_BYTES)
-            .coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES),
+            .coerceCacheLimit(),
     )
     val audioCacheLimitBytes: StateFlow<Long> = _audioCacheLimitBytes.asStateFlow()
     fun setAudioCacheLimitBytes(value: Long) {
-        _audioCacheLimitBytes.value = value.coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
+        _audioCacheLimitBytes.value = value.coerceCacheLimit()
         settings.putLong("audio_cache_limit_bytes", _audioCacheLimitBytes.value)
     }
+
+    /**
+     * A cache limit inside the allowed range — or the unlimited sentinel.
+     *
+     * Unlimited has to survive the clamp, which is why it is checked first:
+     * coercing `Long.MAX_VALUE` back to the 10 GB ceiling would silently turn
+     * "Unlimited" into "10 GB".
+     */
+    private fun Long.coerceCacheLimit(): Long =
+        if (this >= UNLIMITED_CACHE_LIMIT_BYTES) UNLIMITED_CACHE_LIMIT_BYTES
+        else coerceIn(DEFAULT_CACHE_LIMIT_BYTES, MAX_CACHE_LIMIT_BYTES)
 
     // ---- Local library -----------------------------------------------------
     private val _localLibraryPath = MutableStateFlow(settings.getString("local_library_path", ""))
@@ -758,6 +777,71 @@ object AppSettings {
         settings.putBoolean("loudness_normalization", value)
     }
 
+    /** Allow normalization to be skipped on a phone's built-in speaker. */
+    private val _loudnessOffOnSpeaker = MutableStateFlow(settings.getBoolean("loudness_off_on_speaker", true))
+    val loudnessOffOnSpeaker: StateFlow<Boolean> = _loudnessOffOnSpeaker.asStateFlow()
+    fun setLoudnessOffOnSpeaker(value: Boolean) {
+        _loudnessOffOnSpeaker.value = value
+        settings.putBoolean("loudness_off_on_speaker", value)
+    }
+
+    /** Duration tolerance for preferring a same-recording source match. */
+    private val _upgradeLengthSlackSeconds = MutableStateFlow(
+        settings.getInt(KEY_UPGRADE_LENGTH_SLACK_SECONDS, DEFAULT_UPGRADE_LENGTH_SLACK_SECONDS)
+            .coerceIn(MIN_UPGRADE_LENGTH_SLACK_SECONDS, MAX_UPGRADE_LENGTH_SLACK_SECONDS),
+    )
+    val upgradeLengthSlackSeconds: StateFlow<Int> = _upgradeLengthSlackSeconds.asStateFlow()
+    fun setUpgradeLengthSlackSeconds(value: Int) {
+        val bounded = value.coerceIn(MIN_UPGRADE_LENGTH_SLACK_SECONDS, MAX_UPGRADE_LENGTH_SLACK_SECONDS)
+        _upgradeLengthSlackSeconds.value = bounded
+        settings.putInt(KEY_UPGRADE_LENGTH_SLACK_SECONDS, bounded)
+    }
+
+    /** Whether the expanded player's system status bar is hidden. */
+    private val _hideStatusBarInPlayer = MutableStateFlow(settings.getBoolean("hide_status_bar_in_player", false))
+    val hideStatusBarInPlayer: StateFlow<Boolean> = _hideStatusBarInPlayer.asStateFlow()
+    fun setHideStatusBarInPlayer(value: Boolean) {
+        _hideStatusBarInPlayer.value = value
+        settings.putBoolean("hide_status_bar_in_player", value)
+    }
+
+    /** Include tracks before the current cursor in the player queue. */
+    private val _showQueueHistory = MutableStateFlow(settings.getBoolean("show_queue_history", false))
+    val showQueueHistory: StateFlow<Boolean> = _showQueueHistory.asStateFlow()
+    fun setShowQueueHistory(value: Boolean) {
+        _showQueueHistory.value = value
+        settings.putBoolean("show_queue_history", value)
+    }
+
+    /** Pause playback when the Mac's main window is closed. */
+    private val _stopMusicOnClose = MutableStateFlow(settings.getBoolean("stop_music_on_close", false))
+    val stopMusicOnClose: StateFlow<Boolean> = _stopMusicOnClose.asStateFlow()
+    fun setStopMusicOnClose(value: Boolean) {
+        _stopMusicOnClose.value = value
+        settings.putBoolean("stop_music_on_close", value)
+    }
+
+    /** Show artist signatures sourced from Wikimedia on artist pages. */
+    private val _artistSignaturesEnabled = MutableStateFlow(settings.getBoolean("artist_signatures_enabled", true))
+    val artistSignaturesEnabled: StateFlow<Boolean> = _artistSignaturesEnabled.asStateFlow()
+    fun setArtistSignaturesEnabled(value: Boolean) {
+        _artistSignaturesEnabled.value = value
+        settings.putBoolean("artist_signatures_enabled", value)
+    }
+
+    /** Optional Wikimedia URL override; empty uses the app's default endpoint. */
+    private val _artistSignaturesWikimediaUrl = MutableStateFlow(settings.getString("artist_signatures_wikimedia_url", ""))
+    val artistSignaturesWikimediaUrl: StateFlow<String> = _artistSignaturesWikimediaUrl.asStateFlow()
+    fun setArtistSignaturesWikimediaUrl(value: String) {
+        val clean = value.trim()
+        _artistSignaturesWikimediaUrl.value = clean
+        settings.putString("artist_signatures_wikimedia_url", clean)
+    }
+
+    const val DEFAULT_UPGRADE_LENGTH_SLACK_SECONDS = 3
+    const val MIN_UPGRADE_LENGTH_SLACK_SECONDS = 0
+    const val MAX_UPGRADE_LENGTH_SLACK_SECONDS = 10
+
     /** CPU budget for Automix's background analysis, not its audible mix. */
     private val _automixPerformanceMode = MutableStateFlow(
         settings.getString("automix_performance", "BALANCED").takeIf {
@@ -1012,6 +1096,8 @@ object AppSettings {
             "canvas_over_cellular", "prioritize_spotify_canvas", "theme_mode", "reduce_dynamic_blur", "reduce_animation",
             "full_bleed_artwork", "synced_lyrics", "dolby_atmos", "lyrics_blur", "translation_language", "convert_video_to_audio", "swipe_to_play_next",
             "dont_repeat_suggestions", "hide_volume_bar", "lyrics_sources", "lyrics_source_order",
+            KEY_UPGRADE_LENGTH_SLACK_SECONDS, "loudness_off_on_speaker", "hide_status_bar_in_player",
+            "show_queue_history", "stop_music_on_close", "artist_signatures_enabled", "artist_signatures_wikimedia_url",
             "audio_cache_limit_bytes",
             "eq_gains", "pinned_playlists", "jiosaavn_enabled", "stop_when_backgrounded",
             "prioritize_syllable_sync", "replay_genres", "scrobble_min_duration", "scrobble_delay_percent",
@@ -1036,6 +1122,8 @@ object AppSettings {
                 "crossfade_seconds", "scrobble_min_duration", "scrobble_delay_seconds",
                 "performance_refresh_rate" ->
                     settings.getInt(key, 0).toString()
+                KEY_UPGRADE_LENGTH_SLACK_SECONDS ->
+                    settings.getInt(key, DEFAULT_UPGRADE_LENGTH_SLACK_SECONDS).toString()
                 "audio_cache_limit_bytes" -> settings.getLong(key, DEFAULT_CACHE_LIMIT_BYTES).toString()
                 "clarity_wet", "scrobble_delay_percent", "playback_speed" -> settings.getFloat(key, 0f).toString()
                 "smart_fade_enabled", "spatial_audio", "autoplay", "skip_silence", "trim_edge_silence", "skip_non_music",
@@ -1046,6 +1134,7 @@ object AppSettings {
                 "hide_volume_bar", "jiosaavn_enabled", "stop_when_backgrounded",
                 "prioritize_syllable_sync", "replay_genres", "discord_rpc_enabled", "discord_swap_title",
                 "prefer_usb_dac", "loudness_normalization", "high_performance_mode",
+                "loudness_off_on_speaker", "hide_status_bar_in_player", "show_queue_history", "stop_music_on_close", "artist_signatures_enabled",
                 "export_downloads", "hide_song_status", "prefer_music_only", "smart_version_alignment",
                 "filter_non_music_audio", "legacy_mesh_gradient",
                 "discord_use_details", "discord_advanced_mode", "discord_info_dismissed",
@@ -1053,6 +1142,8 @@ object AppSettings {
                 -> when (key) {
                     "discord_button_1_visible", "discord_button_2_visible" ->
                         settings.getBoolean(key, true).toString()
+                    "loudness_off_on_speaker" -> settings.getBoolean(key, true).toString()
+                    "artist_signatures_enabled" -> settings.getBoolean(key, true).toString()
                     else -> settings.getBoolean(key, false).toString()
                 }
                 else -> settings.getString(key, "")
@@ -1115,6 +1206,13 @@ object AppSettings {
                 "clarity_wet" -> setClarityTuning(_clarityTuning.value.copy(wet=value.toFloatOrNull() ?: 1f))
                 "clarity_trims" -> setClarityTuning(_clarityTuning.value.copy(trimsDb=value.split(",").map { it.toFloatOrNull() ?: 0f }))
                 "loudness_normalization" -> setLoudnessNormalization(value.toBoolean())
+                "loudness_off_on_speaker" -> setLoudnessOffOnSpeaker(value.toBoolean())
+                KEY_UPGRADE_LENGTH_SLACK_SECONDS -> setUpgradeLengthSlackSeconds(value.toIntOrNull() ?: DEFAULT_UPGRADE_LENGTH_SLACK_SECONDS)
+                "hide_status_bar_in_player" -> setHideStatusBarInPlayer(value.toBoolean())
+                "show_queue_history" -> setShowQueueHistory(value.toBoolean())
+                "stop_music_on_close" -> setStopMusicOnClose(value.toBoolean())
+                "artist_signatures_enabled" -> setArtistSignaturesEnabled(value.toBoolean())
+                "artist_signatures_wikimedia_url" -> setArtistSignaturesWikimediaUrl(value)
                 "automix_performance" -> setAutomixPerformanceMode(value)
                 "high_performance_mode" -> setHighPerformanceMode(value.toBoolean())
                 "performance_refresh_rate" -> setPerformanceRefreshRate(value.toIntOrNull() ?: 60)
@@ -1197,20 +1295,29 @@ object AppSettings {
     const val MAX_PINNED_PLAYLISTS = 5
 
     private const val OLD_LYRICS_DEFAULT = "BETTER,PLUS,SIMP,LRCLIB"
+    private const val UNCONFIGURED_LYRICS_SOURCES = "\u0000unconfigured"
 
     /** Every source name this build has offered; see [adoptNewLyricsSources]. */
     private const val KEY_LYRICS_KNOWN_SOURCES = "lyrics_known_sources"
 
     private fun defaultLyricsSourcesJoined(): String =
-        LyricsSource.entries.joinToString(",") { it.name }
+        LyricsSource.entries.filter { it in defaultEnabledLyricsSources() }.joinToString(",") { it.name }
 
     private fun readLyricsSourcesPref(): String {
-        val stored = settings.getString("lyrics_sources", defaultLyricsSourcesJoined())
-        if (stored == OLD_LYRICS_DEFAULT) {
-            val all = defaultLyricsSourcesJoined()
-            settings.putString("lyrics_sources", all)
+        val stored = settings.getString("lyrics_sources", UNCONFIGURED_LYRICS_SOURCES)
+        if (stored == UNCONFIGURED_LYRICS_SOURCES) {
+            val defaults = defaultLyricsSourcesJoined()
+            settings.putString("lyrics_sources", defaults)
             markLyricsSourcesKnown()
-            return all
+            return defaults
+        }
+        if (stored == OLD_LYRICS_DEFAULT) {
+            // This exact value was the old built-in default, not an explicit
+            // choice. New defaults omit the provider-wide third-party block.
+            val defaults = defaultLyricsSourcesJoined()
+            settings.putString("lyrics_sources", defaults)
+            markLyricsSourcesKnown()
+            return defaults
         }
         val migrated = persistLyricsSources(stored)
         if (migrated != stored && stored.isNotEmpty()) settings.putString("lyrics_sources", migrated)
@@ -1237,7 +1344,7 @@ object AppSettings {
             .split(",").mapNotNull { LyricsSource.fromName(it) }.toSet()
         val everything = LyricsSource.entries.toSet()
         if (known.containsAll(everything)) return current
-        val fresh = everything - known
+        val fresh = (everything - known) - LyricsSource.SIMP_MUSIC
         val enabled = parseLyricsSources(current) + fresh
         val joined = enabled.joinToString(",") { it.name }
         settings.putString("lyrics_sources", joined)
@@ -1267,7 +1374,7 @@ object AppSettings {
 
     private fun parseLyricsSources(raw: String): Set<LyricsSource> {
         if (raw.isBlank()) return emptySet()
-        if (raw == OLD_LYRICS_DEFAULT) return LyricsSource.entries.toSet()
+        if (raw == OLD_LYRICS_DEFAULT) return defaultEnabledLyricsSources()
         return raw.split(",").mapNotNull { LyricsSource.fromName(it) }.toSet()
     }
 

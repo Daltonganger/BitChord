@@ -21,6 +21,24 @@ class AddonCompatibilityTest {
             "checkValidLossless":1,"allowDownloads":1
         }""")
         assertTrue(manifest.isPlayable)
+        assertTrue(manifest.downloadsAllowed)
+        assertTrue(manifest.requiresLosslessOutput)
+    }
+
+    @Test fun resourceManifestRetainsDownloadAndOutputPolicies() {
+        for (value in listOf("false", "0", "\"false\"", "\"0\"")) {
+            val manifest = json.decodeFromString<AddonManifest>("""{
+                "id":"dev.playback-only", "resources":["search","stream"],
+                "allowDownloads":$value, "checkValidLossless":"true"
+            }""")
+            assertTrue(manifest.isPlayable)
+            assertFalse(manifest.downloadsAllowed)
+            assertTrue(manifest.requiresLosslessOutput)
+        }
+        val legacy = json.decodeFromString<AddonManifest>(
+            """{"id":"dev.legacy","search":{},"stream":{}}""")
+        assertTrue(legacy.downloadsAllowed)
+        assertFalse(legacy.requiresLosslessOutput)
     }
 
     @Test fun absentStreamIsRejected() {

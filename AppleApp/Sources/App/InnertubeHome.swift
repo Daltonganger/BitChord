@@ -4,7 +4,7 @@ import BitChordShared
 /// One shelf of the signed-out Home/Explore feeds, decoded from the shared
 /// module's serialized `HomeFeed` (the bridge crosses FFI as JSON, same
 /// contract as search).
-struct FeedShelf: Codable, Identifiable {
+struct FeedShelf: Codable, Identifiable, Hashable {
     let title: String
     let items: [ShelfCard]
     let subtitle: String?
@@ -99,6 +99,9 @@ struct MoodGenre: Codable, Identifiable, Hashable {
     /// afterwards, one section at a time, so the first covers to arrive are on
     /// screen while the rest are still being asked for.
     var thumbnailUrl: String?
+    /// YouTube Music's own stripe colour for the button, as ARGB; nil when the
+    /// button carries none and the tile falls back to its muted palette.
+    let stripeColor: Int64?
     var id: String { "\(browseId)?\(params ?? "")" }
 }
 

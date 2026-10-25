@@ -1,6 +1,89 @@
 import Foundation
 import BitChordShared
 
+/// The offline stand-in for a collection saved to this device: the download
+/// store's entries under the title the download recorded, so a page opened
+/// with no network shows the songs the listener already has (upstream's
+/// `downloadedCopyOf`).
+extension DetailPageModel {
+    init(
+        browseId: String,
+        title: String,
+        subtitle: String,
+        thumbnailUrl: String?,
+        songs: [SongPayload],
+        sections: [FeedShelf],
+        description: String?,
+        subscriberCountText: String?,
+        monthlyListenerCount: String?,
+        subscription: ArtistSubscriptionPayload?,
+        continuation: String?,
+        suggestedSongs: [SongPayload],
+        libraryPlaylistId: String?,
+        librarySaved: Bool?,
+        playlistOwned: Bool?,
+        type: String?,
+        url: String?
+    ) {
+        self.browseId = browseId
+        self.title = title
+        self.subtitle = subtitle
+        self.thumbnailUrl = thumbnailUrl
+        self.songs = songs
+        self.sections = sections
+        self.description = description
+        self.subscriberCountText = subscriberCountText
+        self.monthlyListenerCount = monthlyListenerCount
+        self.subscription = subscription
+        self.continuation = continuation
+        self.suggestedSongs = suggestedSongs
+        self.libraryPlaylistId = libraryPlaylistId
+        self.librarySaved = librarySaved
+        self.playlistOwned = playlistOwned
+        self.type = type
+        self.url = url
+    }
+
+    @MainActor
+    static func downloadedCopy(browseId: String, from store: DownloadStore) -> DetailPageModel? {
+        let entries = store.savedEntries(for: browseId)
+        guard !entries.isEmpty else { return nil }
+        let songs = entries.map { entry in
+            DetailPageModel.SongPayload(
+                videoId: entry.videoId ?? entry.id,
+                title: entry.title,
+                artist: entry.artist,
+                thumbnailUrl: entry.thumbnailUrl,
+                durationText: entry.durationText,
+                albumName: entry.albumName,
+                isVideo: entry.isVideo,
+                artistId: entry.artistId,
+                albumId: entry.albumId,
+                setVideoId: entry.setVideoId
+            )
+        }
+        return DetailPageModel(
+            browseId: browseId,
+            title: store.savedTitle(for: browseId) ?? browseId,
+            subtitle: "Downloaded",
+            thumbnailUrl: entries.compactMap(\.thumbnailUrl).first,
+            songs: songs,
+            sections: [],
+            description: nil,
+            subscriberCountText: nil,
+            monthlyListenerCount: nil,
+            subscription: nil,
+            continuation: nil,
+            suggestedSongs: [],
+            libraryPlaylistId: nil,
+            librarySaved: nil,
+            playlistOwned: nil,
+            type: "PLAYLIST",
+            url: nil
+        )
+    }
+}
+
 struct DetailPageModel: Codable {
     let browseId: String
     let title: String
@@ -73,6 +156,30 @@ struct DetailPageModel: Codable {
             artistId = try c.decodeIfPresent(String.self, forKey: .artistId)
             albumId = try c.decodeIfPresent(String.self, forKey: .albumId)
             setVideoId = try c.decodeIfPresent(String.self, forKey: .setVideoId)
+        }
+
+        init(
+            videoId: String,
+            title: String,
+            artist: String,
+            thumbnailUrl: String?,
+            durationText: String?,
+            albumName: String?,
+            isVideo: Bool,
+            artistId: String?,
+            albumId: String?,
+            setVideoId: String?
+        ) {
+            self.videoId = videoId
+            self.title = title
+            self.artist = artist
+            self.thumbnailUrl = thumbnailUrl
+            self.durationText = durationText
+            self.albumName = albumName
+            self.isVideo = isVideo
+            self.artistId = artistId
+            self.albumId = albumId
+            self.setVideoId = setVideoId
         }
 
         func asEntry(fallbackArt: String? = nil) -> QueueEntry {

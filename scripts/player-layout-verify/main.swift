@@ -65,6 +65,49 @@ landscape("just above the floor", PlayerLayout.landscapeMinWidth + 1, 300, true)
 // rather than the window's.
 landscape("narrow but wider than tall", 300, 200, false)
 
+// ---- an open pane beside the stage ----------------------------------------
+
+// A tablet upright does not take the landscape shape, but it has the width for
+// two columns: with the lyrics or the queue open, the pane sits beside the
+// sleeve rather than over its stage (N1). The question is only ever asked about
+// windows that are *not* landscape, because those are already two columns.
+check(
+    "a tablet upright puts an open pane beside the stage",
+    PlayerLayout.putsPaneBesideStage(width: 820, regularWidth: true)
+)
+check(
+    "a square tablet window does too — the rule is width, not orientation",
+    PlayerLayout.putsPaneBesideStage(width: 600, regularWidth: true)
+)
+
+// The same window in a narrow split view is compact width, and compact width
+// keeps the portrait player whatever the window's size.
+check(
+    "a compact-width window does not",
+    !PlayerLayout.putsPaneBesideStage(width: 820, regularWidth: false)
+)
+
+// A phone upright has no second column to give.
+check(
+    "a phone upright does not",
+    !PlayerLayout.putsPaneBesideStage(width: 393, regularWidth: true)
+)
+
+// The floor is the landscape player's, and is checked one point either side of
+// it because a threshold is only correct relative to what it excludes.
+check(
+    "one point below the floor does not",
+    !PlayerLayout.putsPaneBesideStage(
+        width: PlayerLayout.landscapeMinWidth - 1, regularWidth: true
+    )
+)
+check(
+    "exactly at the floor it does",
+    PlayerLayout.putsPaneBesideStage(
+        width: PlayerLayout.landscapeMinWidth, regularWidth: true
+    )
+)
+
 // ---- compactness ----------------------------------------------------------
 
 // A short landscape window needs the compact treatment: less gutter, or the row

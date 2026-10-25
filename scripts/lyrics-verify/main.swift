@@ -35,7 +35,7 @@ struct Track {
 func searchVideoId(_ track: Track) async -> String? {
     do {
         let json = try await withCheckedThrowingContinuation { c in
-            let callback = LyricsVerifySearch { json, _ in
+            let callback = LyricsVerifySearch { json, _, _ in
                 if let json { c.resume(returning: json) } else { c.resume(throwing: HarnessError.noValue) }
             }
             SearchBridge.shared.search(
@@ -64,9 +64,32 @@ func searchVideoId(_ track: Track) async -> String? {
 private enum HarnessError: Error { case noValue }
 
 private final class LyricsVerifySearch: SearchBridgeSearchCallback {
-    private let handler: (String?, String?) -> Void
-    init(_ handler: @escaping (String?, String?) -> Void) { self.handler = handler }
-    func onResult(json: String?, message: String?) { handler(json, message) }
+    private let handler: (String?, String?, String?) -> Void
+    init(_ handler: @escaping (String?, String?, String?) -> Void) { self.handler = handler }
+    func onResult(json: String?, continuation: String?, message: String?) {
+        handler(json, continuation, message)
+    }
+}
+
+private final class LyricsVerifyResult: LyricsBridgeAttributedLyricsCallback {
+    private let handler: ([LyricLineDto]) -> Void
+    init(_ handler: @escaping ([LyricLineDto]) -> Void) { self.handler = handler }
+    func onResult(source: String, sourceLabel: String, lines: [LyricLineDto]) { handler(lines) }
+}
+
+private final class LyricsVerifySourceState: LyricsBridgeSourceStateCallback {
+    private let handler: (String, LyricsBridge.LyricsProviderState) -> Void
+    init(_ handler: @escaping (String, LyricsBridge.LyricsProviderState) -> Void) { self.handler = handler }
+    func onSourceState(source: String, sourceLabel: String, state: LyricsBridge.LyricsProviderState, lines: [LyricLineDto]) {
+        handler(source, state)
+    }
+}
+
+private final class BlockedFlag {
+    private let lock = NSLock()
+    private var stored = false
+    func mark() { lock.lock(); stored = true; lock.unlock() }
+    var value: Bool { lock.lock(); defer { lock.unlock() }; return stored }
 }
 
 // Four catalogues, because a provider that only carries Hindi is not broken and
@@ -97,19 +120,21 @@ func restore() {
     AppSettings.shared.setSyncedLyrics(value: storedSynced)
 }
 
-func lyrics(for track: Track) async -> [LyricLineDto] {
-    do {
-        return try await withCheckedThrowingContinuation { c in
-            LyricsBridge.shared.lyrics(
-                title: track.title, artist: track.artist, durationMs: track.ms,
-                album: track.album, videoId: track.videoId
-            ) { lines, error in
-                if let error { c.resume(throwing: error) }
-                else { c.resume(returning: lines ?? []) }
-            }
+func lyrics(for track: Track) async -> (lines: [LyricLineDto], blocked: Bool) {
+    await withCheckedContinuation { continuation in
+        let blocked = BlockedFlag()
+        let result = LyricsVerifyResult { lines in
+            continuation.resume(returning: (lines, blocked.value))
         }
-    } catch {
-        return []
+        let state = LyricsVerifySourceState { source, state in
+            guard source == "SIMP_MUSIC" else { return }
+            if case .blocked = state { blocked.mark() }
+        }
+        LyricsBridge.shared.fetchWithSourceStates(
+            title: track.title, artist: track.artist, durationMs: track.ms,
+            album: track.album, videoId: track.videoId, localPath: nil,
+            callback: result, onSourceState: state
+        )
     }
 }
 
@@ -117,7 +142,9 @@ let began = Date()
 var failures: [String] = []
 var answered: [String] = []
 var dead: [String] = []
+var unavailableSources: [String] = []
 var thin_: [String] = []
+var blockedSources: [String] = []
 
 // The names read off the shared enum rather than typed here: a list of sixteen
 // strings kept in a harness is sixteen things that can be wrong.
@@ -139,11 +166,14 @@ let needsKey: Set<String> = ["PAXSENIX", "PAXSENIX_SPOTIFY", "PAXSENIX_MUSIXMATC
 ///   endpoint \u{2014} the shared web-app id and secret no longer get a token at all.
 /// - `BETTER_LYRICS_PORTATO` answers `404 page not found`. The main BetterLyrics
 ///   endpoint is alive, and is a separate source.
-/// - `MEGALOBIZ`'s search answers 404 and `/search/` answers 503. The scraper's two
-///   regexes are fine; the page they read is not serving.
 let goneUpstream: [String: String] = [
     "MUSIXMATCH": "401 upgrade \u{2014} the web app id gets no token",
     "BETTER_LYRICS_PORTATO": "404 \u{2014} the endpoint is gone",
+]
+
+/// A source whose current endpoint is unavailable, rather than a provider
+/// failure or a track-level catalogue miss.
+let unavailableUpstream: [String: String] = [
     "MEGALOBIZ": "404/503 \u{2014} the search page it scrapes is not serving",
 ]
 
@@ -169,24 +199,35 @@ for source in sources {
     var best = 0
     var wordSynced = false
     var slowest = 0.0
+    var providerBlocked = false
     for track in tracks {
         let started = Date()
-        let lines = await lyrics(for: track)
+        let result = await lyrics(for: track)
+        let lines = result.lines
+        providerBlocked = providerBlocked || result.blocked
         slowest = max(slowest, Date().timeIntervalSince(started))
         guard !lines.isEmpty else { continue }
         hits += 1
         best = max(best, lines.count)
         if lines.contains(where: { !$0.words.isEmpty }) { wordSynced = true }
     }
-    let verdict = hits == 0 ? "nothing" : "\(hits)/\(tracks.count)"
+    let verdict = providerBlocked
+        ? "BLOCKED"
+        : (hits > 0
+            ? "\(hits)/\(tracks.count)"
+            : (unavailableUpstream[source.name] != nil ? "UNAVAILABLE" : "nothing"))
     let note = needsKey.contains(source.name)
         ? " \u{00B7} needs a key"
-        : (goneUpstream[source.name] ?? thinCoverage[source.name]).map { " \u{00B7} \($0)" } ?? ""
-    print(pad(source.label, 22) + pad(source.name, 24) + pad(verdict, 8)
+        : (unavailableUpstream[source.name] ?? goneUpstream[source.name] ?? thinCoverage[source.name]).map { " \u{00B7} \($0)" } ?? ""
+    print(pad(source.label, 22) + pad(source.name, 24) + pad(verdict, 12)
         + pad("\(best) lines", 11) + pad(String(format: "%.1fs", slowest), 9)
         + (wordSynced ? "word-synced" : "line-synced") + note)
-    if hits > 0 {
+    if providerBlocked {
+        blockedSources.append("\(source.name): provider blocks third-party apps")
+    } else if hits > 0 {
         answered.append(source.label)
+    } else if let unavailable = unavailableUpstream[source.name] {
+        unavailableSources.append("\(source.name): \(unavailable)")
     } else if let gone = goneUpstream[source.name] {
         dead.append("\(source.name): \(gone)")
     } else if let thin = thinCoverage[source.name] {
@@ -205,14 +246,24 @@ if !dead.isEmpty {
     print("dead upstream, checked against the service itself:")
     dead.forEach { print("  \u{00B7} \($0)") }
 }
+if !unavailableSources.isEmpty {
+    print("")
+    print("unavailable upstream:")
+    unavailableSources.forEach { print("  \u{00B7} \($0)") }
+}
 if !thin_.isEmpty {
     print("")
     print("alive, and nothing for these tracks:")
     thin_.forEach { print("  \u{00B7} \($0)") }
 }
+if !blockedSources.isEmpty {
+    print("")
+    print("provider access blocked:")
+    blockedSources.forEach { print("  · \($0)") }
+}
 if failures.isEmpty {
     print("")
-    print("PASS  every source that needs no key, and whose endpoint exists, answered for at least one track")
+    print("PASS  no unexplained empty provider; blocked, key-required, thin, and unavailable sources are reported separately")
 } else {
     print("FAIL  \(failures.count) sources answered for nothing:")
     failures.forEach { print("  \u{00B7} \($0)") }

@@ -20,7 +20,8 @@ object SearchBridge {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     fun interface SearchCallback {
-        fun onResult(json: String?, message: String?)
+        /** [continuation] is the token for the next page, null once exhausted. */
+        fun onResult(json: String?, continuation: String?, message: String?)
     }
 
     fun search(query: String, scope: String, callback: SearchCallback) {
@@ -34,10 +35,56 @@ object SearchBridge {
                 val includeVideos = scope == SearchFilter.VIDEOS.name
                 val hits = InnertubeParser.parseSearchPage(response, includeVideos)
                     .map { result -> hitOf(result) }
+                val continuation = InnertubeParser.continuationToken(response)
                 Innertube.checkSession(generation)
-                callback.onResult(json.encodeToString(ListSerializer(SearchHit.serializer()), hits), null)
+                callback.onResult(json.encodeToString(ListSerializer(SearchHit.serializer()), hits), continuation, null)
             } catch (e: Throwable) {
-                callback.onResult(null, e.message ?: e.toString())
+                callback.onResult(null, null, e.message ?: e.toString())
+            }
+        }
+    }
+
+    /**
+     * The next page of a committed search, fetched only when the list reaches
+     * its end. The token is scoped to the filter it came from, so [scope] is
+     * the same one that produced it.
+     */
+    fun searchContinuation(token: String, scope: String, callback: SearchCallback) {
+        val generation = Innertube.sessionGeneration
+        bridgeScope.launch {
+            try {
+                Innertube.checkSession(generation)
+                val response = Innertube.searchContinuation(token)
+                val includeVideos = scope == SearchFilter.VIDEOS.name
+                val hits = InnertubeParser.parseSearchPage(response, includeVideos)
+                    .map { result -> hitOf(result) }
+                val continuation = InnertubeParser.continuationToken(response)
+                Innertube.checkSession(generation)
+                callback.onResult(json.encodeToString(ListSerializer(SearchHit.serializer()), hits), continuation, null)
+            } catch (e: Throwable) {
+                callback.onResult(null, null, e.message ?: e.toString())
+            }
+        }
+    }
+
+    /**
+     * Live media rows for the typeahead dropdown. Unauthenticated (see
+     * [Innertube.searchTypeahead]) and read as the mixed "All" page, so the
+     * promoted card is read like the unfiltered search it mirrors. Typeahead
+     * never pages, so the continuation is always null.
+     */
+    fun searchTypeahead(query: String, callback: SearchCallback) {
+        val generation = Innertube.sessionGeneration
+        bridgeScope.launch {
+            try {
+                Innertube.checkSession(generation)
+                val response = Innertube.searchTypeahead(query)
+                val hits = InnertubeParser.parseSearchPage(response, includeVideos = false)
+                    .map { result -> hitOf(result) }
+                Innertube.checkSession(generation)
+                callback.onResult(json.encodeToString(ListSerializer(SearchHit.serializer()), hits), null, null)
+            } catch (e: Throwable) {
+                callback.onResult(null, null, e.message ?: e.toString())
             }
         }
     }

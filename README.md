@@ -4,6 +4,8 @@
 
 An unofficial Apple-platform port of [BitChord](https://github.com/kushagrasinghx/BitChord), the music client originally created by [Kushagra Singh](https://github.com/kushagrasinghx).
 
+Derived from [BitChord](https://github.com/kushagrasinghx/BitChord), Copyright © Kushagra Singh and BitChord contributors, licensed under GPLv3. Apple-platform port and additions Copyright © 2026 Martin BAGUMA, also under GPLv3.
+
 This project brings BitChord to macOS, iPhone, and iPad with a SwiftUI interface, shared Kotlin Multiplatform logic, and a Rust audio engine. It is an independent port; it is not affiliated with Google or YouTube.
 
 ## Platforms
@@ -86,11 +88,11 @@ Automix works without downloaded models, using its built-in analysis fallback. T
 
 BitChord is an independent, unofficial third-party music player and client. It is not affiliated with or endorsed by Google LLC, YouTube Music, or the providers of any configured sources.
 
-- **No media hosting:** BitChord is a client, not a music-hosting service. It accesses external sources and local libraries; downloaded tracks are stored on the listener's device.
-- **Copyright and service terms:** Access through BitChord does not grant rights to any music or other content. You are responsible for ensuring your use complies with applicable law and the terms of any provider or API you access.
-- **No ad or availability guarantee:** Third-party services can change their catalogs, access rules, availability, and ad behavior. This project makes no guarantee that a source will remain available or behave in a particular way.
-- **No warranty and limitation of liability:** For GPLv3-covered portions, the software is provided without warranty and liability is limited as set out in Sections 15 and 16 of [`LICENSE`](LICENSE), except where applicable law requires otherwise or the parties agree in writing. This summary does not replace the license; separately licensed components remain subject to their own terms.
-- **Copyleft:** GPLv3 permits redistribution, including for a fee, under its terms. Distributors of GPL-covered binaries must meet the corresponding-source and notice requirements. Other components have their own terms; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+- **No Media Hosting:** BitChord does not operate a hosted music catalog. It plays local libraries and accesses configured sources and third-party services; downloads are stored on the listener's device.
+- **Fair Use & API Usage:** BitChord is created for personal, research, educational and fair-use purposes. It does not grant rights to music or other content. You are responsible for ensuring your use complies with applicable copyright law and the terms of the services and APIs you choose to access, including YouTube and YouTube Music.
+- **No Ad-Blocking Guarantee:** BitChord makes no guarantee about the presence, behavior, or availability of advertisements or other platform features. Third-party services can change their access rules and behavior at any time.
+- **No warranty and limitation of liability:** For GPLv3-covered portions, the software is provided without warranty and liability is limited as stated in Sections 15 and 16 of [`LICENSE`](LICENSE), except where applicable law requires otherwise or the parties agree in writing. This summary does not replace the license; separately licensed components remain subject to their own terms.
+- **Copyleft:** GPLv3 allows redistribution, including for a fee, subject to its terms. Distributors of GPLv3-covered binaries must meet the corresponding-source and notice requirements. Components with additional terms are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Credits and licenses
 
@@ -100,4 +102,8 @@ YouTube stream extraction uses [InnerTubeX](https://github.com/MetrolistGroup/in
 
 Some analyzer code was ported from [Orchard](https://github.com/SFG5453/Orchard), by SFG545, through BitChord's Android implementation. The relevant files identify SFG545 and Kushagra Singh and retain their AGPLv3-or-later terms. The audio clarity contour also credits the [LastWave-native](https://github.com/Clash-Projects/LastWave-native) reference in its source and notices. The upstream README credits [binimum/am-lyrics](https://github.com/binimum/am-lyrics) for the Apple-like lyrics animation; that credit is preserved here.
 
-The root project is licensed under the **GNU General Public License v3.0**; see [`LICENSE`](LICENSE). Some files and bundled dependencies carry additional licenses. See [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), the files in `LICENSES/`, `AppleApp/Resources/AudioLicenses/`, and individual source headers before redistributing or modifying those components.
+## License
+
+The project is licensed under the **GNU General Public License v3.0 (GPLv3)**; see [`LICENSE`](LICENSE). Some files and bundled dependencies carry additional or separate terms. Read [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), the license texts in `LICENSES/` and `AppleApp/Resources/AudioLicenses/`, and individual source headers before redistributing or modifying those components. In the app, see **Settings → About → Open-source licenses**.
+
+Binary releases: every GitHub release is built from its tagged commit, and that tag's source archive is the Corresponding Source (GPLv3 §6).

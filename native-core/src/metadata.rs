@@ -31,13 +31,25 @@ pub fn read_track_metadata(path: &str) -> Option<TrackMetadata> {
         })
         .unwrap_or_default();
 
+    // "3" and "3/12" both mean the third track; a non-numeric or absent tag
+    // is the same as none.
+    let track_number = parse_track_number(tag.and_then(|t| t.get_string(ItemKey::TrackNumber)));
+
     Some(TrackMetadata {
         title: text(Tag::title),
         artist: text(Tag::artist),
         album: text(Tag::album),
         duration_seconds: duration,
         artwork,
+        track_number,
     })
+}
+
+fn parse_track_number(value: Option<&str>) -> u32 {
+    value
+        .and_then(|value| value.split('/').next())
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0)
 }
 
 /// Write ID3/Vorbis/MP4 tags onto a downloaded file (spec §4).
@@ -160,6 +172,54 @@ impl ReplayGain {
             db = db.min(-0.5 - 20.0 * peak.log10());
         }
         Some(db)
+    }
+}
+
+#[cfg(test)]
+mod track_number_tests {
+    use super::*;
+
+    /// The scanner's album order is the tag's track number, not the filename.
+    #[test]
+    fn a_tagged_track_number_reads_back() {
+        let mut source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        source.push("tests/fixtures/seek-tone.m4a");
+        let dir = std::env::temp_dir().join("bitchord-track-number-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("numbered.m4a");
+        std::fs::copy(&source, &path).unwrap();
+
+        let mut tagged = Probe::open(&path).and_then(|p| p.read()).unwrap();
+        if tagged.primary_tag().is_none() {
+            let tag_type = tagged.primary_tag_type();
+            tagged.insert_tag(Tag::new(tag_type));
+        }
+        tagged.primary_tag_mut().unwrap().insert_text(ItemKey::TrackNumber, "3".to_owned());
+        tagged.save_to_path(&path, WriteOptions::default()).unwrap();
+        let meta = read_track_metadata(path.to_str().unwrap()).unwrap();
+        assert_eq!(meta.track_number, 3);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_fraction_tag_reads_its_number_part() {
+        assert_eq!(parse_track_number(Some("7/12")), 7);
+        assert_eq!(parse_track_number(Some(" 7 / 12")), 7);
+        assert_eq!(parse_track_number(Some("unknown")), 0);
+    }
+
+    #[test]
+    fn an_untagged_file_reports_zero() {
+        let mut source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        source.push("tests/fixtures/seek-tone.m4a");
+        let dir = std::env::temp_dir().join("bitchord-track-number-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bare.m4a");
+        std::fs::copy(&source, &path).unwrap();
+
+        let meta = read_track_metadata(path.to_str().unwrap()).unwrap();
+        assert_eq!(meta.track_number, 0);
+        std::fs::remove_file(&path).ok();
     }
 }
 

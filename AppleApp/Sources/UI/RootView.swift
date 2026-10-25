@@ -18,18 +18,68 @@ struct RootView: View {
     @Environment(ToastCenter.self) private var toast
     @State private var updateChecker = UpdateChecker.shared
     #if os(macOS)
-    @Environment(\.openSettings) private var openSettings
+    /// Which side panel is open beside the library, if any (M4).
+    @State private var macInspector: MacInspectorKind?
+    /// What the sidebar has selected.
+    /// The window's history: the sidebar row and the pages pushed on it.
+    @State private var navigator = MacNavigator()
+    @State private var macColumns: NavigationSplitViewVisibility = .all
+    @State private var columnsBeforePlayer: NavigationSplitViewVisibility = .all
+    private var macSide: MacSide {
+        get { navigator.side }
+        nonmutating set { navigator.side = newValue }
+    }
+    /// Home's scroll position, owned here rather than by HomeView: the detail
+    /// column rebuilds on every sidebar row switch, and the reader's place in
+    /// the feed should not be one of the things that resets.
+    @State private var homeScroll = ScrollPosition()
+    /// The listener's own playlists, listed in the sidebar as Music lists them.
+    @State private var macPlaylists: [UserPlaylistDTO] = []
     #endif
     @State private var homeFeed = FeedLoader(.home)
     #if os(iOS)
     @Namespace private var nowPlayingZoom
+    /// Regular width is the iPad layout — on any device. A Max phone turned
+    /// sideways is a regular-width window too, and it has the room.
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The iPad's own sidebar (IPadSidebar.swift) and what it lists.
+    @State private var iPadSidebar = IPadSidebar()
+    @State private var sidebarPlaylists: [UserPlaylistDTO] = []
+    @State private var sidebarPlaylist: UserPlaylistDTO?
+    /// The library section the iPad's Library tab shows: the sidebar picks it,
+    /// and the tab bar's Library returns to it.
+    @SceneStorage("bitchord.iPadLibrary") private var iPadLibraryTab: Int = AppModel.Tab.libraryYouTube.rawValue
     #endif
+    @AppStorage(OnboardingView.doneKey) private var onboardingDone = false
+    @State private var onboardingPresented = false
+    /// The one selected row in the window, shared by every list.
+    @State private var rowSelection = RowSelection()
 
     var body: some View {
         shell
+        .environment(\.rowSelection, rowSelection)
+        .task {
+            // First run only. Someone upgrading — signed in, or with a queue
+            // to come back to — has already onboarded themselves.
+            guard !onboardingDone else { return }
+            try? await Task.sleep(for: .milliseconds(700))
+            if auth.signedIn || !controller.queue.isEmpty {
+                onboardingDone = true
+            } else {
+                onboardingPresented = true
+            }
+        }
+        #if os(iOS)
+        .fullScreenCover(isPresented: $onboardingPresented) { OnboardingView() }
+        #else
+        .sheet(isPresented: $onboardingPresented) { OnboardingView() }
+        #endif
         .onChange(of: appModel.requestedTab) { _, requested in
             guard let requested else { return }
             selection = resolvedTab(requested).rawValue
+            #if os(macOS)
+            macSide = MacSide(tab: requested)
+            #endif
             appModel.requestedTab = nil
         }
         .sheet(isPresented: Binding(
@@ -57,12 +107,14 @@ struct RootView: View {
         )) { req in
             PlaylistPickerView(request: req)
         }
+        #if os(iOS)
         .sheet(isPresented: Binding(
             get: { appModel.downloadManagerPresented },
             set: { appModel.downloadManagerPresented = $0 }
         )) {
             DownloadManagerView()
         }
+        #endif
         .sheet(isPresented: Binding(
             get: { appModel.replayPresented },
             set: { appModel.replayPresented = $0 }
@@ -146,7 +198,20 @@ struct RootView: View {
             _ = old
         }
         #if os(macOS)
-        .frame(minWidth: 1080, minHeight: 700)
+        .frame(minWidth: 860, minHeight: 600)
+        // A menu item that asks for the queue or the lyrics opens the inspector
+        // — unless the full player is up, in which case it owns both panes and
+        // answers the request itself.
+        .onChange(of: appModel.queueRevealRequested) { _, requested in
+            guard requested, !appModel.nowPlayingPresented else { return }
+            macInspector = .queue
+            appModel.queueRevealRequested = false
+        }
+        .onChange(of: appModel.lyricsRevealRequested) { _, requested in
+            guard requested, !appModel.nowPlayingPresented else { return }
+            macInspector = .lyrics
+            appModel.lyricsRevealRequested = false
+        }
         #endif
         .preferredColorScheme(appModel.preferredScheme)
         .environment(\.locale, appModel.appLanguage.isEmpty ? .autoupdatingCurrent : Locale(identifier: appModel.appLanguage))
@@ -171,18 +236,44 @@ struct RootView: View {
     @ViewBuilder
     private var shell: some View {
         #if os(macOS)
-        // Keep the tab hierarchy mounted while the player covers the window.
-        // Removing it loses navigation paths, scroll offsets, and local loaders.
-        ZStack {
-            tabShell
-                .opacity(appModel.nowPlayingPresented ? 0 : 1)
-                .allowsHitTesting(!appModel.nowPlayingPresented)
-                .accessibilityHidden(appModel.nowPlayingPresented)
-            if appModel.nowPlayingPresented {
-                NowPlayingView()
+        macShell
+        #else
+        IPadSidebarShell(state: iPadSidebar, enabled: sizeClass == .regular) {
+            IPadSidebarView(
+                selection: Binding(
+                    get: { resolvedTab(AppModel.Tab(rawValue: selection) ?? .home) },
+                    set: { selection = $0.rawValue }
+                ),
+                playlists: sidebarPlaylists,
+                openPlaylist: $sidebarPlaylist,
+                state: iPadSidebar
+            )
+        } content: {
+            contentStack
+        }
+        .environment(\.iPadSidebar, sizeClass == .regular ? iPadSidebar : nil)
+        .task(id: "\(auth.sessionEpoch)-\(sizeClass == .regular)") { await loadSidebarPlaylists() }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryPlaylistsChanged)) { _ in
+            Task { await loadSidebarPlaylists() }
+        }
+        .onChange(of: selection) { _, raw in
+            if let tab = AppModel.Tab(rawValue: raw), Self.isLibrarySection(tab) {
+                iPadLibraryTab = raw
             }
         }
-        #else
+        .environment(\.nowPlayingZoomNamespace, nowPlayingZoom)
+        .modifier(NowPlayingTakeover(
+            isPresented: Binding(
+                get: { appModel.nowPlayingPresented },
+                set: { appModel.nowPlayingPresented = $0 }
+            ),
+            zoomNamespace: nowPlayingZoom
+        ))
+        #endif
+    }
+
+    #if os(iOS)
+    private var contentStack: some View {
         // Keep every tab and its navigation/scroll state mounted while Settings
         // covers it. Replacing tabShell recreates the feeds when returning.
         ZStack {
@@ -203,234 +294,335 @@ struct RootView: View {
                 }
             }
         }
-            .environment(\.nowPlayingZoomNamespace, nowPlayingZoom)
-            .modifier(NowPlayingTakeover(
-                isPresented: Binding(
-                    get: { appModel.nowPlayingPresented },
-                    set: { appModel.nowPlayingPresented = $0 }
-                ),
-                zoomNamespace: nowPlayingZoom
-            ))
-        #endif
     }
 
-    private var tabShell: some View {
-        TabView(selection: tabBinding) {
-            #if os(macOS)
-            Tab(value: AppModel.Tab.home) {
-                HomeView(feed: homeFeed).modifier(MacPlaybackChrome())
-            } label: {
-                // Upstream's own Home glyph, not the play triangle the UI spec
-                // §6 claimed. `MainActivity.kt` puts `BitChordIcons.Home` on that
-                // tab; the spec's inventory was wrong about it.
-                sidebarLabel("Home", image: .bchHome)
-            }
-            Tab(value: AppModel.Tab.explore) {
-                ExploreView().modifier(MacPlaybackChrome())
-            } label: {
-                sidebarLabel("Explore", image: .bchExplore)
-            }
-            TabSection("Library") {
-                Tab(value: AppModel.Tab.libraryYouTube) {
-                    LibraryView(lockedSection: .youtube).modifier(MacPlaybackChrome())
-                } label: {
-                    // Upstream has no distinct Recent glyph; the `bchLibrary`
-                    // shelves are already taken by Albums below. The repeat-clock
-                    // SF Symbol stays distinct from History's plain `bchClock`.
-                    Label("Recent", systemImage: "clock.arrow.circlepath")
-                }
-                Tab(value: AppModel.Tab.librarySongs) {
-                    LibraryView(lockedSection: .songs).modifier(MacPlaybackChrome())
-                } label: {
-                    sidebarLabel("Songs", image: .bchMusicNote)
-                }
-                Tab(value: AppModel.Tab.libraryAlbums) {
-                    LibraryView(lockedSection: .albums).modifier(MacPlaybackChrome())
-                } label: {
-                    // Songs keeps the music note and Albums keeps the library
-                    // shelves — the more fitting half of each conflicted pair.
-                    sidebarLabel("Albums", image: .bchLibrary)
-                }
-                Tab(value: AppModel.Tab.libraryArtists) {
-                    LibraryView(lockedSection: .artists).modifier(MacPlaybackChrome())
-                } label: {
-                    // Upstream has no distinct Artists glyph and the music note
-                    // is already taken by Songs above; the mic reads as the
-                    // performer rather than the track.
-                    Label("Artists", systemImage: "music.mic")
-                }
-                Tab(value: AppModel.Tab.libraryPlaylists) {
-                    LibraryView(lockedSection: .playlists).modifier(MacPlaybackChrome())
-                } label: {
-                    Label("Playlists", systemImage: "music.note.list")
-                }
-                Tab(value: AppModel.Tab.librarySubscriptions) {
-                    LibraryView(lockedSection: .subscriptions).modifier(MacPlaybackChrome())
-                } label: {
-                    Label("Subscriptions", systemImage: "bell")
-                }
-                Tab(value: AppModel.Tab.libraryPodcasts) {
-                    LibraryView(lockedSection: .podcasts).modifier(MacPlaybackChrome())
-                } label: {
-                    Label("Podcasts", systemImage: "radio")
-                }
-                Tab(value: AppModel.Tab.libraryOnDevice) {
-                    LibraryView(lockedSection: .ondevice).modifier(MacPlaybackChrome())
-                } label: {
-                    Label("On Device", systemImage: "externaldrive")
-                }
-                Tab(value: AppModel.Tab.libraryHistory) {
-                    LibraryView(lockedSection: .history).modifier(MacPlaybackChrome())
-                } label: {
-                    sidebarLabel("History", image: .bchClock)
-                }
-                // Only when there is a share. A sidebar row that leads to "not set up
-                // yet" is a row that exists to be disappointing, and Sources is where
-                // this is configured.
-                if WebDavStore.shared.isConfigured {
-                    Tab(value: AppModel.Tab.libraryWebDav) {
-                        LibraryView(lockedSection: .webdav).modifier(MacPlaybackChrome())
-                    } label: {
-                        // An SF Symbol, not one of the `bch` images the other rows use.
-                        // Upstream puts Material's `Cloud` on its WebDAV row and has no
-                        // glyph to copy, and the Sources screen already draws this
-                        // feature's row with the same symbol — so the two agree.
-                        Label("WebDAV", systemImage: "cloud")
-                    }
-                }
-            }
-            Tab(value: AppModel.Tab.search, role: .search) {
-                SearchView().modifier(MacPlaybackChrome())
-            } label: {
-                sidebarLabel("Search", image: .bchSearch)
-            }
-            #else
-            if UIDevice.current.userInterfaceIdiom == .pad {
-                Tab("Home", image: "bch-home", value: AppModel.Tab.home) {
-                    HomeView(feed: homeFeed).modifier(iPadPlaybackChrome())
-                }
-                Tab("Explore", image: "bch-explore", value: AppModel.Tab.explore) {
-                    ExploreView().modifier(iPadPlaybackChrome())
-                }
-                TabSection("Library") {
-                    Tab(value: AppModel.Tab.libraryYouTube) {
-                        LibraryView(lockedSection: .youtube).modifier(iPadPlaybackChrome())
-                    } label: {
-                        Label("Recent", systemImage: "clock.arrow.circlepath")
-                    }
-                    Tab("Songs", image: "bch-music-note", value: AppModel.Tab.librarySongs) {
-                        LibraryView(lockedSection: .songs).modifier(iPadPlaybackChrome())
-                    }
-                    Tab("Albums", image: "bch-library", value: AppModel.Tab.libraryAlbums) {
-                        LibraryView(lockedSection: .albums).modifier(iPadPlaybackChrome())
-                    }
-                    Tab(value: AppModel.Tab.libraryArtists) {
-                        LibraryView(lockedSection: .artists).modifier(iPadPlaybackChrome())
-                    } label: {
-                        Label("Artists", systemImage: "music.mic")
-                    }
-                    Tab(value: AppModel.Tab.libraryPlaylists) {
-                        LibraryView(lockedSection: .playlists).modifier(iPadPlaybackChrome())
-                    } label: {
-                        Label("Playlists", systemImage: "music.note.list")
-                    }
-                    Tab(value: AppModel.Tab.librarySubscriptions) {
-                        LibraryView(lockedSection: .subscriptions).modifier(iPadPlaybackChrome())
-                    } label: {
-                        Label("Subscriptions", systemImage: "bell")
-                    }
-                    Tab(value: AppModel.Tab.libraryPodcasts) {
-                        LibraryView(lockedSection: .podcasts).modifier(iPadPlaybackChrome())
-                    } label: {
-                        Label("Podcasts", systemImage: "radio")
-                    }
-                    Tab(value: AppModel.Tab.libraryOnDevice) {
-                        LibraryView(lockedSection: .ondevice).modifier(iPadPlaybackChrome())
-                    } label: {
-                        Label("On Device", systemImage: "externaldrive")
-                    }
-                    Tab("History", image: "bch-clock", value: AppModel.Tab.libraryHistory) {
-                        LibraryView(lockedSection: .history).modifier(iPadPlaybackChrome())
-                    }
-                    if WebDavStore.shared.isConfigured {
-                        Tab(value: AppModel.Tab.libraryWebDav) {
-                            LibraryView(lockedSection: .webdav).modifier(iPadPlaybackChrome())
-                        } label: {
-                            Label("WebDAV", systemImage: "cloud")
-                        }
-                    }
-                }
-                Tab("Search", image: "bch-search", value: AppModel.Tab.search, role: .search) {
-                    SearchView().modifier(iPadPlaybackChrome())
-                }
-            } else {
-                Tab("Home", image: "bch-home", value: AppModel.Tab.home) {
-                    HomeView(feed: homeFeed)
-                }
-                Tab("Explore", image: "bch-explore", value: AppModel.Tab.explore) {
-                    ExploreView()
-                }
-                Tab("Library", image: "bch-library", value: AppModel.Tab.library) {
-                    LibraryView()
-                }
-                Tab("Search", image: "bch-search", value: AppModel.Tab.search, role: .search) {
-                    SearchView()
-                }
-            }
-            #endif
+    private func loadSidebarPlaylists() async {
+        guard auth.signedIn, sizeClass == .regular else {
+            sidebarPlaylists = []
+            return
         }
-        .tabViewStyle(.sidebarAdaptable)
-        #if os(iOS)
-        .defaultAdaptableTabBarPlacement(.sidebar)
-        #endif
-        #if os(macOS)
-        .environment(\.sidebarRowSize, .medium)
+        var seen = Set<String>()
+        sidebarPlaylists = await LibraryActions.userPlaylists().filter { seen.insert($0.playlistId).inserted }
+    }
+
+    /// The tabs that are pages of the Library rather than tabs of their own.
+    private static func isLibrarySection(_ tab: AppModel.Tab) -> Bool {
+        tab.rawValue >= AppModel.Tab.libraryYouTube.rawValue
+    }
+
+    /// The iPad's Library tab: whichever section the sidebar last chose.
+    @ViewBuilder
+    private var iPadLibrary: some View {
+        let section = AppModel.Tab(rawValue: iPadLibraryTab) ?? .libraryYouTube
+        Group {
+            switch section {
+            case .librarySongs: LibraryView(lockedSection: .songs)
+            case .libraryAlbums: LibraryView(lockedSection: .albums)
+            case .libraryArtists: LibraryView(lockedSection: .artists)
+            case .libraryPlaylists: LibraryView(lockedSection: .playlists)
+            case .librarySubscriptions: LibraryView(lockedSection: .subscriptions)
+            case .libraryPodcasts: LibraryView(lockedSection: .podcasts)
+            case .libraryOnDevice, .libraryDownloads: LibraryView(lockedSection: .ondevice)
+            case .libraryHistory: LibraryView(lockedSection: .history)
+            case .libraryWebDav: LibraryView(lockedSection: .webdav)
+            case .sidebarPlaylist:
+                if let playlist = sidebarPlaylist {
+                    NavigationStack {
+                        DetailView(browseId: playlist.browseId, initialTitle: playlist.title)
+                            .toolbar {
+                                ToolbarItem(placement: .topBarLeading) { TopBarLeadingMark() }
+                            }
+                    }
+                } else {
+                    LibraryView(lockedSection: .playlists)
+                }
+            default: LibraryView(lockedSection: .youtube)
+            }
+        }
+        // A fresh navigation stack per section: a page pushed in Songs is not
+        // still on top when the sidebar moves to Albums.
+        .id(section == .sidebarPlaylist ? "playlist:\(sidebarPlaylist?.id ?? "")" : "section:\(section.rawValue)")
+    }
+    #endif
+
+    #if os(macOS)
+    /// The Mac window: a real sidebar, a detail column, and the full player over
+    /// both.
+    ///
+    /// The sidebar is a `NavigationSplitView` rather than the adaptable
+    /// `TabView` the iPad uses. That is not a style preference: a `TabView`'s
+    /// sidebar is generated from its `Tab`s and cannot hold the listener's own
+    /// playlists, which is exactly what Music puts there.
+    private var macShell: some View {
+        // Keep the split view mounted while the player covers the window:
+        // removing it loses navigation paths, scroll offsets and local loaders.
+        // The player is drawn in the split view's detail column with the
+        // sidebar collapsed, not over the split view: over it, the window
+        // toolbar kept the sidebar's column section and every player control
+        // landed beside the traffic lights.
+        macSplit
+            .onChange(of: appModel.nowPlayingPresented) { _, presented in
+                if presented {
+                    columnsBeforePlayer = macColumns
+                    macColumns = .detailOnly
+                } else {
+                    macColumns = columnsBeforePlayer
+                }
+            }
+        .task(id: auth.sessionEpoch) { await loadMacPlaylists() }
+        .onReceive(NotificationCenter.default.publisher(for: .libraryPlaylistsChanged)) { _ in
+            Task { await loadMacPlaylists() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playlistDeleted)) { note in
+            // A deleted playlist's detail page cannot dismiss itself here — the
+            // split view's detail column is not a stack — so the shell moves the
+            // sidebar to Playlists, where the deletion is visible.
+            guard let deleted = note.userInfo?["browseId"] as? String else { return }
+            if case .playlist(let shown, _) = macSide, shown == deleted {
+                navigator.replaceSide(.playlists)
+                selection = MacSide.playlists.tab.rawValue
+            }
+        }
+        .onAppear {
+            // Reopen the row the window was left on.
+            navigator.replaceSide(MacSide(tab: resolvedTab(AppModel.Tab(rawValue: selection) ?? .home)))
+        }
+    }
+
+    private var macSplit: some View {
+        NavigationSplitView(columnVisibility: $macColumns) {
+            macSidebar
+                .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 320)
+        } detail: {
+            ZStack {
+            HStack(spacing: 0) {
+                // One stack for every row, bound to the window's history, so
+                // back and forward cover a page opened on any of them.
+                NavigationStack(path: Bindable(navigator).path) {
+                    macDetail
+                        .modifier(MacPillInset())
+                        .navigationDestination(for: PushRoute.self) { route in
+                            route.make()
+                                .modifier(MacPillInset())
+                                // The titlebar's own back button is the way back.
+                                .navigationBarBackButtonHidden(true)
+                        }
+                }
+                .environment(\.inBrowseStack, true)
+                // Lyrics and the queue sit beside the library as a plain
+                // column. The system inspector vends toolbar items of its own,
+                // and the window's toolbar fix-up answering them looped until
+                // AppKit killed the app.
+                if let kind = macInspector {
+                    Divider()
+                    MacInspectorPane(kind: kind)
+                        .frame(width: 340)
+                        .transition(.move(edge: .trailing))
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: macInspector)
+            .environment(\.macInspectorSelection, $macInspector)
+            // Kept mounted under the player: removing it loses navigation
+            // paths, scroll offsets and local loaders.
+            .opacity(appModel.nowPlayingPresented ? 0 : 1)
+            .allowsHitTesting(!appModel.nowPlayingPresented)
+            .accessibilityHidden(appModel.nowPlayingPresented)
+            if appModel.nowPlayingPresented {
+                NowPlayingView()
+            }
+            }
+        }
+        .navigationSplitViewStyle(.balanced)
         .overlay(alignment: .topLeading) {
             MacWindowToolbar(isPlayerPresented: appModel.nowPlayingPresented)
                 .frame(width: 0, height: 0)
         }
         .toolbar {
             if !appModel.nowPlayingPresented {
-                ToolbarItem {
-                    Button {
-                        appModel.downloadManagerPresented = true
-                    } label: {
-                        Image(systemName: "arrow.down.circle")
-                    }
-                    .help("Downloads")
+                ToolbarItem(placement: .navigation) {
+                    MacHistoryButtons(navigator: navigator)
                 }
-                ToolbarItem {
-                    Button {
-                        openSettings()
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .help("Settings")
+                ToolbarItem(placement: .primaryAction) {
+                    MacDownloadsButton()
                 }
             }
         }
-        #endif
-        .modifier(PlaybackPillMount())
     }
 
+    private var macSidebar: some View {
+        List(selection: macSideBinding) {
+            Section {
+                sideRow(.home, "Home", "house")
+                sideRow(.explore, "Explore", "square.grid.2x2")
+                // Music keeps Search with the top-level destinations.
+                sideRow(.search, "Search", "magnifyingglass")
+            }
+            Section("Library") {
+                sideRow(.recent, "Recent", "clock.arrow.circlepath")
+                sideRow(.songs, "Songs", "music.note")
+                sideRow(.albums, "Albums", "square.stack")
+                sideRow(.artists, "Artists", "music.mic")
+                sideRow(.playlists, "Playlists", "music.note.list")
+                sideRow(.subscriptions, "Subscriptions", "bell")
+                sideRow(.podcasts, "Podcasts", "radio")
+                sideRow(.onDevice, "On Device", "externaldrive")
+                sideRow(.history, "History", "clock")
+                if WebDavStore.shared.isConfigured {
+                    sideRow(.webdav, "WebDAV", "cloud")
+                }
+            }
+            // Music's own section. It is the reason this sidebar is a split view:
+            // the adaptable TabView could not draw it.
+            if !macPlaylists.isEmpty {
+                Section("Playlists") {
+                    ForEach(macPlaylists) { playlist in
+                        // Each playlist by its own artwork, as the iPad's
+                        // sidebar shows them, rather than one shared glyph.
+                        Label {
+                            Text(playlist.title)
+                        } icon: {
+                            ArtworkView(url: playlist.thumbnailUrl, data: nil, side: 20)
+                                .frame(width: 20, height: 20)
+                                .clipShape(.rect(cornerRadius: 4, style: .continuous))
+                        }
+                        .tag(MacSide.playlist(id: playlist.browseId, title: playlist.title))
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .navigationTitle("BitChord")
+    }
 
-    #if os(macOS)
-    private func sidebarLabel(_ title: String, image: ImageResource) -> some View {
+    private func sideRow(_ side: MacSide, _ title: LocalizedStringKey, _ icon: String) -> some View {
         Label {
             Text(title)
         } icon: {
-            Image(image)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 16, height: 16)
+            // The glyph takes the text's colour, as Music's sidebar draws it;
+            // the system's sidebar tint is the accent blue.
+            Image(systemName: icon)
+                .foregroundStyle(macSide == side ? Color.white : Color.primary)
         }
+        .tag(side)
+    }
+
+    @ViewBuilder
+    private var macDetail: some View {
+        switch macSide {
+        case .home:
+            HomeView(feed: homeFeed, scrollPosition: $homeScroll)
+        case .explore:
+            ExploreView()
+        case .recent:
+            LibraryView(lockedSection: .youtube)
+        case .songs:
+            LibraryView(lockedSection: .songs)
+        case .albums:
+            LibraryView(lockedSection: .albums)
+        case .artists:
+            LibraryView(lockedSection: .artists)
+        case .playlists:
+            LibraryView(lockedSection: .playlists)
+        case .subscriptions:
+            LibraryView(lockedSection: .subscriptions)
+        case .podcasts:
+            LibraryView(lockedSection: .podcasts)
+        case .onDevice:
+            LibraryView(lockedSection: .ondevice)
+        case .history:
+            LibraryView(lockedSection: .history)
+        case .webdav:
+            LibraryView(lockedSection: .webdav)
+        case .search:
+            SearchView()
+        case .playlist(let id, let title):
+            DetailView(browseId: id, initialTitle: title)
+        }
+    }
+
+    private var macSideBinding: Binding<MacSide> {
+        Binding(
+            get: { macSide },
+            set: { side in
+                // Same rule as the iPhone tabs: arriving at Search puts the
+                // cursor in its field.
+                if side == .search { appModel.focusSearch = true }
+                macSide = side
+                selection = side.tab.rawValue
+            }
+        )
+    }
+
+    private func loadMacPlaylists() async {
+        guard auth.signedIn else {
+            macPlaylists = []
+            return
+        }
+        // One row per playlist id: the list can repeat one (ForEach then draws
+        // it more than once), while two playlists may share a title.
+        var seen = Set<String>()
+        macPlaylists = await LibraryActions.userPlaylists().filter { seen.insert($0.playlistId).inserted }
+    }
+    #endif
+
+    #if os(iOS)
+    private var tabShell: some View {
+        TabView(selection: tabBinding) {
+            if sizeClass == .regular {
+                // Four tabs, as on the phone. The library's sections are the
+                // sidebar's to choose; the bar's Library returns to the last one.
+                Tab("Home", systemImage: "house.fill", value: AppModel.Tab.home) {
+                    HomeView(feed: homeFeed).modifier(iPadPlaybackChrome())
+                }
+                Tab("Explore", systemImage: "square.grid.2x2.fill", value: AppModel.Tab.explore) {
+                    ExploreView().modifier(iPadPlaybackChrome())
+                }
+                Tab("Library", systemImage: "square.stack.fill", value: AppModel.Tab.library) {
+                    iPadLibrary.modifier(iPadPlaybackChrome())
+                }
+                Tab("Search", systemImage: "magnifyingglass", value: AppModel.Tab.search, role: .search) {
+                    SearchView().modifier(iPadPlaybackChrome())
+                }
+            } else {
+                Tab("Home", systemImage: "house.fill", value: AppModel.Tab.home) {
+                    HomeView(feed: homeFeed)
+                }
+                Tab("Explore", systemImage: "square.grid.2x2.fill", value: AppModel.Tab.explore) {
+                    ExploreView()
+                }
+                Tab("Library", systemImage: "square.stack.fill", value: AppModel.Tab.library) {
+                    LibraryView()
+                }
+                Tab("Search", systemImage: "magnifyingglass", value: AppModel.Tab.search, role: .search) {
+                    SearchView()
+                }
+            }
+        }
+        // The bar only: on the iPad the sidebar is IPadSidebar's, not the
+        // system's floating one.
+        .tabViewStyle(.tabBarOnly)
+        .modifier(PlaybackPillMount())
     }
     #endif
 
     private var tabBinding: Binding<AppModel.Tab> {
         Binding(
-            get: { resolvedTab(AppModel.Tab(rawValue: selection) ?? .home) },
+            get: {
+                let tab = resolvedTab(AppModel.Tab(rawValue: selection) ?? .home)
+                #if os(iOS)
+                // Every library section is the one Library tab in the bar.
+                if sizeClass == .regular, Self.isLibrarySection(tab) { return .library }
+                #endif
+                return tab
+            },
             set: { newTab in
+                #if os(iOS)
+                if sizeClass == .regular, newTab == .library {
+                    let current = resolvedTab(AppModel.Tab(rawValue: selection) ?? .home)
+                    if !Self.isLibrarySection(current) { selection = iPadLibraryTab }
+                    return
+                }
+                #endif
                 // Upstream's `searchFocusTrigger`: re-tapping the tab that is
                 // already selected focuses its search field rather than doing
                 // nothing. A `TabView` cannot tell a re-tap from a no-op tap on
@@ -454,15 +646,70 @@ struct RootView: View {
         if tab == .library { return .libraryYouTube }
         return tab
         #else
-        if UIDevice.current.userInterfaceIdiom == .pad && tab == .library {
-            return .libraryYouTube
+        if sizeClass == .regular {
+            if tab == .library { return AppModel.Tab(rawValue: iPadLibraryTab) ?? .libraryYouTube }
+            // A playlist chosen in an earlier launch is not remembered; its list is.
+            if tab == .sidebarPlaylist, sidebarPlaylist == nil { return .libraryPlaylists }
+            return tab
         }
-        return tab
+        // The phone has one Library page; a section chosen on the iPad (or by a
+        // deep link) lands there.
+        return Self.isLibrarySection(tab) ? .library : tab
         #endif
     }
 }
 
 #if os(macOS)
+/// What the Mac sidebar can select: a destination, or one of the listener's own
+/// playlists.
+enum MacSide: Hashable {
+    case home, explore, recent, songs, albums, artists, playlists
+    case subscriptions, podcasts, onDevice, history, webdav, search
+    case playlist(id: String, title: String)
+
+    /// A deep link or a menu item names one of the canonical tabs; the sidebar
+    /// has one row for each of them.
+    init(tab: AppModel.Tab) {
+        switch tab {
+        case .home: self = .home
+        case .explore: self = .explore
+        case .library, .libraryYouTube: self = .recent
+        case .librarySongs: self = .songs
+        case .libraryAlbums: self = .albums
+        case .libraryArtists: self = .artists
+        case .libraryPlaylists, .sidebarPlaylist: self = .playlists
+        case .librarySubscriptions: self = .subscriptions
+        case .libraryPodcasts: self = .podcasts
+        // Downloads are listed inside On Device, which is where a download
+        // lands, so that tab is the row they belong to.
+        case .libraryOnDevice, .libraryDownloads: self = .onDevice
+        case .libraryHistory: self = .history
+        case .libraryWebDav: self = .webdav
+        case .search: self = .search
+        }
+    }
+
+    /// The canonical tab to remember this row as, in the same scene storage the
+    /// iOS tabs use, so the Mac reopens where it was left.
+    var tab: AppModel.Tab {
+        switch self {
+        case .home: .home
+        case .explore: .explore
+        case .recent: .libraryYouTube
+        case .songs: .librarySongs
+        case .albums: .libraryAlbums
+        case .artists: .libraryArtists
+        case .playlists, .playlist: .libraryPlaylists
+        case .subscriptions: .librarySubscriptions
+        case .podcasts: .libraryPodcasts
+        case .onDevice: .libraryOnDevice
+        case .history: .libraryHistory
+        case .webdav: .libraryWebDav
+        case .search: .search
+        }
+    }
+}
+
 /// Configure the system-generated toolbar items without creating another
 /// sidebar button. TabView puts its toggle in the sidebar's toolbar section;
 /// that section can have no room for it when the sidebar is collapsed.
@@ -522,7 +769,11 @@ private final class MacWindowToolbarView: NSView {
     private func configureToolbar() {
         guard let toolbar = window?.toolbar else { return }
         if isPlayerPresented {
-            for item in toolbar.items where normalItems[item.itemIdentifier] != nil {
+            // Spacing is not a browse control. SwiftUI reuses its spacer
+            // identifiers for the player's own toolbar, and hiding them took
+            // the flexible space that puts volume and AirPlay at the far end.
+            for item in toolbar.items where normalItems[item.itemIdentifier] != nil
+                && !Self.isSpacing(item) {
                 item.isHidden = true
             }
         } else {
@@ -531,23 +782,31 @@ private final class MacWindowToolbarView: NSView {
                     if let hidden = normalItems[item.itemIdentifier] { item.isHidden = hidden }
                 }
             }
-            // Keep SwiftUI's own control and action. Reinserting its identifier
-            // asks the window's existing toolbar delegate for the same item.
+            // The sidebar toggle belongs in the sidebar's own titlebar, beside
+            // the traffic lights, as in Music and Finder — not floating at the
+            // head of the content column. Keep SwiftUI's own control and
+            // action: reinserting its identifier asks the window's existing
+            // toolbar delegate for the same item.
             if let toggleIndex = toolbar.items.firstIndex(where: Self.isSidebarToggle),
                let dividerIndex = toolbar.items.firstIndex(where: {
                    $0 is NSTrackingSeparatorToolbarItem
-               }), toggleIndex < dividerIndex {
+               }), toggleIndex > dividerIndex {
                 let identifier = toolbar.items[toggleIndex].itemIdentifier
                 toolbar.removeItem(at: toggleIndex)
                 toolbar.insertItem(withItemIdentifier: identifier, at: dividerIndex)
             }
             if let toggle = toolbar.items.first(where: Self.isSidebarToggle) {
                 toggle.visibilityPriority = .user
-                toggle.isNavigational = true
             }
             normalItems = Dictionary(toolbar.items.map { ($0.itemIdentifier, $0.isHidden) }, uniquingKeysWith: { first, _ in first })
         }
         wasPlayerPresented = isPlayerPresented
+    }
+
+    private static func isSpacing(_ item: NSToolbarItem) -> Bool {
+        item.itemIdentifier == .flexibleSpace || item.itemIdentifier == .space
+            || item.itemIdentifier.rawValue.localizedCaseInsensitiveContains("spacer")
+            || item.itemIdentifier.rawValue.localizedCaseInsensitiveContains("space")
     }
 
     private static func isSidebarToggle(_ item: NSToolbarItem) -> Bool {
@@ -564,28 +823,34 @@ private final class MacWindowToolbarView: NSView {
 /// The accessory is tab-level, so it is unaffected by iPad sidebar
 /// collapse/expand; inset mounting broke that and overlapped the tab bar.
 struct PlaybackPillMount: ViewModifier {
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    #endif
+
     func body(content: Content) -> some View {
         #if os(iOS)
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            // iPad mounts per tab (iPadPlaybackChrome): the tab-level
-            // accessory container spans full width and stretches the pill,
-            // and a TabView-level inset never reflows with the sidebar.
-            content
-        } else if #available(iOS 26.0, *) {
+        if #available(iOS 26.0, *) {
+            // One mount for every iOS device from 26: the system bottom
+            // accessory reflows with the sidebar on its own.
             content.tabViewBottomAccessory {
                 PlaybackPill()
                     .frame(maxWidth: .infinity)
             }
+        } else if sizeClass == .regular {
+            // Before 26 an iPad mounts per tab (iPadPlaybackChrome): the
+            // TabView-level inset never reflows with the sidebar.
+            content
         } else {
             fallbackMount(content)
         }
         #else
-        // macOS: each tab content mounts the pill via `MacPlaybackChrome` so
-        // it sits in the content column rather than crossing the sidebar.
+        // macOS mounts the pill on the detail column (`macSplit`), so it
+        // floats over the content rather than across the sidebar.
         content
         #endif
     }
 
+    #if os(iOS)
     private func fallbackMount(_ content: Content) -> some View {
         content.safeAreaInset(edge: .bottom) {
             PlaybackPill()
@@ -597,17 +862,30 @@ struct PlaybackPillMount: ViewModifier {
                 .frame(maxWidth: .infinity)
         }
     }
+    #endif
 }
 
 #if os(iOS)
-/// iPad per-tab pill mount. Lives inside the detail column — like
-/// MacPlaybackChrome on macOS — so sidebar collapse/expand reflows it and it
-/// stays centered on the main view. Content-sized at 620pt like Music's
+/// iPad per-tab pill mount. Lives inside the detail column so sidebar
+/// collapse/expand reflows it and it stays centered on the main view. Content-sized at 620pt like Music's
 /// compact pill instead of the full-width stretch of the tab-level
 /// accessory container. No-op on iPhone, which mounts once at the TabView.
 struct iPadPlaybackChrome: ViewModifier {
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.iPadSidebar) private var sidebar
+
     func body(content: Content) -> some View {
-        if UIDevice.current.userInterfaceIdiom == .pad {
+        pill(content)
+            // The sidebar and the tab bar take turns: open, the sidebar is the
+            // navigation and the bar would only repeat it.
+            .toolbar(sidebar?.isOpen == true ? .hidden : .automatic, for: .tabBar)
+    }
+
+    @ViewBuilder
+    private func pill(_ content: Content) -> some View {
+        // From 26 the pill is the system's bottom accessory, mounted once at the
+        // TabView; this is only the pre-26 per-tab fallback.
+        if sizeClass == .regular, #unavailable(iOS 26.0) {
             content.safeAreaInset(edge: .bottom) {
                 PlaybackPill()
                     .frame(maxWidth: 620)
@@ -622,32 +900,17 @@ struct iPadPlaybackChrome: ViewModifier {
 }
 #endif
 
-#if os(macOS)
-/// Pins the playback pill to the tab's content column — the same place Music
-/// keeps it — instead of spanning the whole window and covering the sidebar.
-struct MacPlaybackChrome: ViewModifier {
-    func body(content: Content) -> some View {
-        content.safeAreaInset(edge: .bottom, spacing: 0) {
-            PlaybackPill()
-                .frame(maxWidth: 900)
-                .padding(.horizontal, 18)
-                .padding(.bottom, 12)
-                .frame(maxWidth: .infinity)
-        }
-    }
-}
-#endif
-
 #if os(iOS)
 /// iPhone: a large swipe-to-dismiss sheet that zooms out of the mini player
 /// (WWDC 323 `MusicPlaybackView` pattern). iPad: a page-sized sheet.
 struct NowPlayingTakeover: ViewModifier {
     @Binding var isPresented: Bool
     var zoomNamespace: Namespace.ID
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     func body(content: Content) -> some View {
         Group {
-            if UIDevice.current.userInterfaceIdiom == .pad {
+            if sizeClass == .regular {
                 // Full screen, unconditionally: `.page` sheet sizing renders
                 // as a floating card on iPadOS 27, and only a cover is
                 // guaranteed edge to edge.
@@ -667,9 +930,11 @@ struct NowPlayingTakeover: ViewModifier {
 }
 
 private struct NowPlayingSheetSizing: ViewModifier {
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
     @ViewBuilder
     func body(content: Content) -> some View {
-        if UIDevice.current.userInterfaceIdiom == .pad {
+        if sizeClass == .regular {
             content
                 .presentationDetents([.large])
                 .presentationSizing(.page)

@@ -26,9 +26,13 @@
 //! ## Headroom + make-up
 //!
 //! Boosting a band raises the peak with it, and the fixed-point output has no
-//! headroom above full scale, so the whole curve is pulled down by however much
-//! its loudest point was pushed up ([`EqCurve::of`]). The DSP itself preserves
-//! headroom (no clamping inside the cascade); only the output boundary clamps.
+//! headroom above full scale, so the curve is pulled down by **half** its
+//! loudest boost (upstream `MAKEUP_FRACTION`, `EqualizerCurve.kt:221`): the
+//! boost stays audible instead of being cancelled, and the true-peak protector
+//! that follows this stage catches the rest. Pulling the whole peak down was
+//! the old behaviour; it kept the headroom but gave back every decibel the
+//! curve asked for. The DSP itself preserves headroom (no clamping inside the
+//! cascade); only the output boundary clamps.
 //!
 //! Balance is an output trim (not a section) and does not run at all for mono.
 
@@ -201,10 +205,19 @@ pub fn tone_curve(x: i32, y: i32, focused: bool) -> EqCurve {
     EqCurve::of(&gains, &qs)
 }
 
-/// How far down the curve has to be pulled to stop it clipping (upstream
-/// `preampFor`). Walks the summed response — magnitudes multiply through a
-/// cascade, so decibels add — and takes its actual peak.
+/// How far down the curve has to be pulled: half its peak boost (upstream
+/// `MAKEUP_FRACTION`, `EqualizerCurve.kt:221`). The true-peak protector after
+/// this stage catches the remaining half.
 fn preamp_for(gains_db: &[f32; EqLayout::SLOTS], qs: &[f32; EqLayout::SLOTS]) -> f32 {
+    -response_peak_db(gains_db, qs) * MAKEUP_FRACTION
+}
+
+/// The curve's actual peak, in decibels.
+///
+/// Walks the summed response — magnitudes multiply through a cascade, so
+/// decibels add — rather than taking the largest single band gain, because two
+/// neighbouring boosts overlap and are worth more than either alone.
+fn response_peak_db(gains_db: &[f32; EqLayout::SLOTS], qs: &[f32; EqLayout::SLOTS]) -> f32 {
     let mut peak = 0.0f32;
     for point in 0..RESPONSE_POINTS {
         let hz = response_frequency(point);
@@ -216,8 +229,12 @@ fn preamp_for(gains_db: &[f32; EqLayout::SLOTS], qs: &[f32; EqLayout::SLOTS]) ->
             peak = sum;
         }
     }
-    -peak
+    peak
 }
+
+/// How much of a curve's peak boost [`preamp_for`] takes back (upstream
+/// `MAKEUP_FRACTION`). The rest is the boost the listener asked for.
+const MAKEUP_FRACTION: f32 = 0.5;
 
 /// Log-spaced across the audible band: 20 Hz to 20 kHz.
 fn response_frequency(point: usize) -> f32 {
@@ -618,11 +635,64 @@ mod tests {
     }
 
     #[test]
-    fn boost_has_makeup_preamp_not_more_than_peak() {
-        // A +12 dB shelf must pull the curve down to keep the peak at unity.
+    fn boost_preamp_takes_back_half_the_peak() {
+        // Upstream MAKEUP_FRACTION: a +12 dB shelf is pulled down by ~6 dB,
+        // not by all 12, so the boost stays audible and the protector catches
+        // the rest.
         let curve = manual_curve(&[12.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-        assert!(curve.preamp_db <= 0.0);
-        assert!(curve.preamp_db < -11.5, "preamp {}", curve.preamp_db);
+        let peak = response_peak_db(&curve.gains_db, &curve.qs);
+        assert!(peak > 11.5, "peak {peak}");
+        assert!(
+            (curve.preamp_db - (-peak * 0.5)).abs() < 1e-4,
+            "preamp {} is not half of peak {peak}",
+            curve.preamp_db
+        );
+        assert!(
+            curve.preamp_db > -6.5 && curve.preamp_db < -5.5,
+            "preamp {}",
+            curve.preamp_db
+        );
+    }
+
+    #[test]
+    fn plus_six_db_bass_shelf_comes_out_half_boosted() {
+        // A bass shelf at +6 dB must reach the output as ~+3 dB, not +6 and
+        // not 0: the measured property behind the make-up fraction.
+        let curve = manual_curve(&[6.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let expected = section_gain_db(
+            &EqLayout::slots()[EqLayout::MANUAL_FIRST],
+            6.0,
+            EqLayout::MANUAL_Q,
+            20.0,
+        ) + curve.preamp_db;
+        assert!(
+            (expected - 3.0).abs() < 0.75,
+            "expected ~3 dB at 20 Hz, formula says {expected}"
+        );
+
+        let mut eq = EqualizerProcessor::new(48_000, 2);
+        eq.set_tuning(true, &curve, 0.0);
+        let frames = 48_000 * 3;
+        let input: Vec<f32> = (0..frames * 2)
+            .map(|i| {
+                let t = (i / 2) as f32 / 48_000.0;
+                (2.0 * core::f32::consts::PI * 20.0 * t).sin() * 0.25
+            })
+            .collect();
+        let mut output = input.clone();
+        eq.process(&mut output);
+
+        let tail = &output[(frames - 24_000) * 2..];
+        let flat_tail = &input[(frames - 24_000) * 2..];
+        let delta_db = 20.0 * (rms_channel(tail, 0) / rms_channel(flat_tail, 0)).log10();
+        assert!(
+            (delta_db - expected).abs() < 0.5,
+            "processed {delta_db} dB vs formula {expected} dB"
+        );
+        assert!(
+            delta_db > 2.5 && delta_db < 3.5,
+            "a +6 dB bass shelf came out at {delta_db} dB"
+        );
     }
 
     #[test]

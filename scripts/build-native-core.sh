@@ -22,11 +22,10 @@ export MACOSX_DEPLOYMENT_TARGET=15.0
 export IPHONEOS_DEPLOYMENT_TARGET=18.0
 export IPHONESIMULATOR_DEPLOYMENT_TARGET=18.0
 
-TARGETS=(
-  aarch64-apple-darwin
-  aarch64-apple-ios
-  aarch64-apple-ios-sim
-)
+# NATIVE_TARGETS="aarch64-apple-darwin aarch64-apple-ios" skips the Simulator
+# slice (it is ~1/3 of the build time and disk).
+read -r -a TARGETS <<< "${NATIVE_TARGETS:-aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim}"
+
 
 for t in "${TARGETS[@]}"; do
   cargo build --release --target "$t"
