@@ -54,6 +54,25 @@ fn mix_out_anchor_falls_back_to_content_end() {
 }
 
 #[test]
+fn mix_out_candidate_cannot_discard_more_than_twelve_wall_clock_seconds() {
+    let mut out = analysis(0.5, 200.0, vec![0.5, 1.0, 1.5, 2.0]);
+    out.content_end = 180.0;
+    // The last eleven seconds are clearly audible, but the high-ranked
+    // candidate would still abandon 25 seconds of the recording. The hard
+    // wall-clock cap must reject it even though its audible-energy cost is <12s.
+    with_energy(&mut out, 180.0, |time| if time < 169.0 { 0.01 } else { 0.8 });
+    out.mix_out_candidates.push(audio_analysis::MixCuePoint {
+        time: 155.0,
+        score: 1.0,
+        kind: "energy_cliff".into(),
+    });
+    let (anchor, discarded_music) = resolve_mix_out_anchor(&out);
+    assert!((anchor - 180.0).abs() < 1e-9, "anchor {anchor}");
+    assert_eq!(discarded_music, 0.0);
+    assert!(out.content_end - anchor <= 12.0);
+}
+
+#[test]
 fn short_track_gets_plain_crossfade_despite_strong_beat_evidence() {
     // Upstream MIN_SMART_DURATION_SECONDS=45: a sub-45s track must never get
     // a smart transition, even when its beat grid would otherwise qualify.

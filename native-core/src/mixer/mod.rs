@@ -66,6 +66,29 @@ fn automix_plan_winner(plan: &TransitionPlan) -> Option<&'static str> {
     }
 }
 
+pub(crate) struct AutomixWinnerRecord<'a> {
+    pub(crate) winner: &'static str,
+    pub(crate) style: &'static str,
+    pub(crate) reason: &'a str,
+    pub(crate) snap_error_seconds: Option<f64>,
+}
+
+pub(crate) fn automix_winner_record(
+    plan: &TransitionPlan,
+    snap_error_seconds: Option<f64>,
+) -> Option<AutomixWinnerRecord<'_>> {
+    Some(AutomixWinnerRecord {
+        winner: automix_plan_winner(plan)?,
+        style: plan.style.telemetry_name(),
+        reason: plan
+            .reason
+            .strip_prefix(AUTOMIX_SAFETY_PREFIX)
+            .unwrap_or(&plan.reason)
+            .trim(),
+        snap_error_seconds,
+    })
+}
+
 fn accepts_analyzed_plan(phase: Phase, swap: bool) -> bool {
     phase == Phase::Arming && !swap
 }

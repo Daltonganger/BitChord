@@ -125,8 +125,8 @@ else
     echo "FAIL $clipped final chord(s) are clipped"
     fail=1
   fi
-  awk -v m="$max_out" 'BEGIN { if (m + 0 <= 12.0) print "ok   outgoing discarded music stays within 12s — " m "s"; else print "FAIL outgoing discarded music " m "s is over 12s" }' || fail=1
-  awk -v m="$max_in" 'BEGIN { if (m + 0 <= 12.0) print "ok   incoming discarded music stays within 12s — " m "s"; else print "FAIL incoming discarded music " m "s is over 12s" }' || fail=1
+  awk -v m="$max_out" 'BEGIN { if (m + 0 <= 12.0) print "ok   outgoing discarded music stays within 12s — " m "s"; else { print "FAIL outgoing discarded music " m "s is over 12s"; exit 1 } }' || fail=1
+  awk -v m="$max_in" 'BEGIN { if (m + 0 <= 12.0) print "ok   incoming discarded music stays within 12s — " m "s"; else { print "FAIL incoming discarded music " m "s is over 12s"; exit 1 } }' || fail=1
   echo "$edges_line" | sed -E 's/^automix edges: /     /'
 fi
 

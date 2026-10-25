@@ -9,7 +9,7 @@ use super::state::{MixerState, Phase, TransitionState};
 use super::types::{TrackInfo, TrackSource, TransitionPlan, TransitionStyle};
 use super::voice::Voice;
 use super::{
-    accepts_analyzed_plan, automix_plan_winner, fx, prime_voice, ARM_LEAD_MS, ARM_TIMEOUT_MS,
+    accepts_analyzed_plan, automix_winner_record, fx, prime_voice, ARM_LEAD_MS, ARM_TIMEOUT_MS,
 };
 use crate::sound::SoundMode;
 use std::sync::atomic::Ordering;
@@ -428,6 +428,18 @@ impl MixerState {
         );
         self.incoming = Some(voice);
         let device_rate = self.device_rate;
+        let snap_error = self
+            .transition
+            .as_ref()
+            .and_then(|transition| {
+                self.current.as_ref().map(|current| {
+                    let planned_start = (self.outgoing_end_s(&transition.plan, current)
+                        - transition.fade_frames as f64 / device_rate.max(1) as f64)
+                        .max(0.0);
+                    current.emitted_position_seconds() - planned_start
+                })
+            })
+            .filter(|error| error.is_finite());
         if let Some(t) = &mut self.transition {
             t.phase = Phase::Fading;
             t.handed_off = true;
@@ -436,11 +448,14 @@ impl MixerState {
             } else {
                 fx::DeckFx::new(t.plan.style, device_rate, t.plan.beat_seconds)
             };
-            if let Some(winner) = automix_plan_winner(&t.plan) {
+            if let Some(record) = automix_winner_record(&t.plan, snap_error) {
                 log::info!(
-                    "automix: plan_won={winner} fade={:.2}s style={:?}",
-                    t.fade_frames as f64 / device_rate as f64,
-                    t.plan.style
+                    "automix: plan_won={} style={} reason={:?} fade={:.2}s snap_error_s={:?}",
+                    record.winner,
+                    record.style,
+                    record.reason,
+                    t.fade_frames as f64 / device_rate.max(1) as f64,
+                    record.snap_error_seconds,
                 );
             }
             let transition_start = (t.plan.transition_end_seconds

@@ -283,7 +283,10 @@ pub(super) fn resolve_mix_out_anchor(outgoing: &Analysis) -> (f64, f64) {
     for candidate in &candidates {
         let measured = audible_seconds_between(&outgoing.energy_curve, candidate.time, end);
         let discarded = measured.unwrap_or((end - candidate.time).max(0.0));
-        if discarded > MAX_DISCARDED_MUSIC_SECONDS {
+        let discarded_duration = (end - candidate.time).max(0.0);
+        if discarded > MAX_DISCARDED_MUSIC_SECONDS
+            || discarded_duration > MAX_DISCARDED_MUSIC_SECONDS
+        {
             continue;
         }
         let rank_score = candidate.score

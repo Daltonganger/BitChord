@@ -86,6 +86,22 @@ pub enum TransitionStyle {
 }
 
 impl TransitionStyle {
+    /// Stable telemetry label shared by live transition records and the
+    /// corpus scorecard. Keep this explicit so diagnostic output is not tied
+    /// to Rust's `Debug` representation.
+    pub const fn telemetry_name(self) -> &'static str {
+        match self {
+            Self::EqualPower => "equal_power",
+            Self::DjFilter => "dj_filter",
+            Self::DjBlend => "dj_blend",
+            Self::Gapless => "gapless",
+            Self::EchoOut => "echo_out",
+            Self::LoopRoll => "loop_roll",
+            Self::ReverbWash => "reverb_wash",
+            Self::DropCut => "drop_cut",
+        }
+    }
+
     /// A technique that finishes the outgoing record with an effect rather
     /// than overlapping the two, and so needs no tempo match.
     pub fn is_effect(self) -> bool {

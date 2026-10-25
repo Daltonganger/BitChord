@@ -33,6 +33,67 @@ fn automix_winner_classifies_safety_and_analyzed_plans() {
 }
 
 #[test]
+fn automix_winner_record_uses_stable_style_and_final_reason() {
+    let plan = TransitionPlan {
+        style: TransitionStyle::ReverbWash,
+        fade_seconds: 8.0,
+        reason: "low-vocal outro, bar-aligned".into(),
+        ..TransitionPlan::default()
+    };
+    let record = automix_winner_record(&plan, Some(-0.012)).unwrap();
+    assert_eq!(record.winner, "analyzed");
+    assert_eq!(record.style, "reverb_wash");
+    assert_eq!(record.reason, "low-vocal outro, bar-aligned");
+    assert_eq!(record.snap_error_seconds, Some(-0.012));
+
+    let safety = TransitionPlan {
+        fade_seconds: 4.0,
+        reason: "safety: overlap while analysis is pending".into(),
+        ..TransitionPlan::default()
+    };
+    let safety_record = automix_winner_record(&safety, Some(0.0)).unwrap();
+    assert_eq!(safety_record.winner, "safety");
+    assert_eq!(safety_record.reason, "overlap while analysis is pending");
+
+    let skip = TransitionPlan {
+        style: TransitionStyle::EchoOut,
+        fade_seconds: 1.0,
+        reason: "skip-mix:".into(),
+        ..TransitionPlan::default()
+    };
+    assert!(automix_winner_record(&skip, Some(0.0)).is_none());
+}
+
+#[test]
+fn all_eight_transition_styles_have_unique_stable_telemetry_names() {
+    let styles = [
+        TransitionStyle::EqualPower,
+        TransitionStyle::DjFilter,
+        TransitionStyle::DjBlend,
+        TransitionStyle::Gapless,
+        TransitionStyle::EchoOut,
+        TransitionStyle::LoopRoll,
+        TransitionStyle::ReverbWash,
+        TransitionStyle::DropCut,
+    ];
+    let names: Vec<_> = styles.iter().map(|style| style.telemetry_name()).collect();
+    assert_eq!(
+        names,
+        [
+            "equal_power",
+            "dj_filter",
+            "dj_blend",
+            "gapless",
+            "echo_out",
+            "loop_roll",
+            "reverb_wash",
+            "drop_cut",
+        ]
+    );
+    assert_eq!(names.iter().collect::<std::collections::HashSet<_>>().len(), 8);
+}
+
+#[test]
 fn analyzed_plan_replaces_safety_plan_only_while_arming() {
     let dir = std::env::temp_dir().join(format!("bitchord-am4-upgrade-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -47,6 +108,9 @@ fn analyzed_plan_replaces_safety_plan_only_while_arming() {
     assert_eq!(automix_plan_winner(retained), Some("analyzed"));
     assert_eq!(retained.style, TransitionStyle::DjBlend);
     assert_eq!(retained.cue_seconds, 1.0);
+    let winner = automix_winner_record(retained, Some(0.025)).unwrap();
+    assert_eq!(winner.style, "dj_blend");
+    assert_eq!(winner.reason, "beat grid and vocal windows");
 
     let mut fading = armed_test_state(&outgoing, &incoming, Phase::Fading);
     fading.upgrade_armed_plan(analyzed_upgrade(&incoming));
