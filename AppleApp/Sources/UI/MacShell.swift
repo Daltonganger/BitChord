@@ -40,6 +40,54 @@ struct MacPillInset: ViewModifier {
     }
 }
 
+// MARK: - Window geometry
+
+/// Reports a view's distance from its window's left edge: when it joins the
+/// window and when the window enters or leaves full screen, the only events
+/// that move a titlebar item next to the traffic lights. Toolbar items are
+/// hosted separately, so SwiftUI's own coordinate spaces cannot compare them.
+struct WindowLeadingReader: NSViewRepresentable {
+    var onChange: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> ReaderView {
+        let view = ReaderView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: ReaderView, context: Context) {
+        nsView.onChange = onChange
+    }
+
+    final class ReaderView: NSView {
+        var onChange: ((CGFloat) -> Void)?
+        private var observers: [NSObjectProtocol] = []
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach { NotificationCenter.default.removeObserver($0) }
+            observers = []
+            guard let window else { return }
+            for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    self?.report()
+                })
+            }
+            report()
+        }
+
+        deinit { observers.forEach { NotificationCenter.default.removeObserver($0) } }
+
+        /// Read after the titlebar has laid out the new arrangement.
+        private func report() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.window != nil else { return }
+                self.onChange?(self.convert(self.bounds, to: nil).minX)
+            }
+        }
+    }
+}
+
 // MARK: - Full screen
 
 /// Enters or leaves full screen, and draws which: arrows pointing out to go

@@ -31,6 +31,11 @@ struct NowPlayingView: View {
     // for a fresh install. Persisting this here also keeps rotation/reopening
     // from unexpectedly dropping a listener into lyrics.
     @State private var pane: PlayerPane = PlayerPane.restored
+    #if os(macOS)
+    /// The trailing spacer that puts AirPlay as far from the right edge as
+    /// Close is from the left.
+    @State private var trailingInset: CGFloat = 0
+    #endif
     @State private var lyricsControlsOpen = true
     @State private var lyricsControlActivity = 0
     @State private var lyricsScrubbing = false
@@ -165,6 +170,9 @@ struct NowPlayingView: View {
                 macCloseButton
                     .frame(width: 32, height: 32)
                     .glassEffect(.regular.interactive(), in: Circle())
+                    .background(WindowLeadingReader { closeLeading in
+                        trailingInset = max(0, closeLeading - Self.titlebarTrailingInset)
+                    })
             }
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .navigation) {
@@ -200,6 +208,11 @@ struct NowPlayingView: View {
                     .help("AirPlay")
             }
             .sharedBackgroundVisibility(.hidden)
+            // As far from the right edge as Close is from the left.
+            ToolbarItem(placement: .primaryAction) {
+                Color.clear.frame(width: trailingInset, height: 1)
+            }
+            .sharedBackgroundVisibility(.hidden)
         } else {
             ToolbarItem(placement: .primaryAction) {
                 AirPlayRouteButton()
@@ -210,6 +223,10 @@ struct NowPlayingView: View {
             }
         }
     }
+
+    /// The toolbar's own margin after its last item: the right-hand gap with
+    /// no spacer, measured on macOS 26.
+    private static let titlebarTrailingInset: CGFloat = 18
 
     private var macCloseButton: some View {
         Button("Close", systemImage: "xmark") {
