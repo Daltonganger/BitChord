@@ -92,14 +92,20 @@ extension NowPlayingView {
                     HStack(spacing: 6) {
                         Text(line)
                             .foregroundStyle(.white.opacity(0.92))
+                            .multilineTextAlignment(currentLyricIsRightToLeft ? .trailing : .leading)
                             .layoutPriority(1)
                         Image(.bchChevronRight)
                             .resizable()
                             .scaledToFit()
                             .frame(width: 9, height: 9)
                             .foregroundStyle(.white.opacity(0.55))
+                            .scaleEffect(x: currentLyricIsRightToLeft ? -1 : 1)
                             .accessibilityHidden(true)
                     }
+                    .environment(
+                        \.layoutDirection,
+                        currentLyricIsRightToLeft ? .rightToLeft : .leftToRight
+                    )
                 } else if controller.lyricsLoading {
                     Text("Looking for lyrics…")
                         .foregroundStyle(.white.opacity(0.5))
@@ -141,6 +147,22 @@ extension NowPlayingView {
             at: controller.position,
             offsetMs: lyricsOffsetMs
         )
+    }
+
+    /// Use the first strong letter's direction for the compact preview. Checking
+    /// script ranges rather than the device locale keeps mixed-language songs
+    /// readable when the app itself is set to another language.
+    private var currentLyricIsRightToLeft: Bool {
+        guard let currentLyric else { return false }
+        for scalar in currentLyric.unicodeScalars {
+            let value = scalar.value
+            guard CharacterSet.letters.contains(scalar) else { continue }
+            return (0x0590...0x08FF).contains(value) ||
+                (0xFB1D...0xFDFF).contains(value) ||
+                (0xFE70...0xFEFF).contains(value) ||
+                (0x1EE00...0x1EEFF).contains(value)
+        }
+        return false
     }
 
     func revealLyricsControls() {
