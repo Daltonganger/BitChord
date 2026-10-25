@@ -23,6 +23,8 @@ struct RootView: View {
     /// What the sidebar has selected.
     /// The window's history: the sidebar row and the pages pushed on it.
     @State private var navigator = MacNavigator()
+    @State private var macColumns: NavigationSplitViewVisibility = .all
+    @State private var columnsBeforePlayer: NavigationSplitViewVisibility = .all
     private var macSide: MacSide {
         get { navigator.side }
         nonmutating set { navigator.side = newValue }
@@ -354,15 +356,19 @@ struct RootView: View {
     private var macShell: some View {
         // Keep the split view mounted while the player covers the window:
         // removing it loses navigation paths, scroll offsets and local loaders.
-        ZStack {
-            macSplit
-                .opacity(appModel.nowPlayingPresented ? 0 : 1)
-                .allowsHitTesting(!appModel.nowPlayingPresented)
-                .accessibilityHidden(appModel.nowPlayingPresented)
-            if appModel.nowPlayingPresented {
-                NowPlayingView()
+        // The player is drawn in the split view's detail column with the
+        // sidebar collapsed, not over the split view: over it, the window
+        // toolbar kept the sidebar's column section and every player control
+        // landed beside the traffic lights.
+        macSplit
+            .onChange(of: appModel.nowPlayingPresented) { _, presented in
+                if presented {
+                    columnsBeforePlayer = macColumns
+                    macColumns = .detailOnly
+                } else {
+                    macColumns = columnsBeforePlayer
+                }
             }
-        }
         .task(id: auth.sessionEpoch) { await loadMacPlaylists() }
         .onReceive(NotificationCenter.default.publisher(for: .libraryPlaylistsChanged)) { _ in
             Task { await loadMacPlaylists() }
@@ -384,10 +390,11 @@ struct RootView: View {
     }
 
     private var macSplit: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $macColumns) {
             macSidebar
                 .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 320)
         } detail: {
+            ZStack {
             HStack(spacing: 0) {
                 // One stack for every row, bound to the window's history, so
                 // back and forward cover a page opened on any of them.
@@ -415,6 +422,15 @@ struct RootView: View {
             }
             .animation(.easeInOut(duration: 0.2), value: macInspector)
             .environment(\.macInspectorSelection, $macInspector)
+            // Kept mounted under the player: removing it loses navigation
+            // paths, scroll offsets and local loaders.
+            .opacity(appModel.nowPlayingPresented ? 0 : 1)
+            .allowsHitTesting(!appModel.nowPlayingPresented)
+            .accessibilityHidden(appModel.nowPlayingPresented)
+            if appModel.nowPlayingPresented {
+                NowPlayingView()
+            }
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .overlay(alignment: .topLeading) {
@@ -741,7 +757,11 @@ private final class MacWindowToolbarView: NSView {
     private func configureToolbar() {
         guard let toolbar = window?.toolbar else { return }
         if isPlayerPresented {
-            for item in toolbar.items where normalItems[item.itemIdentifier] != nil {
+            // Spacing is not a browse control. SwiftUI reuses its spacer
+            // identifiers for the player's own toolbar, and hiding them took
+            // the flexible space that puts volume and AirPlay at the far end.
+            for item in toolbar.items where normalItems[item.itemIdentifier] != nil
+                && !Self.isSpacing(item) {
                 item.isHidden = true
             }
         } else {
@@ -769,6 +789,12 @@ private final class MacWindowToolbarView: NSView {
             normalItems = Dictionary(toolbar.items.map { ($0.itemIdentifier, $0.isHidden) }, uniquingKeysWith: { first, _ in first })
         }
         wasPlayerPresented = isPlayerPresented
+    }
+
+    private static func isSpacing(_ item: NSToolbarItem) -> Bool {
+        item.itemIdentifier == .flexibleSpace || item.itemIdentifier == .space
+            || item.itemIdentifier.rawValue.localizedCaseInsensitiveContains("spacer")
+            || item.itemIdentifier.rawValue.localizedCaseInsensitiveContains("space")
     }
 
     private static func isSidebarToggle(_ item: NSToolbarItem) -> Bool {
