@@ -42,6 +42,8 @@ struct AudioPipelineSheet: View {
                         .foregroundStyle(.white.opacity(0.45))
                         .padding(.bottom, 14)
                     stage(0, "doc.text", "Track Info") {
+                        row("Claimed Quality", claimedQuality)
+                        row("Measured Stream", measuredStream)
                         row("Source", sourceName)
                         row("Format", codec)
                         row("Bit Depth", bitDepth)
@@ -238,6 +240,14 @@ struct AudioPipelineSheet: View {
     private var bitDepth: String { (nerd?.bitDepth ?? 0) > 0 ? "\(nerd!.bitDepth)-bit" : "—" }
     private var bitrate: String { (nerd?.kbps ?? 0) > 0 ? "\(nerd!.kbps) kbps" : "—" }
     private var sourceRate: String { (nerd?.sampleRate ?? 0) > 0 ? "\(nerd!.sampleRate) Hz" : "—" }
+    private var claimedQuality: String {
+        let quality = AppSettings.shared.effectiveAudioQuality(metered: NetworkQuality.shared.metered).name
+        return "\(quality) · up to \(NetworkQuality.shared.maxKbps) kbps"
+    }
+    private var measuredStream: String {
+        let values = [codec, bitrate, sourceRate, bitDepth].filter { $0 != "—" }
+        return values.isEmpty ? "—" : values.joined(separator: " · ")
+    }
     /// The last quality upgrade's measured correlation, and what it implies for
     /// the fade. The swap uses a linear gain pair, which is flat when the two
     /// encodings are identical; `10·log10((1+ρ)/2)` is how far from flat it sits
@@ -306,7 +316,7 @@ struct AudioPipelineSheet: View {
     private var bitPerfectStatus: String {
         guard device.started else { return "Waiting for output" }
         if device.bitPerfectActive { return "Active · \(pcmFormat)" }
-        guard PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: false) else {
+        guard PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: true) else {
             return "Off"
         }
         return "Unavailable · \(device.bitPerfectReason)"
@@ -347,7 +357,7 @@ struct AudioPipelineSheet: View {
         if device.bitPerfectActive {
             return "Yes — exclusive integer PCM; engine DSP and system mixing bypassed"
         }
-        if PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: false) {
+        if PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: true) {
             return "No — \(device.bitPerfectReason)"
         }
         let src = nerd?.sampleRate ?? 0

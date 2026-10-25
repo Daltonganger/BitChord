@@ -58,7 +58,9 @@ extension PlaybackController {
         fetchLyrics(for: entry)
         fetchCanvas(for: entry)
         applySpatialPreference()
+        try? engine.setLoudnessMode(mode: routeAwareLoudnessMode)
         nerd = dolbyRenderer?.nerd ?? engine.nerdStats()
+        try? engine.setBitPerfectEnabled(enabled: effectiveBitPerfectOutput)
         racingLossless = QualityUpgrade.isRacing(entry.id)
         scrobbleArmed = false
         scrobbleSent = false
@@ -81,6 +83,28 @@ extension PlaybackController {
                                 canNext: playingIndex + 1 < queue.count,
                                 canPrevious: index > 0)
         if dolbyRenderer == nil { lookForBetterCopy(entry, codec: info.codec, kbps: info.kbps) }
+        let output = engine.outputDevice()
+        let sourceKind: String
+        switch resolvedOrigin[entry.id] {
+        case .local: sourceKind = "local"
+        case .cache: sourceKind = "cache"
+        case .youtube: sourceKind = "youtube"
+        case .substitute: sourceKind = "substitute"
+        case .other, .none: sourceKind = "other"
+        }
+        let rawLoudnessOrigin = nerd?.loudnessOrigin.lowercased() ?? ""
+        let loudnessOrigin: String
+        if rawLoudnessOrigin.contains("youtube") {
+            loudnessOrigin = "player_response"
+        } else if rawLoudnessOrigin.contains("measurement") || rawLoudnessOrigin.contains("replaygain") || rawLoudnessOrigin.contains("ebu r128") {
+            loudnessOrigin = "analyzed"
+        } else {
+            loudnessOrigin = "none"
+        }
+        PlaybackDebugLog.shared.record(
+            "quality-start source=\(sourceKind) route_kind=\(AudioRouteState.shared.kind) claimed_quality=\(AppSettings.shared.effectiveAudioQuality(metered: NetworkQuality.shared.metered).name) claimed_max_kbps=\(NetworkQuality.shared.maxKbps) measured_codec=\(info.codec) measured_rate=\(info.sampleRate) measured_depth=\(info.bitDepth) measured_kbps=\(info.kbps) output_rate=\(output.sampleRate) output_format=\(output.sampleFormat) loudness_origin=\(loudnessOrigin) loudness_detail=\(nerd?.loudnessOrigin ?? "No measurement") loudness_db=\(currentLoudnessDb.map { String($0) } ?? "unknown") loudness_mode=\(loudnessMode) bit_perfect=\(output.bitPerfectActive)",
+            about: entry.id
+        )
         // The incoming source must be ready before the outgoing tail begins.
         // Waiting for the current download here made prefetch start up to eight
         // seconds late, then full analysis delayed queueing it even further.
