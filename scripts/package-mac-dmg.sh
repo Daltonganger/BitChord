@@ -165,7 +165,8 @@ while IFS= read -r -d '' code_bundle; do
 done < <(find "$app" -depth \( -name '*.appex' -o -name '*.framework' -o -name '*.xpc' -o -name '*.app' \) -print0)
 codesign --remove-signature "$app" >/dev/null 2>&1 || true
 
-if ! otool -l "$app/Contents/MacOS/$executable" | grep -Fq '@executable_path/../Frameworks'; then
+load_commands="$(otool -l "$app/Contents/MacOS/$executable")"
+if [[ "$load_commands" != *'@executable_path/../Frameworks'* ]]; then
   install_name_tool -add_rpath '@executable_path/../Frameworks' "$app/Contents/MacOS/$executable"
 fi
 
@@ -207,12 +208,12 @@ codesign --force --sign - --timestamp=none --entitlements "$safe_entitlements" "
 codesign --verify --deep --strict "$app"
 lipo -verify_arch arm64 "$app/Contents/MacOS/$executable"
 signature_info="$(codesign -dv --verbose=4 "$app" 2>&1)"
-printf '%s\n' "$signature_info" | grep -Fq 'Signature=adhoc' || fail 'staged app is not ad-hoc signed'
-printf '%s\n' "$signature_info" | grep -Fq 'TeamIdentifier=not set' || fail 'ad-hoc app unexpectedly has a Team ID'
-if printf '%s\n' "$signature_info" | grep -E '^CodeDirectory .*flags=.*\(.*runtime' >/dev/null; then
+grep -Fq 'Signature=adhoc' <<<"$signature_info" || fail 'staged app is not ad-hoc signed'
+grep -Fq 'TeamIdentifier=not set' <<<"$signature_info" || fail 'ad-hoc app unexpectedly has a Team ID'
+if grep -E '^CodeDirectory .*flags=.*\(.*runtime' <<<"$signature_info" >/dev/null; then
   fail 'ad-hoc app unexpectedly enables the hardened runtime'
 fi
-if printf '%s\n' "$signature_info" | grep -q '^Authority='; then fail 'ad-hoc app unexpectedly has a signing authority'; fi
+if grep -q '^Authority=' <<<"$signature_info"; then fail 'ad-hoc app unexpectedly has a signing authority'; fi
 codesign -d --entitlements :- "$app" > "$stage/final-entitlements.plist" 2>/dev/null
 for forbidden in com.apple.developer.ubiquity-kvstore-identifier com.apple.security.application-groups com.apple.security.keychain-access-groups application-identifier com.apple.developer.team-identifier; do
   if /usr/libexec/PlistBuddy -c "Print :$forbidden" "$stage/final-entitlements.plist" >/dev/null 2>&1; then
@@ -239,10 +240,10 @@ create-dmg \
   --window-pos 200 120 \
   --window-size 768 540 \
   --text-size 13 \
-  --icon-size 110 \
-  --icon "BitChord.app" 192 280 \
+  --icon-size 128 \
+  --icon "BitChord.app" 192 311 \
   --hide-extension "BitChord.app" \
-  --app-drop-link 576 280 \
+  --app-drop-link 576 311 \
   --hdiutil-quiet \
   "$created_image" "$stage/payload"
 
@@ -273,10 +274,10 @@ on run argv
       set sidebar width of targetWindow to 0
     end try
     set bounds of targetWindow to {200, 120, 968, 660}
-    set icon size of icon view options of targetWindow to 110
+    set icon size of icon view options of targetWindow to 128
     set text size of icon view options of targetWindow to 13
-    set position of item "BitChord.app" of mountedDisk to {192, 280}
-    set position of item "Applications" of mountedDisk to {576, 280}
+    set position of item "BitChord.app" of mountedDisk to {192, 311}
+    set position of item "Applications" of mountedDisk to {576, 311}
     close targetWindow
     delay 2
     open mountedDisk

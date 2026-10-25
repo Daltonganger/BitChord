@@ -31,6 +31,7 @@ done
 command -v xcodebuild >/dev/null 2>&1 || fail 'xcodebuild is required'
 command -v ditto >/dev/null 2>&1 || fail 'ditto is required'
 command -v zipinfo >/dev/null 2>&1 || fail 'zipinfo is required'
+command -v codesign >/dev/null 2>&1 || fail 'codesign is required'
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
 ipa="$output_dir/BitChord-$version-unsigned.ipa"
@@ -39,6 +40,7 @@ stage="$(mktemp -d "${TMPDIR:-/tmp}/bitchord-ipa.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 archive="$stage/BitChord.xcarchive"
 app="$archive/Products/Applications/BitChord.app"
+staged_app="$stage/package/Payload/BitChord.app"
 
 xcodebuild \
   -project "$repo_root/AppleApp/BitChord.xcodeproj" \
@@ -65,7 +67,22 @@ find "$stage/package/Payload/BitChord.app" -name embedded.provisionprofile -type
 # zip updates an existing archive instead of clearing entries that disappeared
 # from a rebuilt app, so start fresh when the caller explicitly allows overwrite.
 rm -f "$ipa"
-/usr/bin/zip -qry "$ipa" Payload
-zipinfo -1 "$ipa" | grep -Fxq 'Payload/BitChord.app/Info.plist' || fail 'IPA archive is missing Payload/BitChord.app'
+(cd "$stage/package" && /usr/bin/zip -qry "$ipa" Payload)
+zipinfo -1 "$ipa" > "$stage/ipa-list.txt"
+grep -Fxq 'Payload/BitChord.app/Info.plist' "$stage/ipa-list.txt" || fail 'IPA archive is missing Payload/BitChord.app'
+grep -Fxq 'Payload/BitChord.app/BitChord' "$stage/ipa-list.txt" || fail 'IPA archive is missing the BitChord executable'
+if [[ -d "$app/PlugIns/BitChordWidget.appex" ]]; then
+  grep -E '^Payload/BitChord\.app/PlugIns/BitChordWidget\.appex(/|$)' "$stage/ipa-list.txt" >/dev/null || fail 'IPA archive is missing BitChordWidget.appex'
+fi
+if grep -E '(^|/)embedded\.(mobileprovision|provisionprofile)$' "$stage/ipa-list.txt" >/dev/null; then
+  fail 'IPA archive contains an embedded provisioning profile'
+fi
+signature_info="$stage/codesign-info.txt"
+if codesign -dv --verbose=4 "$staged_app" >"$signature_info" 2>&1; then
+  grep -Fq 'Signature=adhoc' "$signature_info" || fail 'staged app has a non-ad-hoc signature'
+  if grep -q '^Authority=' "$signature_info"; then fail 'staged app unexpectedly has a signing authority'; fi
+else
+  grep -Fq 'code object is not signed at all' "$signature_info" || fail 'could not confirm staged app is unsigned or ad-hoc signed'
+fi
 printf 'Created unsigned IPA: %s\n' "$ipa"
 printf 'No developer signature or provisioning profile is included. iCloud sync requires signing with your own team and the relevant iCloud capabilities.\n'
