@@ -55,9 +55,11 @@ struct HeroArtwork: View {
                 ArtworkView(entry: entry, side: max(geo.size.width, geo.size.height))
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
+                    .allowsHitTesting(false)
                 if let canvasURL {
                     CanvasPlayer(url: canvasURL, fallbackURL: fallbackURL, isPlaying: isPlaying)
                         .frame(width: geo.size.width, height: geo.size.height)
+                        .allowsHitTesting(false)
                 }
                 // The picture takes the artwork's place edge to edge, cropped
                 // to the hero and dissolving under the same mask: a 16:9 band
@@ -78,7 +80,6 @@ struct HeroArtwork: View {
             }
         }
         .aspectRatio(1, contentMode: .fit)
-        .allowsHitTesting(false)
     }
 }
 

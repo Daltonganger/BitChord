@@ -1,4 +1,5 @@
 import AVFoundation
+import AVKit
 import Observation
 import SwiftUI
 import BitChordShared
@@ -12,7 +13,7 @@ import BitChordShared
 /// switch going on does not start a request until a surface registers.
 @MainActor
 @Observable
-final class VideoPlayback {
+final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
     static let shared = VideoPlayback()
 
     private(set) var side: ResolvedVideoSide?
@@ -30,7 +31,7 @@ final class VideoPlayback {
     @ObservationIgnored private var aheadTask: Task<Void, Never>?
     @ObservationIgnored private var aheadId: String?
 
-    private init() {}
+    private override init() { super.init() }
 
     var player: AVPlayer { controller.player }
     var state: VideoSideController.State { controller.state }
@@ -42,6 +43,10 @@ final class VideoPlayback {
     /// A short answer when the toggle found nothing, so it does not look dead.
     private(set) var notice: String?
     @ObservationIgnored private var noticeTask: Task<Void, Never>?
+    @ObservationIgnored private var pictureInPictureController: AVPictureInPictureController?
+    @ObservationIgnored private weak var pictureInPictureLayer: AVPlayerLayer?
+    private(set) var pictureInPictureActive = false
+    @ObservationIgnored private var networkAllowed = true
 
     private func say(_ text: String?) {
         noticeTask?.cancel()
@@ -79,7 +84,10 @@ final class VideoPlayback {
         PlaybackDebugLog.shared.record("video: switch \(on ? "on" : "off")", about: gate.trackId)
         gate.setEnabled(on)
         // Off puts the song back if the music-video upload had taken its place.
-        if !on { hooks?.playSongVersion() }
+        if !on {
+            hooks?.playSongVersion()
+            pictureInPictureController?.stopPictureInPicture()
+        }
         reconcile()
     }
 
@@ -104,6 +112,66 @@ final class VideoPlayback {
         reconcile()
     }
 
+    func refreshNetworkPolicy() {
+        let allowed = !NetworkQuality.shared.metered ||
+            PlatformSettings.shared.getBoolean(key: "video_over_cellular", default: false)
+        guard networkAllowed != allowed else { return }
+        networkAllowed = allowed
+        if !allowed { pictureInPictureController?.stopPictureInPicture() }
+        reconcile()
+    }
+
+    var pictureInPictureSupported: Bool {
+        AVPictureInPictureController.isPictureInPictureSupported()
+    }
+
+    var canStartPictureInPicture: Bool {
+        pictureInPictureSupported && pictureInPictureController?.isPictureInPicturePossible == true
+    }
+
+    func registerPictureInPictureLayer(_ layer: AVPlayerLayer) {
+        guard pictureInPictureSupported else { return }
+        // Keep PiP attached to the first stable player surface. Theater and
+        // secondary surfaces share the same player but can be short lived.
+        guard pictureInPictureLayer == nil else { return }
+        guard let pip = AVPictureInPictureController(playerLayer: layer) else { return }
+        pip.delegate = self
+        pictureInPictureLayer = layer
+        pictureInPictureController = pip
+    }
+
+    func unregisterPictureInPictureLayer(_ layer: AVPlayerLayer) {
+        guard pictureInPictureLayer === layer else { return }
+        pictureInPictureController?.stopPictureInPicture()
+        pictureInPictureController?.delegate = nil
+        pictureInPictureController = nil
+        pictureInPictureLayer = nil
+    }
+
+    func startPictureInPicture() {
+        guard canStartPictureInPicture else { return }
+        pictureInPictureController?.startPictureInPicture()
+    }
+
+    func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        pictureInPictureActive = true
+        gate.setPictureInPictureActive(true)
+        reconcile()
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        pictureInPictureActive = false
+        gate.setPictureInPictureActive(false)
+        reconcile()
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        failedToStartPictureInPictureWithError error: Error
+    ) {
+        PlaybackDebugLog.shared.record("video: PiP failed to start: \(error.localizedDescription)", about: gate.trackId)
+    }
+
     /// A surface asked to show a track: resolve only the one it needs, and only
     /// once. A nil side (an art track) or a failure is remembered for this
     /// track, so a body pass cannot turn into a request loop.
@@ -115,7 +183,7 @@ final class VideoPlayback {
                 PlaybackDebugLog.shared.record("video gate: \(state)", about: gate.trackId)
             }
         }
-        guard gate.canRequest, let id = gate.trackId else {
+        guard networkAllowed, gate.canRequest, let id = gate.trackId else {
             stop()
             return
         }
@@ -333,7 +401,9 @@ struct VideoSurface<Fallback: View>: View {
     @Environment(PlaybackController.self) private var controller
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("show_music_videos") private var showMusicVideos = false
+    @AppStorage("video_over_cellular") private var videoOverCellular = false
     @State private var registered = false
+    @State private var theaterPresented = false
 
     private func caption(_ text: String, loading: Bool) -> some View {
         VStack {
@@ -392,6 +462,30 @@ struct VideoSurface<Fallback: View>: View {
                 .opacity(presentation == .card && VideoPlayback.shared.showsVideo ? 0 : 1)
             if VideoPlayback.shared.showsVideo {
                 picture
+                    .overlay(alignment: presentation == .fill ? .topTrailing : .bottomTrailing) {
+                        HStack(spacing: 8) {
+                            Button {
+                                theaterPresented = true
+                            } label: {
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                    .accessibilityLabel("Open video theater")
+                            }
+                            .help("Open Video Theater")
+                            if VideoPlayback.shared.pictureInPictureSupported {
+                                Button {
+                                    VideoPlayback.shared.startPictureInPicture()
+                                } label: {
+                                    Image(systemName: "pip.enter")
+                                        .accessibilityLabel("Start Picture in Picture")
+                                }
+                                .help("Picture in Picture")
+                                .disabled(!VideoPlayback.shared.canStartPictureInPicture)
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .padding(10)
+                    }
             } else if announcesLoading, showMusicVideos, VideoPlayback.shared.isLoading {
                 caption("Loading music video", loading: true)
                     .accessibilityIdentifier("player.musicVideoLoading")
@@ -403,6 +497,16 @@ struct VideoSurface<Fallback: View>: View {
         .animation(.easeInOut(duration: 0.25), value: VideoPlayback.shared.showsVideo)
         .animation(.easeInOut(duration: 0.25), value: VideoPlayback.shared.isLoading)
         .animation(.easeInOut(duration: 0.25), value: VideoPlayback.shared.notice)
+        #if os(iOS)
+        .fullScreenCover(isPresented: $theaterPresented) {
+            VideoTheaterView(controller: controller)
+        }
+        #else
+        .sheet(isPresented: $theaterPresented) {
+            VideoTheaterView(controller: controller)
+                .frame(minWidth: 900, minHeight: 560)
+        }
+        #endif
         .onAppear {
             guard !registered else { return }
             registered = true
@@ -429,6 +533,7 @@ struct VideoSurface<Fallback: View>: View {
                 )
             )
             VideoPlayback.shared.setActive(scenePhase == .active)
+            VideoPlayback.shared.refreshNetworkPolicy()
             VideoPlayback.shared.setEnabled(showMusicVideos)
             VideoPlayback.shared.setSurfaceVisible(true, videoId: controller.current?.videoId)
         }
@@ -449,6 +554,12 @@ struct VideoSurface<Fallback: View>: View {
             guard registered else { return }
             VideoPlayback.shared.setEnabled(on)
         }
+        .onChange(of: NetworkQuality.shared.metered) { _, _ in
+            VideoPlayback.shared.refreshNetworkPolicy()
+        }
+        .onChange(of: videoOverCellular) { _, _ in
+            VideoPlayback.shared.refreshNetworkPolicy()
+        }
         .onChange(of: VideoPlayback.shared.state) { _, state in
             guard registered, state == .failed else { return }
             VideoPlayback.shared.videoFailed()
@@ -457,24 +568,29 @@ struct VideoSurface<Fallback: View>: View {
 }
 
 #if os(iOS)
-private struct VideoLayerView: UIViewRepresentable {
+struct VideoLayerView: UIViewRepresentable {
     let player: AVPlayer
     var gravity: AVLayerVideoGravity = .resizeAspect
     func makeUIView(context: Context) -> VideoLayerHost {
         let view = VideoLayerHost()
         view.player = player
         view.gravity = gravity
+        VideoPlayback.shared.registerPictureInPictureLayer(view.playerLayer)
         return view
     }
     func updateUIView(_ view: VideoLayerHost, context: Context) {
         view.player = player
         view.gravity = gravity
+        VideoPlayback.shared.registerPictureInPictureLayer(view.playerLayer)
+    }
+    static func dismantleUIView(_ view: VideoLayerHost, coordinator: ()) {
+        VideoPlayback.shared.unregisterPictureInPictureLayer(view.playerLayer)
     }
 }
 
-private final class VideoLayerHost: UIView {
+final class VideoLayerHost: UIView {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
-    private var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 
     var player: AVPlayer? {
         get { playerLayer.player }
@@ -486,23 +602,28 @@ private final class VideoLayerHost: UIView {
     }
 }
 #else
-private struct VideoLayerView: NSViewRepresentable {
+struct VideoLayerView: NSViewRepresentable {
     let player: AVPlayer
     var gravity: AVLayerVideoGravity = .resizeAspect
     func makeNSView(context: Context) -> VideoLayerHost {
         let view = VideoLayerHost()
         view.player = player
         view.gravity = gravity
+        VideoPlayback.shared.registerPictureInPictureLayer(view.playerLayer)
         return view
     }
     func updateNSView(_ view: VideoLayerHost, context: Context) {
         view.player = player
         view.gravity = gravity
+        VideoPlayback.shared.registerPictureInPictureLayer(view.playerLayer)
+    }
+    static func dismantleNSView(_ view: VideoLayerHost, coordinator: ()) {
+        VideoPlayback.shared.unregisterPictureInPictureLayer(view.playerLayer)
     }
 }
 
-private final class VideoLayerHost: NSView {
-    private let playerLayer = AVPlayerLayer()
+final class VideoLayerHost: NSView {
+    let playerLayer = AVPlayerLayer()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)

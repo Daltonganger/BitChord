@@ -42,6 +42,7 @@ struct SettingsView: View {
     @State var fullBleed = PlatformSettings.shared.getBoolean(key: "full_bleed_artwork", default: true)
     @AppStorage("lyrics_blur") var lyricsBlur = true
     @AppStorage("show_music_videos") var showMusicVideos = false
+    @State var videoOverCellular = PlatformSettings.shared.getBoolean(key: "video_over_cellular", default: false)
     @AppStorage("translation_language") var translationLanguage = ""
     @State var syncedLyrics = PlatformSettings.shared.getBoolean(key: "synced_lyrics", default: true)
     @State var convertVideo = PlatformSettings.shared.getBoolean(key: "convert_video_to_audio", default: true)
@@ -185,6 +186,10 @@ struct SettingsView: View {
         .onChange(of: hidePlayerStatusBar) { _, value in AppSettings.shared.setHideStatusBarInPlayer(value: value) }
         .onChange(of: showQueueHistory) { _, value in AppSettings.shared.setShowQueueHistory(value: value) }
         .onChange(of: stopMusicOnClose) { _, value in AppSettings.shared.setStopMusicOnClose(value: value) }
+        .onChange(of: videoOverCellular) { _, value in
+            PlatformSettings.shared.putBoolean(key: "video_over_cellular", value: value)
+            VideoPlayback.shared.refreshNetworkPolicy()
+        }
         .onChange(of: lyricsBlur) { _, value in AppSettings.shared.setLyricsBlur(value: value) }
         .onChange(of: translationLanguage) { _, value in AppSettings.shared.setTranslationLanguage(value: value) }
         .sheet(isPresented: $loginPresented) { loginSheet }
