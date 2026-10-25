@@ -109,6 +109,7 @@ struct SettingsView: View {
     @State private var search = ""
     #if os(macOS)
     @State private var settingsHistory = PathNavigator()
+    @State private var selectedMacSettingsSection: SettingsSection? = .account
     #endif
 
     var metered: Bool { NetworkQuality.shared.metered }
@@ -121,18 +122,11 @@ struct SettingsView: View {
                     .searchable(text: $search, prompt: "Search settings")
             } else {
                 #if os(macOS)
-                // A Mac settings window navigates the way Finder does: back and
-                // forward in the titlebar, over the panes opened in it.
-                NavigationStack(path: Bindable(settingsHistory).path) {
-                    settingsForm
-                        .navigationTitle("Settings")
-                        // The titlebar's own search pill at the trailing edge.
-                        .searchable(text: $search, placement: .toolbar, prompt: "Search")
-                        .navigationDestination(for: PushRoute.self) { route in
-                            route.make().navigationBarBackButtonHidden(true)
-                        }
-                }
-                .environment(\.inBrowseStack, true)
+                macSettingsSplitView
+                    .navigationTitle("Settings")
+                    // The titlebar's own search pill at the trailing edge.
+                    .searchable(text: $search, placement: .toolbar, prompt: "Search")
+                    .environment(\.inBrowseStack, true)
                 .toolbar {
                     ToolbarItem(placement: .navigation) {
                         MacHistoryButtons(navigator: settingsHistory)
@@ -156,15 +150,23 @@ struct SettingsView: View {
         #if os(macOS)
         .frame(minWidth: 560, idealWidth: 620, minHeight: 720)
         #endif
-        .preferredColorScheme(appModel.preferredScheme)
-        .onChange(of: dolbyAtmos) { _, value in AppSettings.shared.setDolbyAtmos(value: value) }
-        .onChange(of: loudnessOffOnSpeaker) { _, value in
-            AppSettings.shared.setLoudnessOffOnSpeaker(value: value)
-            controller.updateLoudnessMode(controller.loudnessMode)
+        .alert("Higher refresh rate?", isPresented: $showPerfWarning) {
+            Button("Cancel", role: .cancel) {}
+            Button("Turn On") { highPerf = true }
+        } message: {
+            Text("Holding a high refresh rate keeps the display working harder the whole time BitChord is open, and the battery drains faster for it. Turn it on anyway?")
         }
-        .onChange(of: hidePlayerStatusBar) { _, value in AppSettings.shared.setHideStatusBarInPlayer(value: value) }
-        .onChange(of: showQueueHistory) { _, value in AppSettings.shared.setShowQueueHistory(value: value) }
-        .onChange(of: stopMusicOnClose) { _, value in AppSettings.shared.setStopMusicOnClose(value: value) }
+        .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result {
+                LocalLibrary.shared.scanPicked(url)
+                localFolderName = SettingsView.storedLocalFolderName()
+                    ?? url.lastPathComponent
+            }
+        }
+        .sheet(item: $updateSheet) { release in
+            UpdateSheet(release: release)
+                .environment(update)
+        }
         .onAppear {
             // The tuner holds a display link while high performance is on, so it
             // has to be (re)applied every time this screen appears — and a value
@@ -174,6 +176,15 @@ struct SettingsView: View {
             PerformanceTuner.shared.apply(highPerformance: highPerf, refreshRateHz: refreshRate)
             localFolderName = SettingsView.storedLocalFolderName()
         }
+        .preferredColorScheme(appModel.preferredScheme)
+        .onChange(of: dolbyAtmos) { _, value in AppSettings.shared.setDolbyAtmos(value: value) }
+        .onChange(of: loudnessOffOnSpeaker) { _, value in
+            AppSettings.shared.setLoudnessOffOnSpeaker(value: value)
+            controller.updateLoudnessMode(controller.loudnessMode)
+        }
+        .onChange(of: hidePlayerStatusBar) { _, value in AppSettings.shared.setHideStatusBarInPlayer(value: value) }
+        .onChange(of: showQueueHistory) { _, value in AppSettings.shared.setShowQueueHistory(value: value) }
+        .onChange(of: stopMusicOnClose) { _, value in AppSettings.shared.setStopMusicOnClose(value: value) }
         .onChange(of: lyricsBlur) { _, value in AppSettings.shared.setLyricsBlur(value: value) }
         .onChange(of: translationLanguage) { _, value in AppSettings.shared.setTranslationLanguage(value: value) }
         .sheet(isPresented: $loginPresented) { loginSheet }
@@ -304,6 +315,23 @@ struct SettingsView: View {
             case .miscellaneous: return "Miscellaneous"
             case .advanced: return "Advanced Options"
             case .about: return "About"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .account: return "person.crop.circle"
+            case .audioQuality: return "waveform"
+            case .downloads: return "arrow.down.circle"
+            case .playback: return "play.circle"
+            case .appearance: return "paintbrush"
+            case .performance: return "speedometer"
+            case .localMusic: return "music.note.list"
+            case .storage: return "externaldrive"
+            case .yourData: return "externaldrive"
+            case .miscellaneous: return "ellipsis.circle"
+            case .advanced: return "gearshape.2"
+            case .about: return "info.circle"
             }
         }
     }
@@ -437,6 +465,66 @@ struct SettingsView: View {
         }
     }
 
+    #if os(macOS)
+    private var macSettingsSplitView: some View {
+        let visibleSections = builtSections().map(\.section)
+        return SettingsMacSplitView(
+            sections: visibleSections,
+            selection: $selectedMacSettingsSection,
+            sidebarLabel: { section in
+                NavigationLink(value: section) {
+                    Label(section.title, systemImage: section.systemImage)
+                }
+            },
+            detail: { section in
+                NavigationStack(path: Bindable(settingsHistory).path) {
+                    macSettingsSection(section)
+                        .navigationTitle("Settings")
+                        .navigationDestination(for: PushRoute.self) { route in
+                            route.make().navigationBarBackButtonHidden(true)
+                        }
+                        .onAppear { consumeMacSettingsDeepLinkIfNeeded() }
+                        .onChange(of: requestedSettingsPage) { _, _ in
+                            consumeMacSettingsDeepLinkIfNeeded()
+                        }
+                }
+            }
+        )
+        .onChange(of: search) { _, _ in
+            let visibleSections = builtSections().map(\.section)
+            if let selectedMacSettingsSection,
+               visibleSections.contains(selectedMacSettingsSection) {
+                return
+            }
+            selectedMacSettingsSection = visibleSections.first
+        }
+    }
+
+    private func macSettingsSection(_ section: SettingsSection) -> some View {
+        let rows = rows(for: section)
+        return Form {
+            Section {
+                ForEach(rows) { row in row.content }
+            } header: {
+                Text(section.title)
+            } footer: {
+                if search.isEmpty { footer(for: section) }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func consumeMacSettingsDeepLinkIfNeeded() {
+        guard !requestedSettingsPage.isEmpty,
+              let rawValue = SettingsSectionName.canonical(requestedSettingsPage),
+              let section = SettingsSection(rawValue: rawValue)
+        else { return }
+        requestedSettingsPage = ""
+        search = ""
+        selectedMacSettingsSection = section
+    }
+    #endif
+
     private var settingsForm: some View {
         let sections = builtSections()
         return ScrollViewReader { proxy in
@@ -468,23 +556,6 @@ struct SettingsView: View {
             // The sheets, the picker and the warning belong to the screen rather than
             // to one group: the group they used to hang off can be filtered away, and
             // what it raises must still be able to appear.
-            .alert("Higher refresh rate?", isPresented: $showPerfWarning) {
-                Button("Cancel", role: .cancel) {}
-                Button("Turn On") { highPerf = true }
-            } message: {
-                Text("Holding a high refresh rate keeps the display working harder the whole time BitChord is open, and the battery drains faster for it. Turn it on anyway?")
-            }
-            .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
-                if case .success(let url) = result {
-                    LocalLibrary.shared.scanPicked(url)
-                    localFolderName = SettingsView.storedLocalFolderName()
-                        ?? url.lastPathComponent
-                }
-            }
-            .sheet(item: $updateSheet) { release in
-                UpdateSheet(release: release)
-                    .environment(update)
-            }
             .onAppear { consumeSettingsDeepLinkIfNeeded(using: proxy) }
             .onChange(of: requestedSettingsPage) { _, _ in consumeSettingsDeepLinkIfNeeded(using: proxy) }
         }
