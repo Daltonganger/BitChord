@@ -487,6 +487,7 @@ pub struct VersionAlignmentRec {
     pub segments: Vec<AlignmentSegmentRec>,
     pub similarity: f64,
     pub baseline: f64,
+    pub minimum_window_similarity: f64,
     pub coverage: f64,
     pub confident: bool,
 }

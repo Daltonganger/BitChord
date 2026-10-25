@@ -50,9 +50,26 @@ struct ResolvedVideoSide: Sendable {
     /// Measured at 1080p: "Money"'s still upload 679 kbps (328 per megapixel);
     /// real music videos 2,837 and 4,357 kbps (1,370 and 2,100 per megapixel).
     var isStillImage: Bool {
-        guard let bitrate, let width, let height, width > 0, height > 0 else { return false }
-        let kbpsPerMegapixel = Double(bitrate) / 1000 / (Double(width * height) / 1_000_000)
+        guard let kbpsPerMegapixel else { return false }
         return kbpsPerMegapixel < 700
+    }
+    /// Counterparts are authoritative, except for a genuinely static picture.
+    var isTrulyStatic: Bool {
+        guard let kbpsPerMegapixel else { return false }
+        return kbpsPerMegapixel < 200
+    }
+    var kbpsPerMegapixel: Double? {
+        guard let bitrate, let width, let height, width > 0, height > 0 else { return nil }
+        return Double(bitrate) / 1000 / (Double(width * height) / 1_000_000)
+    }
+    var isAuthoritativeMusicVideo: Bool {
+        musicVideoType == "MUSIC_VIDEO_TYPE_OMV"
+    }
+    func qualifiesAsCounterpartVideo() -> Bool {
+        hasVideoURL && isAVCInMP4 && !isTrulyStatic
+    }
+    func qualifiesAsSearchVideo() -> Bool {
+        hasVideoURL && isAVCInMP4 && looksLikeMusicVideo && !isStillImage
     }
     /// AVC in MP4 is the only container/codec pair AVFoundation decodes here.
     var isAVCInMP4: Bool {

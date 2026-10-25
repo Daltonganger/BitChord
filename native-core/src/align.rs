@@ -45,10 +45,10 @@ const ONSET_SECONDS: f64 = ONSET_HOP as f64 / RATE;
 const INSERT_PENALTY: f32 = 0.22;
 /// The song advancing while the other upload waits (a passage the video cut).
 const DELETE_PENALTY: f32 = 0.30;
-/// A run of the path shorter than this is noise in the warp, not a segment.
-const MIN_SEGMENT_SECONDS: f64 = 4.0;
-/// Path points within this many frames of a segment's offset belong to it.
-const OFFSET_TOLERANCE_FRAMES: i64 = 2;
+/// Local quality and offset checks use short enough windows to catch a video
+/// edit before a whole-song average hides it.
+const LOCAL_WINDOW_SECONDS: f64 = 8.0;
+const LOCAL_OFFSET_SPLIT_SECONDS: f64 = 0.3;
 /// How far refinement may move a segment's offset, either way.
 const REFINE_SECONDS: f64 = 0.3;
 
@@ -70,6 +70,8 @@ pub struct Alignment {
     /// length: what two unrelated stretches of these recordings score. A true
     /// alignment clears it by a wide margin.
     pub baseline: f64,
+    /// Lowest chroma similarity in any non-silent local window.
+    pub minimum_window_similarity: f64,
     /// Share of the song's audible frames the segments cover.
     pub coverage: f64,
 }
@@ -90,6 +92,7 @@ impl Alignment {
         let song_seconds = self.segments.last().map_or(0.0, |s| s.song_end);
         !self.segments.is_empty()
             && self.similarity - self.baseline >= 0.06
+            && self.minimum_window_similarity - self.baseline >= 0.06
             && self.similarity >= 0.9
             && self.coverage >= 0.85
             && self.segments.len() as f64 <= 1.0 + song_seconds / 30.0
@@ -125,7 +128,7 @@ pub fn align(song: &[f32], other: &[f32]) -> Option<Alignment> {
         return None;
     }
     let path = warp(&song_chroma, &other_chroma);
-    let mut segments = segments_of(&path);
+    let (mut segments, minimum_window_similarity) = local_segments(&path, &song_chroma, &other_chroma);
     if segments.is_empty() {
         return None;
     }
@@ -148,6 +151,7 @@ pub fn align(song: &[f32], other: &[f32]) -> Option<Alignment> {
         segments,
         similarity,
         baseline,
+        minimum_window_similarity,
         coverage: covered as f64 / audible as f64,
     })
 }
@@ -303,46 +307,88 @@ fn warp(song: &[Option<[f32; 12]>], other: &[Option<[f32; 12]>]) -> Vec<(usize, 
     path
 }
 
-/// Constant-offset runs of the path, each at least [`MIN_SEGMENT_SECONDS`].
-/// Short runs between two segments are absorbed by the nearer one, so a single
-/// skit makes exactly two segments rather than a staircase.
-fn segments_of(path: &[(usize, usize)]) -> Vec<Segment> {
-    let mut runs: Vec<(usize, usize, i64)> = Vec::new(); // song start, song end, offset frames
-    for &(i, j) in path {
-        let offset = j as i64 - i as i64;
-        match runs.last_mut() {
-            Some((_, end, run_offset)) if (offset - *run_offset).abs() <= OFFSET_TOLERANCE_FRAMES => {
-                *end = i + 1;
+#[derive(Debug)]
+struct LocalWindow {
+    start: usize,
+    end: usize,
+    offset_frames: i64,
+    similarity: f64,
+}
+
+/// Measures the best path's offset and chroma match in consecutive eight
+/// second windows. A stable offset becomes one map segment; an offset jump
+/// greater than 300 ms starts a new piecewise segment.
+fn local_segments(
+    path: &[(usize, usize)],
+    song: &[Option<[f32; 12]>],
+    other: &[Option<[f32; 12]>],
+) -> (Vec<Segment>, f64) {
+    let window_frames = (LOCAL_WINDOW_SECONDS / FRAME_SECONDS).round().max(1.0) as usize;
+    let mut windows = Vec::new();
+    for start in (0..song.len()).step_by(window_frames) {
+        let end = (start + window_frames).min(song.len());
+        let mut offsets = Vec::new();
+        let mut similarities = Vec::new();
+        for &(i, j) in path {
+            if i < start || i >= end || song[i].is_none() || other[j].is_none() {
+                continue;
             }
-            _ => runs.push((i, i + 1, offset)),
+            offsets.push(j as i64 - i as i64);
+            similarities.push(1.0 - distance(&song[i], &other[j]) as f64);
         }
-    }
-    let min_frames = (MIN_SEGMENT_SECONDS / FRAME_SECONDS) as usize;
-    let mut kept: Vec<(usize, usize, i64)> = Vec::new();
-    for run in runs {
-        if run.1 - run.0 >= min_frames {
-            match kept.last_mut() {
-                Some(last) if (last.2 - run.2).abs() <= OFFSET_TOLERANCE_FRAMES => last.1 = run.1,
-                Some(last) => {
-                    // The gap between two real segments splits at its middle.
-                    let middle = (last.1 + run.0) / 2;
-                    last.1 = middle;
-                    kept.push((middle, run.1, run.2));
-                }
-                None => kept.push((0, run.1, run.2)),
-            }
+        if offsets.is_empty() {
+            continue;
         }
+        offsets.sort_unstable();
+        windows.push(LocalWindow {
+            start,
+            end,
+            offset_frames: offsets[offsets.len() / 2],
+            similarity: similarities.iter().sum::<f64>() / similarities.len() as f64,
+        });
     }
-    if let (Some(last), Some(&(i, _))) = (kept.last_mut(), path.last()) {
-        last.1 = last.1.max(i + 1);
+    let minimum_similarity = windows
+        .iter()
+        .map(|window| window.similarity)
+        .reduce(f64::min)
+        .unwrap_or(0.0);
+    let Some(first) = windows.first() else {
+        return (Vec::new(), minimum_similarity);
+    };
+
+    let threshold_frames = (LOCAL_OFFSET_SPLIT_SECONDS / FRAME_SECONDS).round() as i64;
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut end = first.end;
+    let mut offsets = vec![first.offset_frames];
+    let mut prior_end = first.end;
+    for window in windows.iter().skip(1) {
+        let mut sorted = offsets.clone();
+        sorted.sort_unstable();
+        let representative = sorted[sorted.len() / 2];
+        if (window.offset_frames - representative).abs() > threshold_frames {
+            let split = (prior_end + window.start) / 2;
+            let offset = representative as f64 * FRAME_SECONDS;
+            segments.push(Segment {
+                song_start: start as f64 * FRAME_SECONDS,
+                song_end: split as f64 * FRAME_SECONDS,
+                offset,
+            });
+            start = split;
+            offsets.clear();
+        }
+        offsets.push(window.offset_frames);
+        end = window.end;
+        prior_end = window.end;
     }
-    kept.into_iter()
-        .map(|(start, end, offset)| Segment {
-            song_start: start as f64 * FRAME_SECONDS,
-            song_end: end as f64 * FRAME_SECONDS,
-            offset: offset as f64 * FRAME_SECONDS,
-        })
-        .collect()
+    let mut sorted = offsets;
+    sorted.sort_unstable();
+    segments.push(Segment {
+        song_start: start as f64 * FRAME_SECONDS,
+        song_end: end.max(song.len()) as f64 * FRAME_SECONDS,
+        offset: sorted[sorted.len() / 2] as f64 * FRAME_SECONDS,
+    });
+    (segments, minimum_similarity)
 }
 
 /// The segment's offset to 10 ms: the lag within ±[`REFINE_SECONDS`] that best
@@ -510,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn a_skit_splits_the_map_in_two() {
+    fn shayne_ward_down_with_an_inserted_gap_splits_local_windows() {
         let song = music(80.0, 3);
         let mut video = music(5.0, 77);
         video.extend_from_slice(&song[..at(40.0)]);
@@ -526,6 +572,10 @@ mod tests {
         assert!((first.song_end - 40.0).abs() < 1.0, "the split sits at the skit: {alignment:?}");
         assert!((alignment.map(10.0).unwrap() - 15.0).abs() < 0.03);
         assert!((alignment.map(60.0).unwrap() - 71.5).abs() < 0.03);
+        assert!(
+            alignment.minimum_window_similarity - alignment.baseline >= 0.06,
+            "every local window must clear the unrelated-audio baseline: {alignment:?}"
+        );
     }
 
     #[test]
