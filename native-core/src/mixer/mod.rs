@@ -33,7 +33,9 @@ mod fx;
 const AUTOMIX_SAFETY_PREFIX: &str = "safety:";
 
 fn automix_plan_winner(plan: &TransitionPlan) -> Option<&'static str> {
-    if plan.reason.starts_with(AUTOMIX_SAFETY_PREFIX) {
+    if plan.reason.starts_with("skip-mix:") {
+        None
+    } else if plan.reason.starts_with(AUTOMIX_SAFETY_PREFIX) {
         Some("safety")
     } else if plan.fade_seconds > 0.0 || !plan.reason.is_empty() {
         Some("analyzed")
@@ -291,6 +293,7 @@ pub enum Command {
     /// falls back to a full load. Upstream's skip-to-next-item, minus the
     /// playlist (the app owns the queue and flips its own index on reply).
     SkipToPending {
+        skip_mix_enabled: bool,
         reply: Sender<Result<TrackInfo, String>>,
     },
     Play,
@@ -2598,6 +2601,61 @@ impl MixerState {
         log::info!("updated armed transition: fade={fade_s:.1}s cue={cue:.2}s rate={rate:.4}");
     }
 
+    /// Convert an armed successor into an immediate two-beat EchoOut when a
+    /// trusted planner grid is present. The queue owner keeps its current skip
+    /// path when this returns `None`. This is the native short-window port of
+    /// upstream `DesktopAudioEngine.beginSkipMix`.
+    fn begin_skip_mix(&mut self) -> Option<TrackInfo> {
+        let transition = self.transition.as_mut()?;
+        if !accepts_analyzed_plan(transition.phase, transition.swap) {
+            return None;
+        }
+        let beat = transition.plan.beat_seconds;
+        if !beat.is_finite() || !(0.25..=1.5).contains(&beat) {
+            return None;
+        }
+        let current = self.current.as_ref()?;
+        let incoming = self.incoming.as_ref()?;
+        let device_rate = self.device_rate.max(1);
+        let beat_frames = (beat * device_rate as f64).round().max(1.0) as u64;
+        let fade_frames = beat_frames.saturating_mul(2);
+        let fade_seconds = fade_frames as f64 / device_rate as f64;
+        if current
+            .audible_remaining_seconds()
+            .is_some_and(|remaining| remaining < fade_seconds)
+            || incoming
+                .audible_remaining_seconds()
+                .is_some_and(|remaining| remaining < fade_seconds)
+        {
+            return None;
+        }
+        let start = current.emitted_position_seconds();
+        let info = incoming.info.clone();
+        transition.fade_frames = fade_frames;
+        transition.plan.style = TransitionStyle::EchoOut;
+        transition.plan.fade_seconds = fade_seconds;
+        transition.plan.transition_end_seconds = start + fade_seconds;
+        transition.plan.effect_start_seconds = start;
+        transition.plan.effect_seconds = fade_seconds;
+        transition.plan.outgoing_hold_seconds = 0.0;
+        transition.plan.bed_fraction = 0.0;
+        transition.plan.bed_gain_db = 0.0;
+        transition.plan.dip_depth = 0.0;
+        transition.plan.dip_width = 0.0;
+        transition.plan.playback_rate = 1.0;
+        transition.plan.post_glide_seconds = 0.0;
+        transition.plan.reason = "skip-mix:".into();
+        if let Some(incoming) = &mut self.incoming {
+            incoming.base_plan_rate = 1.0;
+            incoming.post_glide_seconds = 0.0;
+            incoming.release_plan_stretch(self.playback_speed, self.device_rate);
+        }
+        log::info!(
+            "automix: skip-mix style=EchoOut window={fade_seconds:.2}s beat={beat:.3}s"
+        );
+        Some(info)
+    }
+
     /// Opens a different file on a transition that has not started sounding.
     ///
     /// This is how a better encode of the next record joins the blend: the
@@ -2907,7 +2965,11 @@ impl MixerState {
         if let Some(t) = &mut self.transition {
             t.phase = Phase::Fading;
             t.handed_off = true;
-            t.fx = fx::DeckFx::new(t.plan.style, device_rate, t.plan.beat_seconds);
+            t.fx = if t.plan.reason.starts_with("skip-mix:") {
+                fx::DeckFx::new_skip_echo(device_rate, t.plan.beat_seconds)
+            } else {
+                fx::DeckFx::new(t.plan.style, device_rate, t.plan.beat_seconds)
+            };
             if let Some(winner) = automix_plan_winner(&t.plan) {
                 log::info!(
                     "automix: plan_won={winner} fade={:.2}s style={:?}",
@@ -3522,24 +3584,41 @@ fn handle_command(state: &mut MixerState, cmd: Command, ring: &mut Producer<f32>
                 });
             let _ = reply.send(queued);
         }
-        Command::SkipToPending { reply } => {
+        Command::SkipToPending {
+            skip_mix_enabled,
+            reply,
+        } => {
             // A blend already sounding completes now: the listener asked for
             // its target, not for the rest of the fade.
             if state.incoming.is_some() {
                 let info = state.incoming.as_ref().map(|voice| voice.info.clone());
-                state.promote_incoming();
-                state.position_ms.store(0, Ordering::Relaxed);
-                if !state.playing {
-                    state.playing = true;
-                    state.set_state(crate::PlaybackState::Playing);
-                }
-                match info {
-                    Some(info) => {
-                        log::info!("skip promoted blending {}", info.title);
-                        let _ = reply.send(Ok(info));
+                let arming_skip = skip_mix_enabled
+                    && state.transition.as_ref().is_some_and(|transition| {
+                        accepts_analyzed_plan(transition.phase, transition.swap)
+                    });
+                let skip_mix = if arming_skip {
+                    state.begin_skip_mix()
+                } else {
+                    None
+                };
+                if let Some(info) = skip_mix {
+                    state.consider_start_fade();
+                    let _ = reply.send(Ok(info));
+                } else {
+                    state.promote_incoming();
+                    state.position_ms.store(0, Ordering::Relaxed);
+                    if !state.playing {
+                        state.playing = true;
+                        state.set_state(crate::PlaybackState::Playing);
                     }
-                    None => {
-                        let _ = reply.send(Err("nothing to skip to".into()));
+                    match info {
+                        Some(info) => {
+                            log::info!("skip promoted blending {}", info.title);
+                            let _ = reply.send(Ok(info));
+                        }
+                        None => {
+                            let _ = reply.send(Err("nothing to skip to".into()));
+                        }
                     }
                 }
             } else if let Some(request) = state.pending_next.take() {
@@ -5711,6 +5790,15 @@ mod tests {
             Some("analyzed")
         );
         assert_eq!(automix_plan_winner(&TransitionPlan::default()), None);
+        assert_eq!(
+            automix_plan_winner(&TransitionPlan {
+                style: TransitionStyle::EchoOut,
+                fade_seconds: 1.0,
+                reason: "skip-mix:".into(),
+                ..TransitionPlan::default()
+            }),
+            None
+        );
     }
 
     #[test]
@@ -5735,6 +5823,49 @@ mod tests {
         let retained = &fading.transition.as_ref().unwrap().plan;
         assert_eq!(automix_plan_winner(retained), Some("safety"));
         assert_eq!(retained.style, TransitionStyle::EqualPower);
+    }
+
+    #[test]
+    fn skip_mix_starts_a_two_beat_echo_when_an_armed_grid_exists() {
+        let dir = std::env::temp_dir()
+            .join(format!("bitchord-am5-skip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let outgoing = dir.join("out.wav");
+        let incoming = dir.join("in.wav");
+        test_wav(&outgoing, 12.0, 440.0);
+        test_wav(&incoming, 12.0, 660.0);
+
+        let mut state = armed_test_state(&outgoing, &incoming, Phase::Arming);
+        state.transition.as_mut().unwrap().plan.beat_seconds = 0.5;
+        assert!(state.begin_skip_mix().is_some());
+        state.consider_start_fade();
+
+        let transition = state.transition.as_ref().unwrap();
+        assert!(transition.phase == Phase::Fading);
+        assert_eq!(transition.plan.style, TransitionStyle::EchoOut);
+        assert_eq!(transition.fade_frames, 44_100);
+        assert_eq!(
+            transition.fx.as_ref().unwrap().window_frames(),
+            transition.fade_frames
+        );
+        assert_eq!(transition.plan.reason, "skip-mix:");
+    }
+
+    #[test]
+    fn skip_mix_without_a_grid_keeps_the_existing_cut_fallback() {
+        let dir = std::env::temp_dir()
+            .join(format!("bitchord-am5-no-grid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let outgoing = dir.join("out.wav");
+        let incoming = dir.join("in.wav");
+        test_wav(&outgoing, 12.0, 440.0);
+        test_wav(&incoming, 12.0, 660.0);
+
+        let mut state = armed_test_state(&outgoing, &incoming, Phase::Arming);
+        assert!(state.begin_skip_mix().is_none());
+        state.promote_incoming();
+        assert_eq!(state.current.as_ref().unwrap().info.title, "in");
+        assert!(state.transition.is_none());
     }
 
     #[test]
@@ -7774,7 +7905,13 @@ mod tests {
         assert_eq!(queued.title, "Second");
         // The skip opens it now and reports the handoff, like a load would.
         let (reply, skipped) = crossbeam_channel::bounded(1);
-        harness.tx.send(Command::SkipToPending { reply }).unwrap();
+        harness
+            .tx
+            .send(Command::SkipToPending {
+                skip_mix_enabled: true,
+                reply,
+            })
+            .unwrap();
         let info = skipped
             .recv_timeout(Duration::from_secs(10))
             .unwrap()
@@ -7791,7 +7928,13 @@ mod tests {
         );
         // Nothing left armed: a second skip is refused, not invented.
         let (reply, again) = crossbeam_channel::bounded(1);
-        harness.tx.send(Command::SkipToPending { reply }).unwrap();
+        harness
+            .tx
+            .send(Command::SkipToPending {
+                skip_mix_enabled: false,
+                reply,
+            })
+            .unwrap();
         assert!(again.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
         harness.finish();
     }
@@ -7806,7 +7949,13 @@ mod tests {
             .unwrap()
             .is_none());
         let (reply, skipped) = crossbeam_channel::bounded(1);
-        harness.tx.send(Command::SkipToPending { reply }).unwrap();
+        harness
+            .tx
+            .send(Command::SkipToPending {
+                skip_mix_enabled: false,
+                reply,
+            })
+            .unwrap();
         assert!(
             skipped
                 .recv_timeout(Duration::from_secs(5))
