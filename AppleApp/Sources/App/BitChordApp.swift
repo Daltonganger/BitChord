@@ -48,6 +48,10 @@ struct BitChordApp: App {
                 .environment(auth)
                 .environment(toast)
                 .environment(party)
+                #if os(macOS)
+                .background(SettingsDeepLinkOpener())
+                .modifier(MacWindowAccountToolbar())
+                #endif
                 .task {
                     #if DEBUG
                     if ProcessInfo.processInfo.arguments.contains("--verify-queue") {
@@ -175,6 +179,14 @@ struct BitChordApp: App {
                         // track and the paused/running state.
                         PlaybackHandoff.shared.refresh(controller: controller)
                         if PlatformSettings.shared.getBoolean(key: "stop_when_backgrounded", default: false) {
+                            #if os(macOS)
+                            // macOS can report the last-window close as a scene
+                            // background transition while the app is kept resident.
+                            // Let the separate Stop Music on Close setting own that
+                            // action; this setting remains for app deactivation/hide.
+                            let hasVisibleWindow = NSApp.windows.contains { $0.isVisible }
+                            guard NSApp.isHidden || (!NSApp.isActive && hasVisibleWindow) else { return }
+                            #endif
                             controller.pauseForBackground()
                         }
                     } else if phase == .active {
@@ -188,6 +200,12 @@ struct BitChordApp: App {
                 .modifier(MacTransportKeys(controller: controller))
                 #endif
                 .onOpenURL { url in
+                    if SettingsDeepLink.handle(url) {
+                        #if os(iOS)
+                        appModel.settingsPresented = true
+                        #endif
+                        return
+                    }
                     // Handling lives here, on the scene, rather than on `RootView`.
                     // It was installed in both places, so whichever ran second
                     // consumed the link and the other was dead — a `bitchord://`

@@ -361,6 +361,7 @@ struct LocalAlbumCell: View {
             }
         }
         .buttonStyle(.plain)
+        .modifier(MacCardHoverLift())
     }
 }
 

@@ -305,5 +305,6 @@ struct OnDeviceCard<Destination: View>: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .modifier(MacCardHoverLift())
     }
 }
