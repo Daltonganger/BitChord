@@ -497,7 +497,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
-    /// Claude's tuning: a coda 32 dB under the recording survives, a fade tail
+    /// The edge gate: a coda 32 dB under the recording survives, a fade tail
     /// 40 dB under it is trimmed.
     #[test]
     fn a_thirty_two_db_coda_survives_and_a_forty_db_tail_is_trimmed() {

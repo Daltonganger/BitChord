@@ -4,7 +4,7 @@ import SwiftUI
 /// The iPad's sidebar, drawn by the app rather than by `TabView`.
 ///
 /// The system's adaptable sidebar floats as an inset glass card over the
-/// content. This one is the column the Claude and ChatGPT iPad apps use: full
+/// content. This one is the column many iPad chat apps use: full
 /// height, flush with the screen edge, revealed by the content moving aside.
 /// With the room to spare (landscape) the content reflows beside it; without
 /// (portrait) the content slides over by the sidebar's width and a tap on what
