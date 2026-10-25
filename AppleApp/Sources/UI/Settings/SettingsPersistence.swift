@@ -66,6 +66,7 @@ struct SettingsQualityPersist: ViewModifier {
     @Binding var bitPerfect: Bool
     @Binding var preferUsbDac: Bool
     @Binding var loudness: Bool
+    @Binding var loudnessModeSelection: String
 
     func body(content: Content) -> some View {
         content
@@ -80,7 +81,12 @@ struct SettingsQualityPersist: ViewModifier {
             .onChange(of: matchSourceRate) { _, value in controller.updateMatchSourceSampleRate(value) }
             .onChange(of: bitPerfect) { _, value in controller.updateBitPerfectOutput(value) }
             .onChange(of: preferUsbDac) { _, value in controller.updatePreferUsbDac(value) }
-            .onChange(of: loudness) { _, value in controller.updateLoudnessNormalization(value) }
+            .onChange(of: loudness) { _, value in
+                controller.updateLoudnessMode(value ? loudnessModeSelection : "OFF")
+            }
+            .onChange(of: loudnessModeSelection) { _, value in
+                if loudness { controller.updateLoudnessMode(value) }
+            }
             .onChange(of: cacheLimitMB) { _, value in
                 AppSettings.shared.setAudioCacheLimitBytes(value: Swift.Int64(value) * 1024 * 1024)
                 Task { await StreamFileCache.shared.trim() }

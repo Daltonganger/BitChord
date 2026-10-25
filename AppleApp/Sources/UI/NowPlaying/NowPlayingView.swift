@@ -44,6 +44,7 @@ struct NowPlayingView: View {
     /// The same switch as Settings ▸ Playback ▸ Show Music Videos, flipped
     /// from the pill while the track plays.
     @AppStorage("show_music_videos") var showMusicVideos = false
+    @AppStorage("hide_status_bar_in_player") private var hideStatusBarInPlayer = false
     @State private var showPipeline = false
     @State var showLyricsOffset = false
     @State var showLyricsSources = false
@@ -66,6 +67,9 @@ struct NowPlayingView: View {
             iOSBody
             #endif
         }
+        #if os(iOS)
+        .statusBarHidden(hideStatusBarInPlayer)
+        #endif
         .sheet(isPresented: $showPipeline) {
             AudioPipelineSheet()
         }

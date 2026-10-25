@@ -33,6 +33,9 @@ struct SourcesView: View {
     /// to come from, and a personal library is exactly that.
     @State private var editingWebDav = false
     @State private var webDavStore = WebDavStore.shared
+    @State private var upgradeLengthSlackSeconds = Int(
+        PlatformSettings.shared.getInt(key: "upgrade_length_slack_seconds", default: 3)
+    )
     /// iOS only: `EditMode` does not exist on macOS, where the list is reordered
     /// by click-to-move instead.
     #if os(iOS)
@@ -193,6 +196,36 @@ struct SourcesView: View {
             } else if !anyLosslessSource {
                 Text("No enabled source can provide lossless audio. Add an addon to play lossless files without transcoding.")
             }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Track Length Tolerance")
+                            .foregroundStyle(.primary)
+                        Text("Maximum duration difference allowed for a replacement stream")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Text("\(upgradeLengthSlackSeconds) s")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(upgradeLengthSlackSeconds) },
+                        set: { upgradeLengthSlackSeconds = Int($0.rounded()) }
+                    ),
+                    in: Double(AppSettings.shared.MIN_UPGRADE_LENGTH_SLACK_SECONDS)...Double(AppSettings.shared.MAX_UPGRADE_LENGTH_SLACK_SECONDS),
+                    step: 1
+                )
+                .accessibilityLabel("Track Length Tolerance")
+                .accessibilityValue("\(upgradeLengthSlackSeconds) seconds")
+                .onChange(of: upgradeLengthSlackSeconds) { _, value in
+                    AppSettings.shared.setUpgradeLengthSlackSeconds(value: Int32(value))
+                }
+            }
+            .padding(.top, 6)
+            Text("A larger tolerance accepts more source matches; a smaller tolerance is stricter. The default is 3 seconds.")
         }
         .foregroundStyle(.secondary)
     }

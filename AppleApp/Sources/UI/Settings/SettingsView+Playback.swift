@@ -50,6 +50,17 @@ extension SettingsView {
             )
         }
         if automix {
+            rows.row("Phrase Length", "automix", "phrase", "bars", "adaptive", "8 bars", "16 bars") {
+                Picker("Phrase Length", selection: Binding(
+                    get: { controller.automixPhraseBars },
+                    set: { controller.setAutomixPhraseBars($0) }
+                )) {
+                    Text("Adaptive").tag(0)
+                    Text("8 bars").tag(8)
+                    Text("16 bars").tag(16)
+                }
+                .accessibilityHint("Choose the phrase length for AutoMix effects")
+            }
             rows.row("Smart Sequencing", "sequence", "order", "suggestions", "autoplay", "transition", "shuffle") {
                 SettingsToggleLine(
                     glyph: .automix,

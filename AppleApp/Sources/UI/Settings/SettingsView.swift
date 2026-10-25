@@ -54,6 +54,8 @@ struct SettingsView: View {
     @State var bitPerfect = PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: false)
     @State var preferUsbDac = PlatformSettings.shared.getBoolean(key: "prefer_usb_dac", default: false)
     @State var loudness = PlatformSettings.shared.getBoolean(key: "loudness_normalization", default: false)
+    @State var loudnessModeSelection = PlatformSettings.shared.getString(key: "loudness_mode", default: "TRACK") == "ALBUM" ? "ALBUM" : "TRACK"
+    @State var loudnessOffOnSpeaker = PlatformSettings.shared.getBoolean(key: "loudness_off_on_speaker", default: true)
     @State var automixPerf = PlatformSettings.shared.getString(key: "automix_performance", default: "BALANCED")
     @State var highPerf = PlatformSettings.shared.getBoolean(key: "high_performance_mode", default: false)
     @State var refreshRate: Int = Int(PlatformSettings.shared.getInt(key: "performance_refresh_rate", default: 60))
@@ -76,6 +78,11 @@ struct SettingsView: View {
     @State var playbackSpeed = Double(PlatformSettings.shared.getFloat(key: "playback_speed", default: 1))
     @State var jiosaavn = PlatformSettings.shared.getBoolean(key: "jiosaavn_enabled", default: true)
     @State var stopBackground = PlatformSettings.shared.getBoolean(key: "stop_when_backgrounded", default: false)
+    @State var stopMusicOnClose = PlatformSettings.shared.getBoolean(key: "stop_music_on_close", default: false)
+    @State var hidePlayerStatusBar = PlatformSettings.shared.getBoolean(key: "hide_status_bar_in_player", default: false)
+    @State var showQueueHistory = PlatformSettings.shared.getBoolean(key: "show_queue_history", default: false)
+    @State var artistSignatures = PlatformSettings.shared.getBoolean(key: "artist_signatures_enabled", default: true)
+    @State var artistSignaturesWikimediaUrl = PlatformSettings.shared.getString(key: "artist_signatures_wikimedia_url", default: "")
     @State var syllableSync = PlatformSettings.shared.getBoolean(key: "prioritize_syllable_sync", default: true)
     @State var language = PlatformSettings.shared.getString(key: "app_language", default: "")
     @State var spotifyCookie = PlatformSettings.shared.getString(key: "spotify_spdc_token", default: "")
@@ -85,6 +92,7 @@ struct SettingsView: View {
     @State var backupNote: String?
     @State var cacheLimitMB = SettingsView.cacheLimitMegabytes()
     @State var cacheUnlimited = SettingsView.cacheIsUnlimited()
+    @AppStorage(SettingsDeepLink.requestKey) var requestedSettingsPage = ""
     /// Whether the Library's folder list offers the cached-songs browser. Off by
     /// default, as upstream's storage switch is: the cache is a storage detail,
     /// not a music library, until somebody asks to browse it.
@@ -150,6 +158,13 @@ struct SettingsView: View {
         #endif
         .preferredColorScheme(appModel.preferredScheme)
         .onChange(of: dolbyAtmos) { _, value in AppSettings.shared.setDolbyAtmos(value: value) }
+        .onChange(of: loudnessOffOnSpeaker) { _, value in
+            AppSettings.shared.setLoudnessOffOnSpeaker(value: value)
+            controller.updateLoudnessMode(controller.loudnessMode)
+        }
+        .onChange(of: hidePlayerStatusBar) { _, value in AppSettings.shared.setHideStatusBarInPlayer(value: value) }
+        .onChange(of: showQueueHistory) { _, value in AppSettings.shared.setShowQueueHistory(value: value) }
+        .onChange(of: stopMusicOnClose) { _, value in AppSettings.shared.setStopMusicOnClose(value: value) }
         .onAppear {
             // The tuner holds a display link while high performance is on, so it
             // has to be (re)applied every time this screen appears — and a value
@@ -192,7 +207,8 @@ struct SettingsView: View {
             matchSourceRate: $matchSourceRate,
             bitPerfect: $bitPerfect,
             preferUsbDac: $preferUsbDac,
-            loudness: $loudness
+            loudness: $loudness,
+            loudnessModeSelection: $loudnessModeSelection
         ))
         .modifier(SettingsExperiencePersist(
             controller: controller,
@@ -423,49 +439,66 @@ struct SettingsView: View {
 
     private var settingsForm: some View {
         let sections = builtSections()
-        return Form {
-            ForEach(sections) { built in
-                Section {
-                    ForEach(built.rows) { row in
-                        row.content
+        return ScrollViewReader { proxy in
+            Form {
+                ForEach(sections) { built in
+                    Section {
+                        ForEach(built.rows) { row in
+                            row.content
+                        }
+                    } header: {
+                        Text(built.section.title)
+                    } footer: {
+                        // Not while searching. A footer explains the rows that sat above
+                        // it, and the search has filtered those: the Audio Quality note
+                        // talks about sample-rate matching and bit-perfect output whether
+                        // or not either row survived the query. Upstream draws no
+                        // footers in search results for the same reason.
+                        if search.isEmpty {
+                            footer(for: built.section)
+                        }
                     }
-                } header: {
-                    Text(built.section.title)
-                } footer: {
-                    // Not while searching. A footer explains the rows that sat above
-                    // it, and the search has filtered those: the Audio Quality note
-                    // talks about sample-rate matching and bit-perfect output whether
-                    // or not either row survived the query. Upstream draws no
-                    // footers in search results for the same reason.
-                    if search.isEmpty {
-                        footer(for: built.section)
-                    }
+                    .id(built.section.id)
+                }
+                if !search.isEmpty && sections.isEmpty {
+                    ContentUnavailableView.search(text: search)
                 }
             }
-            if !search.isEmpty && sections.isEmpty {
-                ContentUnavailableView.search(text: search)
+            .formStyle(.grouped)
+            // The sheets, the picker and the warning belong to the screen rather than
+            // to one group: the group they used to hang off can be filtered away, and
+            // what it raises must still be able to appear.
+            .alert("Higher refresh rate?", isPresented: $showPerfWarning) {
+                Button("Cancel", role: .cancel) {}
+                Button("Turn On") { highPerf = true }
+            } message: {
+                Text("Holding a high refresh rate keeps the display working harder the whole time BitChord is open, and the battery drains faster for it. Turn it on anyway?")
             }
-        }
-        .formStyle(.grouped)
-        // The sheets, the picker and the warning belong to the screen rather than
-        // to one group: the group they used to hang off can be filtered away, and
-        // what it raises must still be able to appear.
-        .alert("Higher refresh rate?", isPresented: $showPerfWarning) {
-            Button("Cancel", role: .cancel) {}
-            Button("Turn On") { highPerf = true }
-        } message: {
-            Text("Holding a high refresh rate keeps the display working harder the whole time BitChord is open, and the battery drains faster for it. Turn it on anyway?")
-        }
-        .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
-            if case .success(let url) = result {
-                LocalLibrary.shared.scanPicked(url)
-                localFolderName = SettingsView.storedLocalFolderName()
-                    ?? url.lastPathComponent
+            .fileImporter(isPresented: $pickingFolder, allowedContentTypes: [.folder]) { result in
+                if case .success(let url) = result {
+                    LocalLibrary.shared.scanPicked(url)
+                    localFolderName = SettingsView.storedLocalFolderName()
+                        ?? url.lastPathComponent
+                }
             }
+            .sheet(item: $updateSheet) { release in
+                UpdateSheet(release: release)
+                    .environment(update)
+            }
+            .onAppear { consumeSettingsDeepLinkIfNeeded(using: proxy) }
+            .onChange(of: requestedSettingsPage) { _, _ in consumeSettingsDeepLinkIfNeeded(using: proxy) }
         }
-        .sheet(item: $updateSheet) { release in
-            UpdateSheet(release: release)
-                .environment(update)
+    }
+
+    private func consumeSettingsDeepLinkIfNeeded(using proxy: ScrollViewProxy) {
+        guard !requestedSettingsPage.isEmpty,
+              let section = SettingsSectionName.canonical(requestedSettingsPage)
+        else { return }
+        requestedSettingsPage = ""
+        search = ""
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation { proxy.scrollTo(section, anchor: .top) }
         }
     }
 
