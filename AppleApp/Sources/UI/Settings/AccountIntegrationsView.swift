@@ -12,6 +12,7 @@ struct AccountIntegrationsView: View {
     @Environment(PlaybackController.self) private var controller
     @Binding var loginPresented: Bool
     @Binding var discordPresented: Bool
+    @State private var showingSignOutConfirmation = false
 
     @State private var lastFmUser = PlatformSettings.shared.getString(key: "lastfm_username", default: "")
     @State private var lastFmSession = PlatformSettings.shared.getSecret(key: "lastfm_session") ?? ""
@@ -120,7 +121,9 @@ struct AccountIntegrationsView: View {
 
             if auth.signedIn {
                 Section {
-                    Button("Sign Out", role: .destructive, action: auth.signOut)
+                    Button("Sign Out", role: .destructive) {
+                        showingSignOutConfirmation = true
+                    }
                 }
             }
 
@@ -305,6 +308,16 @@ struct AccountIntegrationsView: View {
             scrobblePercent: $scrobblePercent,
             scrobbleMax: $scrobbleMax
         ))
+        .confirmationDialog(
+            "Sign Out",
+            isPresented: $showingSignOutConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Sign Out", role: .destructive, action: auth.signOut)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the shared session from iCloud Keychain. Devices that already adopted it may remain signed in.")
+        }
         .onAppear {
             lastFmUser = PlatformSettings.shared.getString(key: "lastfm_username", default: "")
             lastFmSession = PlatformSettings.shared.getSecret(key: "lastfm_session") ?? ""

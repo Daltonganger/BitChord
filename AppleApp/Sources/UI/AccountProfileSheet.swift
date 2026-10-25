@@ -145,7 +145,7 @@ struct AccountProfileSheet: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Signing out removes your saved YouTube Music session from this device.")
+                Text("Signing out removes the shared session from iCloud Keychain. Devices that already adopted it may remain signed in.")
             }
         }
         #if os(iOS)
