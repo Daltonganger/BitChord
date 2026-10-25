@@ -17,9 +17,16 @@ object SimpMusicLyrics {
 
     suspend fun lyrics(videoId: String, durationMs: Long): List<LyricLineDto>? {
         if (videoId.isBlank()) return null
-        val body = runCatching { Http.getText(BASE + videoId, timeoutMillis = 8_000) }.getOrNull()
+        val response = runCatching { Http.getRaw(BASE + videoId, timeoutMillis = 8_000) }.getOrNull()
             ?: return null
-        return parse(body, durationMs)
+        return parseResponse(response, durationMs)
+    }
+
+    /** Keep a provider-wide 403 distinct from a track miss so the UI can explain it. */
+    internal fun parseResponse(response: com.music.bitchord.data.http.RawHttpText, durationMs: Long): List<LyricLineDto>? {
+        if (response.status == 403) throw SimpMusicBlockedException()
+        if (response.status !in 200..299) return null
+        return response.body?.let { parse(it, durationMs) }
     }
 
     /**
@@ -92,3 +99,5 @@ object SimpMusicLyrics {
         fun seconds(): Int = durationSeconds ?: duration ?: 0
     }
 }
+
+internal class SimpMusicBlockedException : IllegalStateException("Provider blocks third-party apps")

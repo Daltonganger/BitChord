@@ -16,6 +16,10 @@ import com.music.bitchord.data.lyrics.LyricsSource
 import com.music.bitchord.data.lyrics.normalizePaxSenixApiKey
 import com.music.bitchord.data.remote.WebDavConfig
 
+/** Providers enabled for a fresh install; explicit saved choices are handled separately. */
+internal fun defaultEnabledLyricsSources(): Set<LyricsSource> =
+    LyricsSource.entries.filter { it != LyricsSource.SIMP_MUSIC }.toSet()
+
 /**
  * The stream ceiling for a connection, and — via [permits] — which sources that
  * ceiling is willing to pay for.
@@ -1291,20 +1295,29 @@ object AppSettings {
     const val MAX_PINNED_PLAYLISTS = 5
 
     private const val OLD_LYRICS_DEFAULT = "BETTER,PLUS,SIMP,LRCLIB"
+    private const val UNCONFIGURED_LYRICS_SOURCES = "\u0000unconfigured"
 
     /** Every source name this build has offered; see [adoptNewLyricsSources]. */
     private const val KEY_LYRICS_KNOWN_SOURCES = "lyrics_known_sources"
 
     private fun defaultLyricsSourcesJoined(): String =
-        LyricsSource.entries.joinToString(",") { it.name }
+        LyricsSource.entries.filter { it in defaultEnabledLyricsSources() }.joinToString(",") { it.name }
 
     private fun readLyricsSourcesPref(): String {
-        val stored = settings.getString("lyrics_sources", defaultLyricsSourcesJoined())
-        if (stored == OLD_LYRICS_DEFAULT) {
-            val all = defaultLyricsSourcesJoined()
-            settings.putString("lyrics_sources", all)
+        val stored = settings.getString("lyrics_sources", UNCONFIGURED_LYRICS_SOURCES)
+        if (stored == UNCONFIGURED_LYRICS_SOURCES) {
+            val defaults = defaultLyricsSourcesJoined()
+            settings.putString("lyrics_sources", defaults)
             markLyricsSourcesKnown()
-            return all
+            return defaults
+        }
+        if (stored == OLD_LYRICS_DEFAULT) {
+            // This exact value was the old built-in default, not an explicit
+            // choice. New defaults omit the provider-wide third-party block.
+            val defaults = defaultLyricsSourcesJoined()
+            settings.putString("lyrics_sources", defaults)
+            markLyricsSourcesKnown()
+            return defaults
         }
         val migrated = persistLyricsSources(stored)
         if (migrated != stored && stored.isNotEmpty()) settings.putString("lyrics_sources", migrated)
@@ -1331,7 +1344,7 @@ object AppSettings {
             .split(",").mapNotNull { LyricsSource.fromName(it) }.toSet()
         val everything = LyricsSource.entries.toSet()
         if (known.containsAll(everything)) return current
-        val fresh = everything - known
+        val fresh = (everything - known) - LyricsSource.SIMP_MUSIC
         val enabled = parseLyricsSources(current) + fresh
         val joined = enabled.joinToString(",") { it.name }
         settings.putString("lyrics_sources", joined)
@@ -1361,7 +1374,7 @@ object AppSettings {
 
     private fun parseLyricsSources(raw: String): Set<LyricsSource> {
         if (raw.isBlank()) return emptySet()
-        if (raw == OLD_LYRICS_DEFAULT) return LyricsSource.entries.toSet()
+        if (raw == OLD_LYRICS_DEFAULT) return defaultEnabledLyricsSources()
         return raw.split(",").mapNotNull { LyricsSource.fromName(it) }.toSet()
     }
 

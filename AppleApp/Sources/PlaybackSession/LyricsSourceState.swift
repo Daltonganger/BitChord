@@ -17,12 +17,14 @@ enum LyricsSourceState {
     case fetching
     case found
     case notFound
+    case blocked
 
     init(_ shared: LyricsBridge.LyricsProviderState) {
         switch shared {
         case .fetching: self = .fetching
         case .found: self = .found
         case .notFound: self = .notFound
+        case .blocked: self = .blocked
         default: self = .notFetched
         }
     }
