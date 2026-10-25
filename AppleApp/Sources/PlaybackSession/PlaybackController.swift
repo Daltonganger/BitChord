@@ -856,9 +856,11 @@ final class PlaybackController {
         let selection = playGeneration
         let intent = resumeGeneration
         let engine = self.engine
+        let sessionWasActive = AudioSessionManager.isActive
         Task.detached(priority: .userInitiated) { [weak self] in
+            let sessionFormat: AudioSessionManager.Format?
             do {
-                _ = try await AudioSessionManager.activate()
+                sessionFormat = try await AudioSessionManager.activate()
             } catch {
                 await MainActor.run { [weak self] in
                     guard let self, self.playGeneration == selection,
@@ -873,7 +875,14 @@ final class PlaybackController {
                 do {
                     try engine.setLoudnessMode(mode: self.routeAwareLoudnessMode)
                     try engine.setBitPerfectEnabled(enabled: self.effectiveBitPerfectOutput)
-                    if self.dolbyRenderer == nil { try engine.requestOutputRebuild(force: true) }
+                    if self.dolbyRenderer == nil {
+                        if Self.routeEventKeepsOutput(engine.outputDevice(), session: sessionFormat,
+                                                      sessionWasActive: sessionWasActive) {
+                            self.debugLog.record("route event kept the rebuilt output")
+                        } else {
+                            try engine.requestOutputRebuild(force: true)
+                        }
+                    }
                     if returnedFromBluetooth, let entry = self.current {
                         QualityUpgrade.resetAutomaticAttemptForRoute(entry.id)
                         self.lookForBetterCopy(entry, codec: self.nerd?.codec ?? "", kbps: self.nerd?.kbps ?? 0)
@@ -884,6 +893,30 @@ final class PlaybackController {
                 }
             }
         }
+    }
+
+    /// Whether a route event's second, forced rebuild would only repeat the one
+    /// the engine already made.
+    ///
+    /// On iOS the engine hears every route event from CoreAudio and rebuilds the
+    /// unit itself. This handler's own rebuild exists for the session: a unit
+    /// built while the session was down is never pulled. When the session stayed
+    /// up and the rebuilt unit already matches its format, a second rebuild only
+    /// throws the buffered audio away and seeks back again — twice per event in a
+    /// burst of them, which is what AirPods hopping between devices on a
+    /// notification sounded like: the music all but stopping, over and over.
+    ///
+    /// macOS keeps its rebuild: there the event is a default-device change the
+    /// engine does not see on its own.
+    nonisolated static func routeEventKeepsOutput(
+        _ output: OutputDeviceRec, session: AudioSessionManager.Format?, sessionWasActive: Bool
+    ) -> Bool {
+        #if os(iOS)
+        guard sessionWasActive, output.started, let session else { return false }
+        return Double(output.sampleRate) == session.rate && output.channels == session.channels
+        #else
+        return false
+        #endif
     }
 
     /// How far down a duck goes: −16 dB.
