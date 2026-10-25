@@ -100,9 +100,9 @@ fn automix_corpus_scorecard() {
     let mut bridged = 0usize;
     let style_names = [
         "equal_power", "dj_filter", "dj_blend", "gapless", "echo_out", "loop_roll",
-        "reverb_wash", "drop_cut",
+        "reverb_wash", "drop_cut", "texture", "brake",
     ];
-    let mut style_histogram = [0usize; 8];
+    let mut style_histogram = [0usize; 10];
     let mut unclassified = 0usize;
     println!("automix corpus: {pairs} pairs from {} files", files.len());
     // The corpus is one session in a row, paced as the app paces it
@@ -247,6 +247,30 @@ fn automix_corpus_scorecard() {
         unclassified, 0,
         "automix corpus contains a real transition without a classified winner record"
     );
+    assert_eq!(pairs, 50, "automix corpus must contain exactly 50 analyzed pairs");
+    {
+        let busiest = style_histogram.iter().copied().max().unwrap_or(0);
+        assert!(
+            busiest * 10 <= pairs * 3,
+            "automix style concentration {busiest}/{pairs} exceeds 30%: {style_histogram:?}"
+        );
+        // The sampled set has almost no energetic-drop pairs; DropCut is
+        // covered by its planner and render unit tests instead.
+        for technique in [
+            "echo_out",
+            "loop_roll",
+            "reverb_wash",
+            "texture",
+            "brake",
+        ] {
+            let count = style_names
+                .iter()
+                .position(|name| *name == technique)
+                .map(|index| style_histogram[index])
+                .unwrap_or(0);
+            assert!(count > 0, "automix corpus did not exercise {technique}");
+        }
+    }
     // A′3 turns these into gates; A′2 reports them. The cached files are
     // Opus-in-MP4 and the Rust analyser does not decode every one, so an
     // unusable pair is reported, not asserted.

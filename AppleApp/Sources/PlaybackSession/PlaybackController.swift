@@ -164,7 +164,7 @@ final class PlaybackController {
 
         private static func isEffect(_ style: TransitionStyleRec) -> Bool {
             switch style {
-            case .echoOut, .loopRoll, .reverbWash, .dropCut: return true
+            case .echoOut, .loopRoll, .reverbWash, .dropCut, .texture, .brake: return true
             case .equalPower, .djFilter, .djBlend, .gapless: return false
             }
         }

@@ -29,6 +29,8 @@ pub enum TransitionStyleRec {
     LoopRoll,
     ReverbWash,
     DropCut,
+    Texture,
+    Brake,
 }
 
 impl From<TransitionStyleRec> for TransitionStyle {
@@ -42,6 +44,8 @@ impl From<TransitionStyleRec> for TransitionStyle {
             TransitionStyleRec::LoopRoll => TransitionStyle::LoopRoll,
             TransitionStyleRec::ReverbWash => TransitionStyle::ReverbWash,
             TransitionStyleRec::DropCut => TransitionStyle::DropCut,
+            TransitionStyleRec::Texture => TransitionStyle::Texture,
+            TransitionStyleRec::Brake => TransitionStyle::Brake,
         }
     }
 }
@@ -161,6 +165,8 @@ impl From<TransitionPlan> for TransitionPlanRec {
                 TransitionStyle::LoopRoll => TransitionStyleRec::LoopRoll,
                 TransitionStyle::ReverbWash => TransitionStyleRec::ReverbWash,
                 TransitionStyle::DropCut => TransitionStyleRec::DropCut,
+                TransitionStyle::Texture => TransitionStyleRec::Texture,
+                TransitionStyle::Brake => TransitionStyleRec::Brake,
             },
             bass_swap: plan.bass_swap,
             bass_swap_fraction: plan.bass_swap_fraction,
