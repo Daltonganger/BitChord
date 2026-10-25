@@ -236,7 +236,10 @@ extension PlaybackController {
         if userInitiated { noteLocalIntent() }
         guard !queue.isEmpty else { return }
         let target: Int
-        if playingIndex + 1 < queue.count {
+        if let next = nextPlayableIndex(after: playingIndex) {
+            target = next
+        } else if userInitiated, playingIndex + 1 < queue.count {
+            // Asked for by name: a stepped-over track still gets its ask.
             target = playingIndex + 1
         } else if repeatMode == .all {
             target = 0

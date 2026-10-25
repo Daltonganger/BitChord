@@ -16,12 +16,17 @@ import kotlin.coroutines.resume
 /** Native WebKit attestation, matching upstream's hidden BotGuard WebView. */
 @OptIn(ExperimentalAtomicApi::class)
 object PlaybackTokenBridge {
-    interface Provider { fun generate(videoId: String, visitorData: String, callback: TokenCallback) }
+    interface Provider {
+        fun generate(videoId: String, visitorData: String, callback: TokenCallback)
+        /** Forget the minter, so the next token comes from a fresh challenge. */
+        fun invalidate()
+    }
     fun interface TokenCallback { fun onResult(playerToken: String?, streamingToken: String?) }
     fun interface ChallengeCallback { fun onResult(json: String?, message: String?) }
     private val native = AtomicReference<Provider?>(null)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     fun register(provider: Provider) { native.store(provider) }
+    fun invalidate() { native.load()?.invalidate() }
     internal fun tokenProvider(): TokenProvider = object : TokenProvider {
         override val capabilities: TokenProviderCapabilities
             get() = if (native.load() == null) TokenProviderCapabilities() else

@@ -1,7 +1,13 @@
 package com.music.bitchord.data.innertube
 import com.music.bitchord.data.DebugLog
 import com.music.bitchord.data.http.ProbeResult
+import com.music.bitchord.data.http.Http
 import com.music.bitchord.data.http.RawHttpBytes
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.contentType
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import kotlin.concurrent.atomics.AtomicReference
@@ -11,6 +17,7 @@ import kotlin.time.TimeSource
 import kotlin.time.Duration.Companion.seconds
 
 /** Maintained upstream extraction, with account-scoped coalescing and short-lived media URLs. */
+@OptIn(ExperimentalAtomicApi::class)
 object StreamResolver {
     data class ResolvedStream(val url: String, val kbps: Int, val mimeType: String,
                               val headers: Map<String, String>, val loudnessDb: Double? = null,
@@ -26,9 +33,20 @@ object StreamResolver {
         val generation = Innertube.sessionGeneration
         val key = "$generation|$videoId|$maxKbps"
         recent.snapshot()[key]?.takeIf { it.at.elapsedNow() < 20.seconds }?.let { return it.stream }
+        botCheckedUntil.load()?.takeIf { it.hasNotPassedNow() }?.let { throw BotCheckException() }
         val candidate = scope.async(start = CoroutineStart.LAZY) {
             Innertube.checkSession(generation)
-            val stream = extraction(videoId, maxKbps) ?: error("No playable stream for $videoId")
+            val stream = try {
+                extraction(videoId, maxKbps)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (isBotChecked(videoId)) throw BotCheckException()
+                throw e
+            } ?: run {
+                if (isBotChecked(videoId)) throw BotCheckException()
+                error("No playable stream for $videoId")
+            }
             Innertube.checkSession(generation)
             // Validate on the first bounded media range, which is also the
             // first request capable of producing sound. A separate probe
@@ -64,8 +82,53 @@ object StreamResolver {
             abandoned?.cancel()
         }
     }
+    /**
+     * YouTube's "Sign in to confirm you're not a bot": a verdict on the network
+     * address, not on any track. Every client gets it, so walking clients,
+     * rebuilding the session or trying another copy only adds traffic from an
+     * address already under suspicion. It is told apart from an ordinary miss
+     * by one anonymous player request, and then nothing more is asked of
+     * YouTube for [BOT_CHECK_BACKOFF] — a network change or a little patience
+     * is what clears it.
+     */
+    class BotCheckException : IllegalStateException(
+        "YouTube asks this network to sign in to confirm it is not a bot"
+    )
+    private val botCheckedUntil = AtomicReference<TimeMark?>(null)
+    private val BOT_CHECK_BACKOFF = 120.seconds
+
+    private suspend fun isBotChecked(videoId: String): Boolean {
+        val reason = try {
+            val body = Http.client.post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false") {
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("videoId", videoId)
+                    putJsonObject("context") {
+                        putJsonObject("client") {
+                            put("clientName", "ANDROID_VR")
+                            put("clientVersion", "1.65.10")
+                            put("androidSdkVersion", 32)
+                            put("hl", "en")
+                        }
+                    }
+                }.toString())
+            }.bodyAsText()
+            (Json.parseToJsonElement(body).jsonObject["playabilityStatus"] as? JsonObject)
+                ?.get("reason")?.jsonPrimitive?.contentOrNull.orEmpty()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            return false
+        }
+        if (!reason.contains("not a bot", ignoreCase = true)) return false
+        botCheckedUntil.store(TimeSource.Monotonic.markNow() + BOT_CHECK_BACKOFF)
+        DebugLog.w("YouTube is bot-checking this network; not asking again for ${BOT_CHECK_BACKOFF.inWholeSeconds}s")
+        return true
+    }
+
     fun onSessionChanged() {
         inFlight.snapshot().values.forEach { it.job.cancel() }; inFlight.clear(); recent.clear()
+        botCheckedUntil.store(null)
         DebugLog.d("session changed; cleared upstream resolver flights and media URLs")
     }
     fun onPlaybackRefused(url: String, responseCode: Int) {
@@ -73,6 +136,12 @@ object StreamResolver {
         recent.update { map -> map.entries.removeAll { it.value.stream.url == url } }
         UpstreamPlaybackExtractor.onRefused(url)
         DebugLog.w("served media URL refused; next resolution will use fresh upstream extraction")
+    }
+    /** See [UpstreamPlaybackExtractor.rebuildSession]; also drops this track's remembered URLs. */
+    suspend fun rebuildSession(videoId: String) {
+        recent.update { map -> map.entries.removeAll { it.key.split("|").getOrNull(1) == videoId } }
+        UpstreamPlaybackExtractor.rebuildSession(videoId)
+        DebugLog.w("$videoId: every client refused; rebuilt the extraction session")
     }
     fun onFirstRangeRejected(url: String, responseCode: Int, excludeClient: Boolean) {
         recent.update { map -> map.entries.removeAll { it.value.stream.url == url } }

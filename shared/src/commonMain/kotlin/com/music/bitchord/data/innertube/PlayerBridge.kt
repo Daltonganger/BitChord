@@ -102,6 +102,17 @@ object PlayerBridge {
         StreamResolver.onPlaybackRefused(url, responseCode)
     }
 
+    fun interface DoneCallback { fun onDone() }
+
+    /** Rebuild the extraction session for a track every client refused; [callback] fires when it is done. */
+    fun rebuildSession(videoId: String, callback: DoneCallback) {
+        bridgeScope.launch {
+            try { StreamResolver.rebuildSession(videoId) }
+            catch (e: Throwable) { DebugLog.e("session rebuild failed for $videoId", e) }
+            finally { callback.onDone() }
+        }
+    }
+
     /**
      * The track's AVC/MP4 video side (O9), or a payload with a null `url` when
      * the track has none — an art track or a video-only-in-WebM upload. That is

@@ -31,6 +31,11 @@ final class ApplePoTokenProvider: NSObject, PlaybackTokenBridgeProvider, WKNavig
         }
     }
 
+    /// The next token is minted from a fresh challenge rather than the cached minter.
+    nonisolated func invalidate() {
+        Task { @MainActor in self.expires = .distantPast }
+    }
+
     private final class Completion {
         private var callback: (any PlaybackTokenBridgeTokenCallback)?
         init(_ callback: any PlaybackTokenBridgeTokenCallback) { self.callback = callback }

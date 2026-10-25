@@ -92,6 +92,27 @@ internal object UpstreamPlaybackExtractor {
                 ?.let { runCatching { it.refreshAfterStreamRejection() } }
         }
     }
+    /**
+     * Starts extraction over for [videoId]: a new player config, cipher and
+     * PoToken binding, with the clients that refused this track forgiven.
+     *
+     * For when every client refused the same track within seconds. That is far
+     * more often a session that has fallen out of favour (a stale player config,
+     * a token bound to an old challenge) than a track that cannot play, and the
+     * clients it refused deserve one more ask once the session is new.
+     */
+    suspend fun rebuildSession(videoId: String) {
+        lock.withLock {
+            session?.let { it.innerTube.close(); it.cipher.dispose() }
+            session = null
+        }
+        while (true) {
+            val old = excluded.load()
+            val next = old.filterKeys { it.split(":").getOrNull(1) != videoId }
+            if (excluded.compareAndSet(old, next)) break
+        }
+        PlaybackTokenBridge.invalidate()
+    }
     private val lock = Mutex()
     private var session: Session? = null
     private val logger = InnerTubeLogger { event ->
