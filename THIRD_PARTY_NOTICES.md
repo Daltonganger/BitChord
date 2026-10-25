@@ -1,115 +1,45 @@
 # Third-party notices
 
-BitChord's root project is distributed under GPLv3. See [LICENSE](LICENSE). The pinned
-Android source submodule at `vendor/bitchord-upstream` carries its own GPLv3 license and
-per-file notices.
+BitChord for Apple platforms is derived from the Android project [BitChord by Kushagra Singh](https://github.com/kushagrasinghx/BitChord), pinned at `fe198ac` in the `vendor/bitchord-upstream` submodule. The port, Apple-specific implementation, and original additions are Copyright © 2026 Martin BAGUMA. Upstream per-file notices and the upstream GPLv3 license remain in force for material derived from that project.
 
-## Existing Orchard-derived code
+This inventory describes software and resources included in the Apple app or linked into its frameworks. Development-only test dependencies, build tools, and the uninitialized source-comparison submodule are not runtime app dependencies. The app packages the files in `AppleApp/Resources/AudioLicenses/`; full license texts and source-level notices are also retained in the locations below.
 
-Some analyzer files are ported from Orchard under AGPLv3-or-later. Their source headers
-identify the affected files and authors. The complete AGPLv3 text is in
-[`LICENSES/AGPL-3.0.txt`](LICENSES/AGPL-3.0.txt). GPLv3 section 13 permits the combination
-with AGPLv3 code and applies AGPL section 13's network-interaction terms to the combined
-work. The GPLv3 text is in [LICENSE](LICENSE).
+## Main project and derived code
 
-## Automix ONNX models
+- The project is licensed under GPLv3; the complete text is [`LICENSE`](LICENSE).
+- `vendor/innertubex` is vendored at revision `a6ca8cb76e9c347d4f21824ca9f19b9db2e5aebd`. It is GPLv3. Its solver dependency notices are reproduced in the bundled JavaScript resource and in `AppleApp/Resources/AudioLicenses/yt-ejs-dependencies.txt`.
+- Files ported from Orchard in `native-core/src/analyzer/` retain their source headers and AGPL-3.0-or-later terms. [`LICENSES/AGPL-3.0.txt`](LICENSES/AGPL-3.0.txt) contains the license text. AGPLv3 section 13 permits combining AGPLv3-covered code with GPLv3 code into one work: the AGPL terms continue to govern the Orchard-derived part, and the combined work's GPLv3 part remains under GPLv3. Section 13 also describes source access for remote network interaction when that condition applies.
+- `native-core/src/sound.rs` ports clarity-filter specifications and preset stage trims from LastWave-native, revision `ec11a430fcf6e7f06bbae450e768d48f1d97d161`; the source header records the attribution. Its GPLv3 license text is bundled as `AppleApp/Resources/AudioLicenses/Lastwave-license.txt`.
+- The lyrics animation credit to `binimum/am-lyrics` is preserved from upstream. No separate am-lyrics source or asset is packaged by this Apple port.
 
-Automix uses two neural graphs, both open-licensed:
+## Runtime dependency inventory
 
-- **Beat + downbeat** is downloaded at first run from the app's release asset
-  `model-beat-this-final0-v1` (23,478,460 B, sha256 `9f10e5ef…f85cb`). It is a dynamic int8
-  quantization of CPJKU's Beat This! `final0` checkpoint, MIT licensed
-  (<https://github.com/CPJKU/beat_this>). The provenance is recorded in
-  `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`.
-- **Vocal detection** is bundled in the app at
-  `AppleApp/Resources/Models/vocals_umxhq_int8.onnx` (23,209,009 B, sha256
-  `7eba6bebce0cc2e2d3b5c0e490a8074e66ce27f64170c6802b245740dcaf21ef`). It is exported from
-  the official sigsep **open-unmix** `umxhq` vocals checkpoint (MIT; Stöter & Liutkus,
-  Inria/SigSep; Zenodo record 3370489, file `vocals-b62c91ce.pth`, sha256
-  `b62c91cedbc7a066f1778ead5b5cecb377aa3a46a31af1cce7c5c8769339d083`). The export uses
-  torch 2.8 and opset 17 with standard ONNX LSTM ops, then dynamic int8 quantization of
-  MatMul/Gemm only; the LSTMs stay float. The Rust front end in
-  `native-core/src/analyzer/vocal.rs` speaks its `[1, 2, 2049, 960]` magnitude-spectrogram
-  contract. The graph ships inside the app, not as a download.
+| Shipped component | Source / version | License and retained text |
+| --- | --- | --- |
+| InnerTubeX YouTube Music client | Vendored source revision above | GPLv3; `vendor/innertubex/LICENSE` |
+| InnerTubeX YouTube player solver | yt-dlp/ejs 0.8.0; bundled JavaScript runs locally in JavaScriptCore | Core: Unlicense; `yt.solver.lib.min.js` bundles meriyah (ISC) and astring (MIT). Full notices: `AppleApp/Resources/AudioLicenses/yt-ejs-dependencies.txt`; source notices also appear in the JS file. |
+| Sparkle updater (macOS only) | Sparkle 2.10.0, pinned in `AppleApp/BitChord.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved` | MIT plus included external notices; the complete upstream notice is in `AppleApp/Resources/AudioLicenses/Sparkle-LICENSE.txt`. |
+| Shared Kotlin framework | Kotlin Multiplatform and kotlinx serialization/coroutines 1.11.0; Ktor 3.5.2; KMP-NativeCoroutines 1.0.5; QuickJS-KT 1.0.14 | Apache-2.0; package versions and source sets are listed in `shared/build.gradle.kts` and `vendor/innertubex/build.gradle.kts`. The license text is bundled in `AppleApp/Resources/AudioLicenses/Apache-2.0.txt`; package-specific copyright notices remain with the dependency source distributions. |
+| Rust native audio framework | `native-core/Cargo.lock` | The lockfile pins the full graph. Runtime direct dependencies include CPAL 0.18.2; objc2 CoreAudio/CoreFoundation 0.3.2; Symphonia 0.6.1; its Opus adapter 0.3.0 and opusic-sys/libopus 0.7.5; UniFFI 0.32.0; Lofty 0.25.1; ureq 2.x; rten 0.26.0; and ebur128 0.1.10. Transitive packages retain their package-specific source notices. Selected texts are in `LICENSES/third-party/` and `AppleApp/Resources/AudioLicenses/`. |
+| libsoxr resampler | Vendored libsoxr 0.1.3 | LGPL-2.1-or-later; `AppleApp/Resources/AudioLicenses/libsoxr-LGPL-2.1.txt`, `libsoxr-notice.txt`, and source `native-core/vendor/soxr-0.1.3/`. The Rust build statically links it; distributors must provide the relinkable application materials and installation information required by LGPL-2.1. |
+| EBU R128 measurement | ebur128 0.1.10, pinned in Cargo.lock | MIT; `AppleApp/Resources/AudioLicenses/ebur128-MIT.txt`. |
 
-## Native audio dependencies
+`native-core/Cargo.lock` pins the Rust dependency graph; crates declare their own license expressions in package metadata and source notices, not in the lockfile. A Cargo metadata resolution for `aarch64-apple-darwin` covered 101 third-party crates. Where a crate offers an `OR` choice, this inventory selects MIT or Apache-2.0; conjunctive terms remain applicable. The selected expression set includes MIT, Apache-2.0, ISC, BSD-3-Clause, MPL-2.0, Unicode-3.0, CDLA-Permissive-2.0, and Zlib. The Apple-targeted graph includes Unicode data, `webpki-roots` 0.26.11 and 1.0.9 under CDLA-Permissive-2.0, and zlib-rs 0.6.7 under the zlib License. Their full texts are bundled in `AppleApp/Resources/AudioLicenses/Cargo-data-licenses.txt` (the ISC terms also appear with the bundled solver dependencies). MPL-2.0-covered Symphonia and UniFFI files remain MPL-covered within the larger GPLv3 work; the full text is in `LICENSES/third-party/MPL-2.0-Symphonia.txt` and `AppleApp/Resources/AudioLicenses/MPL-2.0.txt`. The Opus adapter's selected MIT option and libopus BSD-3-Clause notice are in `LICENSES/third-party/MIT-Symphonia-Opus-Adapter.txt` and `BSD-3-Clause-Opus.txt`. CPAL's Apache-2.0 notice is in `LICENSES/third-party/Apache-2.0-CPAL.txt`; the selected MIT notice for objc2 is in `LICENSES/third-party/MIT-objc2.txt` (the upstream project notes that Apple SDK terms can also apply to SDK-derived bindings). The native framework statically links libsoxr; the repository keeps its full source, build scripts, and pinned dependency specifications so the relinkable application materials can be rebuilt with `scripts/build-native-core.sh` and the Apple app build. The applicable texts are also included in the app's `AudioLicenses` resources.
 
-`native-core/Cargo.lock` pins the Rust dependency graph. A Cargo metadata scan on
-2026-09-28 found 282 registry packages with declared SPDX license expressions and none
-without a declared license. The direct runtime dependencies include:
+Ktor, Kotlin, kotlinx, QuickJS-KT, and other transitive dependencies have their own upstream package notices. Their development/test-only artifacts are not included in the shipped Apple framework. The app's source manifests and pinned version files identify the selected release graph; check each package's license metadata and source notice when updating a dependency.
 
-| Package | Version | Declared license |
-| --- | ---: | --- |
-| cpal | 0.18.2 | Apache-2.0 |
-| objc2-core-audio, objc2-core-audio-types | 0.3.2 | Zlib OR Apache-2.0 OR MIT; BitChord uses MIT |
-| Symphonia | 0.6.1 | MPL-2.0 |
-| Symphonia Opus adapter | 0.3.0 | MIT OR Apache-2.0; BitChord uses the MIT option |
-| libopus via opusic-sys | 0.7.5 | BSD-3-Clause |
-| UniFFI | 0.32.0 | MPL-2.0 |
-| ureq, Lofty, rten, crossbeam-channel, rtrb, log, env_logger | pinned in Cargo.lock | MIT, Apache-2.0, or both |
+## Models and network-provided resources
 
-The selected notices are included under [`LICENSES/third-party`](LICENSES/third-party):
-Apache-2.0 for CPAL, MIT for the CoreAudio bindings and Opus adapter, and the
-BSD-3-Clause Opus notice for the bundled decoder. MPL-2.0 applies to Symphonia and
-UniFFI. Symphonia and UniFFI remain MPL-covered files within the GPLv3
-larger work; keep their MPL notices and meet the MPL source-form requirements when
-distributing. MPL 2.0 section 3.3 permits distribution in a GPLv3 larger work under both
-licenses when its secondary-license conditions are met. The Opus adapter builds its
-bundled C library through CMake; CMake must be available on `PATH` when building
-`native-core`.
+- **Beat This! beat/downbeat model:** downloaded on demand from the release asset `model-beat-this-final0-v1`; dynamic int8 quantization of CPJKU's `final0` checkpoint, MIT. The model is optional and is not bundled. Provenance and digest are recorded in `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`.
+- **open-unmix vocal model:** bundled as `AppleApp/Resources/Models/vocals_umxhq_int8.onnx`; derived from the MIT-licensed official SigSep `umxhq` vocals checkpoint by Stöter and Liutkus (Zenodo record 3370489, original file `vocals-b62c91ce.pth`). Export and digest details are documented in `AppleApp/Sources/PlaybackSession/AutomixModelStore.swift`. The MIT license text is [`AppleApp/Resources/AudioLicenses/MIT-Model-Weights.txt`](AppleApp/Resources/AudioLicenses/MIT-Model-Weights.txt).
+- The app bundles software and analysis models, not third-party music or song audio.
 
-The CoreAudio bindings are from the [`objc2` project](https://github.com/madsmtm/objc2).
-Its upstream license statement notes that the bindings are derived from Apple SDKs and
-that the Xcode SDK license may also apply; see the upstream license text before
-redistributing Apple-targeted builds.
+## Icons, artwork, and translations
 
-## LastWave-native review
+- Settings icon assets include Material Icons Rounded, Apache-2.0 (`AppleApp/Resources/AudioLicenses/material-icons.txt`), and Phosphor Icons, MIT (`AppleApp/Resources/AudioLicenses/PhosphorIcons-MIT.txt`). The custom frame-rate/performance icons and Dolby mark adapted from upstream remain subject to upstream notices; Dolby is a trademark of Dolby Laboratories.
+- `AppleApp/Resources/Localization/Localizable.xcstrings` contains translations carried over from upstream where the English source strings match. The strings remain part of the GPLv3-derived project and are attributed to the upstream project above.
+- The app does not bundle custom font files. Cover exports and device-frame mockups under `artwork/` are repository documentation/marketing assets, not app resources. Their asset provenance and Hoverify usage limits are documented in [`artwork/Sources.md`](artwork/Sources.md).
 
-LastWave-native's [LICENSE](https://github.com/Clash-Projects/LastWave-native/blob/main/LICENSE)
-is GPLv3, which is compatible with BitChord's GPLv3 project license. No LastWave source
-files were copied into this change. The new Opus decoder comes from the separately listed
-Symphonia adapter and libopus dependencies.
+## In-app acknowledgements
 
-This file records the Rust dependency metadata and the licenses relevant to the current
-native-audio changes. It is not a replacement for the source notices, build inputs, or
-license inventory belonging to the Android submodule and its platform-specific dependency
-graph.
-
-## Lastwave clarity specifications
-
-`native-core/src/sound.rs` ports the Reference clarity filter specifications and
-preset stage trims from Clash-Projects/LastWave-Native, revision
-`ec11a430fcf6e7f06bbae450e768d48f1d97d161`, `app/src/main/cpp/DspProcessor.cpp`.
-Lastwave is licensed under GPLv3. Its full license is bundled in
-`AppleApp/Resources/AudioLicenses/Lastwave-license.txt`. BitChord adds four-times
-oversampling for the exciter and separate persistent lookahead protection.
-
-## SoX Resampler (libsoxr)
-
-Pinned libsoxr 0.1.3, copyright 2007–2018 Rob Sykes
-<robs@users.sourceforge.net>, distributed under LGPL-2.1-or-later.
-Source archive SHA-256:
-`db6ca1b1e8405c6ef92f8294fc123d910abf0a114003b3f0f13fa57a95fd62d0`.
-Complete source and notices are in `native-core/vendor/soxr-0.1.3`;
-`COPYING.LGPL` and `LICENCE` are bundled in `AppleApp/Resources/AudioLicenses`.
-The source release includes the application's Rust, Swift and Kotlin sources,
-build scripts and pinned dependency specifications, allowing modified libsoxr
-to be rebuilt and relinked using `scripts/build-native-core.sh` followed by the
-Apple app build. Distributors of static binaries must provide the corresponding
-relinkable application materials and installation information required by LGPL.
-The bundled FFT implementation's notices remain in its source files.
-
-## EBU R128 loudness measurement
-
-`ebur128` 0.1.10 (pinned in Cargo.lock) implements gated integrated loudness
-and true-peak measurement for completed local audio. It is distributed under
-the MIT license; its complete notice is bundled in
-`AppleApp/Resources/AudioLicenses/ebur128-MIT.txt`.
-
-### Settings icons
-
-Settings uses Material Icons Rounded from Google's `material-design-icons`
-repository (Apache License 2.0), with the license bundled in
-`AppleApp/Resources/AudioLicenses/material-icons.txt`. BitChord's custom
-performance/frame-rate icons and the upstream Dolby mark are adapted from
-`vendor/bitchord-upstream`. The Dolby mark remains Dolby's trademark.
+Settings → About → **Open-source licenses** lists the shipped components and provides access to the corresponding license text and upstream notices. The same license files are available in the repository under `LICENSES/` and `AppleApp/Resources/AudioLicenses/`; individual source files retain their own copyright and license headers.

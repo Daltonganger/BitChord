@@ -233,6 +233,19 @@ extension SettingsView {
         rows.row("Developer", "developer", "author", "github") {
             Link("Developer", destination: URL(string: "https://github.com/bagumamartin")!)
         }
+        rows.row("Open-source licenses", "open source", "licenses", "license", "acknowledgements", "third party") {
+            PushLink {
+                LicenseAcknowledgementsView()
+            } label: {
+                SettingsLine(
+                    glyph: .sources,
+                    title: "Open-source licenses",
+                    subtitle: "Third-party software, models and asset notices"
+                ) {
+                    EmptyView()
+                }
+            }
+        }
         rows.row("Discord", "discord", "community", "chat") {
             Link("Discord", destination: URL(string: "https://discord.gg/pDdKfrdHY6")!)
         }
