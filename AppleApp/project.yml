@@ -146,6 +146,8 @@ targets:
         com.apple.security.files.user-selected.read-write: true
         com.apple.security.application-groups:
           - group.app.bitchord.BitChord
+        # iCloud key-value store: syncs the per-song lyrics provider choice (O1).
+        com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)$(CFBundleIdentifier)
   BitChordWidget:
     type: app-extension
     supportedDestinations: [iOS, macOS]
