@@ -1,6 +1,7 @@
 //! Reference libopus decoding with explicit stereo layout, header gain and
 //! bounded pre-skip spanning packets. Container trims and header pre-skip must
 //! not be applied twice.
+use super::pcm::copy_interleaved_f32;
 use super::DecodeError;
 use symphonia::core::{
     audio::{
@@ -82,7 +83,7 @@ impl AudioDecoder for OpusDecoder {
     fn decode_ref(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
         let decoded = self.inner.decode_ref(packet)?;
         let mut pcm = Vec::new();
-        super::copy_interleaved_f32(&decoded, &mut pcm);
+        copy_interleaved_f32(&decoded, &mut pcm);
         let count = self.params.channels.as_ref().unwrap().count();
         let frames = pcm.len() / count;
         for value in &mut pcm {
@@ -182,9 +183,9 @@ mod tests {
         let mut unity = OpusDecoder::open(&params(0, 0), true).unwrap();
         let mut boosted = OpusDecoder::open(&params(0, 1792), true).unwrap();
         let mut a = Vec::new();
-        super::super::copy_interleaved_f32(&unity.decode(&packet).unwrap(), &mut a);
+        super::super::pcm::copy_interleaved_f32(&unity.decode(&packet).unwrap(), &mut a);
         let mut b = Vec::new();
-        super::super::copy_interleaved_f32(&boosted.decode(&packet).unwrap(), &mut b);
+        super::super::pcm::copy_interleaved_f32(&boosted.decode(&packet).unwrap(), &mut b);
         let expected = 10f32.powf(7.0 / 20.0);
         assert!(a.iter().any(|v| v.abs() > 0.01));
         for (a, b) in a.into_iter().zip(b) {
