@@ -29,14 +29,150 @@ extension EnvironmentValues {
 /// the root and every pushed one: an inset on the stack itself reaches only
 /// its root page.
 struct MacPillInset: ViewModifier {
+    @State private var windowWidth: CGFloat = 0
+
     func body(content: Content) -> some View {
-        content.safeAreaInset(edge: .bottom, spacing: 0) {
-            PlaybackPill()
-                .frame(maxWidth: 940)
-                .padding(.horizontal, 18)
-                .padding(.bottom, 12)
-                .frame(maxWidth: .infinity)
+        GeometryReader { proxy in
+            let compact = windowWidth < 900 || (windowWidth > 0 && proxy.size.width > windowWidth - 120)
+            content.safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: compact ? 8 : 0) {
+                    if compact {
+                        MacCompactNavigationBar()
+                    }
+                    PlaybackPill()
+                        .frame(maxWidth: compact ? 620 : 940)
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 12)
+                        .frame(maxWidth: .infinity)
+                }
+                .frame(height: compact ? 112 : 88, alignment: .bottom)
+            }
+            .background(WindowWidthReader { windowWidth = $0 }.frame(width: 0, height: 0))
         }
+    }
+}
+
+/// Sidebar destinations stay reachable after the split view becomes too narrow
+/// to show its leading column. The playback pill remains directly below them.
+private struct MacCompactNavigationBar: View {
+    @Environment(AppModel.self) private var appModel
+    @SceneStorage("bitchord.selectedTab") private var selectedTab = AppModel.Tab.home.rawValue
+
+    private let tabs: [(AppModel.Tab, String, String)] = [
+        (.home, "Home", "house"),
+        (.explore, "Explore", "safari"),
+        (.library, "Library", "music.note.list"),
+        (.search, "Search", "magnifyingglass")
+    ]
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(tabs.indices, id: \.self) { index in
+                let (tab, title, symbol) = tabs[index]
+                Button {
+                    appModel.requestedTab = tab
+                } label: {
+                    Label(title, systemImage: symbol)
+                        .labelStyle(.iconOnly)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 34)
+                        .contentShape(Capsule())
+                        .foregroundStyle(selectedTab == tab.rawValue ? Color.accentColor : Color.primary)
+                        .background {
+                            if selectedTab == tab.rawValue { Capsule().fill(Color.accentColor.opacity(0.12)) }
+                        }
+                }
+                .buttonStyle(.plain)
+                .help(title)
+                .accessibilityLabel(title)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: 260)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.primary.opacity(0.08), lineWidth: 1))
+    }
+}
+
+private struct WindowWidthReader: NSViewRepresentable {
+    var onChange: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ReaderView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? ReaderView)?.onChange = onChange
+        (nsView as? ReaderView)?.reportWidth()
+    }
+
+    private final class ReaderView: NSView {
+        var onChange: ((CGFloat) -> Void)?
+        private var resizeObserver: NSObjectProtocol?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
+            resizeObserver = window.map { observedWindow in
+                NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: observedWindow, queue: .main) { [weak self] _ in
+                    self?.reportWidth()
+                }
+            }
+            reportWidth()
+        }
+
+        func reportWidth() { onChange?(window?.frame.width ?? 0) }
+    }
+}
+
+/// Account and profile switching is a first-class toolbar destination on Mac,
+/// matching the account control used by the other Apple shells.
+private struct MacAccountToolbarButton: View {
+    @Environment(AuthController.self) private var auth
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        Menu {
+            Button(auth.signedIn ? "Account and Profiles" : "Sign In", systemImage: "person.crop.circle") {
+                isPresented = true
+            }
+        } label: {
+            Group {
+                if auth.signedIn, let photo = auth.accountPhotoUrl {
+                    Avatar(url: photo, name: auth.accountName ?? "Account", side: 24)
+                        .clipShape(Circle())
+                } else if auth.signedIn, let name = auth.accountName, !name.isEmpty {
+                    Avatar(url: nil, name: name, side: 24)
+                        .clipShape(Circle())
+                } else {
+                    Image(systemName: "person.crop.circle")
+                        .font(.title3)
+                }
+            }
+            .frame(width: 28, height: 28)
+            .contentShape(Circle())
+        }
+        .help(auth.signedIn ? "Account and profiles" : "Sign in")
+        .accessibilityLabel(auth.signedIn ? "Account and profiles" : "Sign in")
+    }
+}
+
+struct MacWindowAccountToolbar: ViewModifier {
+    @State private var presentsAccount = false
+
+    func body(content: Content) -> some View {
+        content
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    MacAccountToolbarButton(isPresented: $presentsAccount)
+                }
+            }
+            .sheet(isPresented: $presentsAccount) {
+                AccountProfileSheet().frame(minWidth: 420, minHeight: 520)
+            }
     }
 }
 

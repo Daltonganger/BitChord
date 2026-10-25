@@ -143,6 +143,7 @@ struct LocalTrackCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .modifier(MacCardHoverLift())
         .help("\(track.title) — \(track.artist)")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(track.title), \(track.artist)")

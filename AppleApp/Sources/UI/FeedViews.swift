@@ -5,6 +5,24 @@ import UIKit
 import AppKit
 #endif
 
+/// Consistent pointer feedback for cards across the Mac library and feeds.
+struct MacCardHoverLift: ViewModifier {
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        content
+            .onHover { hovering = $0 }
+            .scaleEffect(hovering && !reduceMotion ? 1.03 : 1)
+            .shadow(color: .black.opacity(hovering ? 0.20 : 0), radius: hovering ? 12 : 0, y: hovering ? 5 : 0)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
+        #else
+        content
+        #endif
+    }
+}
+
 /// Loads one Home/Explore feed off the shared bridge, including signed-in
 /// continuation paging (upstream `moreHome`).
 @MainActor @Observable
@@ -400,6 +418,7 @@ struct ShelfCardView: View {
         }
         .contentShape(.rect)
         .onHover { hovering = $0 }
+        .modifier(MacCardHoverLift())
         .shelfCardContextMenu(card)
     }
 
@@ -557,6 +576,7 @@ struct HeroCard: View {
             }
             .contentShape(.rect)
             .onHover { hovering = $0 }
+            .modifier(MacCardHoverLift())
             .shelfCardContextMenu(card)
         }
     }

@@ -1,6 +1,7 @@
 #if os(macOS)
 import SwiftUI
 import AppKit
+import BitChordShared
 
 /// The Mac's small players: a floating Mini Player window (⌥⌘M, as in Music)
 /// and the same controls in a menu bar extra. Both are the ordinary transport
@@ -9,6 +10,7 @@ import AppKit
 struct MiniPlayerView: View {
     /// The menu bar version is narrower and has no window chrome to sit in.
     var compact = false
+    @AppStorage("mac.closeToTray") private var closeToTray = true
     @Environment(PlaybackController.self) private var controller
     @Environment(AppModel.self) private var appModel
     @Environment(\.openWindow) private var openWindow
@@ -82,6 +84,12 @@ struct MiniPlayerView: View {
                 }
                 .buttonStyle(.borderless)
                 .font(.callout)
+                Menu {
+                    Toggle("Keep BitChord open when windows close", isOn: $closeToTray)
+                } label: {
+                    Label("Window Behavior", systemImage: "macwindow")
+                }
+                .menuStyle(.borderlessButton)
             }
         }
         .padding(16)
@@ -172,6 +180,48 @@ struct MiniPlayerCommands: Commands {
 /// The Dock icon's menu: transport, as every Mac player has it.
 final class MacAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor static weak var controller: PlaybackController?
+
+    /// Closing the last document-style window leaves the app resident when
+    /// close-to-tray is enabled, and honors the separate stop-music preference.
+    @MainActor
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return !(UserDefaults.standard.object(forKey: "mac.closeToTray") as? Bool ?? true)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(mainWindowWillClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: nil
+        )
+    }
+
+    @MainActor @objc private func mainWindowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window.canBecomeMain,
+              !(window.identifier?.rawValue.contains(MiniPlayerWindow.id) ?? false),
+              !window.title.localizedCaseInsensitiveContains("Settings"),
+              PlatformSettings.shared.getBoolean(key: "stop_music_on_close", default: false),
+              let controller = Self.controller,
+              controller.isPlaying || controller.isBuffering else { return }
+        controller.pausePlayback(releaseAudioSession: true)
+    }
+
+    /// A Dock click restores a main window, including when only the mini-player
+    /// or a status-item window is visible.
+    @MainActor
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        guard let window = sender.windows.first(where: {
+            $0.canBecomeMain
+                && !($0.identifier?.rawValue.contains(MiniPlayerWindow.id) ?? false)
+                && !$0.title.localizedCaseInsensitiveContains("Settings")
+        }) else { return true }
+        sender.activate(ignoringOtherApps: true)
+        window.deminiaturize(nil)
+        window.makeKeyAndOrderFront(nil)
+        return false
+    }
 
     @MainActor
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
