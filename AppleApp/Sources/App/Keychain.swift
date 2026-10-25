@@ -108,7 +108,8 @@ enum Keychain {
         let status = SecItemDelete(synchronizableQuery(account) as CFDictionary)
         // No iCloud Keychain capability means no shared item exists to clear;
         // local sign-out must continue normally in that case.
-        return status == errSecSuccess || status == errSecItemNotFound || status == errSecNotAvailable
+        return status == errSecSuccess || status == errSecItemNotFound
+            || status == errSecNotAvailable || status == errSecMissingEntitlement
     }
 
     /// Whether an item exists but cannot be read yet — a device that has not been
