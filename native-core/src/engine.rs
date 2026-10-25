@@ -790,7 +790,7 @@ impl PlayerEngine {
 
     /// Sets the equaliser tuning (upstream `EqualizerProcessor.setTuning`).
     ///
-    /// `gains_db` and `qs` are the ten-slot [`eq::EqLayout`] values —
+    /// `gains_db` and `qs` are the ten-slot [`crate::eq::EqLayout`] values —
     /// slots 0..6 the manual tab (low shelf at 60 Hz, high shelf at 14 kHz,
     /// bells between), slots 7..9 the tone pad (250 Hz shelf, 1 kHz bell,
     /// 4 kHz shelf). The make-up preamp is computed here, once, from the
