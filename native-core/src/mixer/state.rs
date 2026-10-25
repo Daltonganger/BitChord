@@ -516,13 +516,15 @@ impl MixerState {
         }
         // Open glided (never snapped): the incoming track is audible and its
         // low end may be mid-handover.
-        if let Some(incoming) = &mut self.incoming {
+        let incoming = self.incoming.take().map(|mut incoming| {
             incoming.filter.open();
             incoming.gain = 1.0;
             // A seek abandoned the blend. The glide is for a mix that finished,
-            // not for one that was interrupted.
+            // not for one that was interrupted, and neither is the level match.
             incoming.release_plan_stretch(self.playback_speed, self.device_rate);
-        }
+            incoming.release_transition_match();
+            incoming
+        });
         if let Some(mut current) = self.current.take() {
             let from_gain = current.gain;
             current.filter.open();
@@ -532,6 +534,12 @@ impl MixerState {
                 started_at: Instant::now(),
             });
         }
+        // After the handoff the session already belongs to the incoming track,
+        // so it becomes the current voice. Leaving it in `incoming` with no
+        // transition left the mixer with nothing current and nothing it would
+        // render: the seek that bailed was refused as "nothing playing" and the
+        // output ran dry until the app was restarted.
+        self.current = incoming;
         self.transition = None;
     }
 

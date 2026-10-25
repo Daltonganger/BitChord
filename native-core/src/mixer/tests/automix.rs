@@ -210,3 +210,31 @@ fn throttled_intro_fixture_keeps_analyzed_wins_at_or_above_ninety_percent() {
         INTRO_KIB.len()
     );
 }
+
+/// A seek after the handoff is a seek in the track the listener now hears.
+/// It abandons the blend, and used to leave the mixer with no current voice:
+/// the seek was refused as "nothing playing" and the output ran dry.
+#[test]
+fn a_seek_after_the_handoff_lands_on_the_incoming_track() {
+    let dir = std::env::temp_dir().join(format!("bitchord-seek-blend-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let outgoing = dir.join("out.wav");
+    let incoming = dir.join("in.wav");
+    test_wav(&outgoing, 12.0, 440.0);
+    test_wav(&incoming, 12.0, 660.0);
+
+    let mut state = armed_test_state(&outgoing, &incoming, Phase::Arming);
+    state.start_fade();
+    assert!(state.transition.as_ref().unwrap().handed_off);
+
+    let (mut producer, _consumer) = rtrb::RingBuffer::<f32>::new(4096);
+    crate::mixer::commands::handle_command(&mut state, Command::Seek { seconds: 3.0 }, &mut producer);
+
+    let current = state.current.as_ref().expect("the seek left nothing current");
+    assert_eq!(current.info.title, "in");
+    assert!((current.decoder.position_seconds() - 3.0).abs() < 0.05);
+    assert!(state.incoming.is_none());
+    assert!(state.transition.is_none());
+    assert_eq!(state.retiring.len(), 1, "the outgoing voice fades out");
+    std::fs::remove_dir_all(&dir).ok();
+}
