@@ -116,6 +116,11 @@ extension SettingsView {
                 isOn: $showMusicVideos
             )
         }
+        if showMusicVideos {
+            rows.row("Play Music Videos over Cellular", "video", "cellular", "mobile data") {
+                SettingsSubToggle(title: "Play Music Videos over Cellular", isOn: $videoOverCellular)
+            }
+        }
         rows.row("Trim Leading and Trailing Silence", "silence", "trim", "edges", "gap") {
             Toggle("Trim Leading and Trailing Silence", isOn: $trimEdges)
                 .onChange(of: trimEdges) { _, value in

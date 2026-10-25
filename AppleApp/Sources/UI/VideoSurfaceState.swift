@@ -8,11 +8,13 @@ struct VideoSurfaceState: Equatable {
     private(set) var enabled = false
     private(set) var surfaces = 0
     private(set) var active = true
+    private(set) var pictureInPictureActive = false
     private(set) var trackId: String?
 
     /// Whether a video-side request is allowed at all.
     var canRequest: Bool {
-        enabled && surfaces > 0 && active && !(trackId ?? "").isEmpty
+        enabled && (surfaces > 0 || pictureInPictureActive) &&
+            (active || pictureInPictureActive) && !(trackId ?? "").isEmpty
     }
 
     mutating func setEnabled(_ on: Bool) {
@@ -22,6 +24,10 @@ struct VideoSurfaceState: Equatable {
     /// Scene phase only; no surface may write this.
     mutating func setActive(_ on: Bool) {
         active = on
+    }
+
+    mutating func setPictureInPictureActive(_ active: Bool) {
+        pictureInPictureActive = active
     }
 
     mutating func setTrack(_ id: String?) {
