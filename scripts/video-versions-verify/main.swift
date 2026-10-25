@@ -120,12 +120,55 @@ for item in songs {
     do {
         let song = try await searchSong(item)
         let candidates = try await findVersions(song, artist: item.artist)
-        let chosen = candidates.first
-        var alignment = "map=none confident=no min-window=?"
-        if let chosen, let songId = song.videoId {
-            if let map = await VideoVersionAlignment.shared.map(songId: songId, videoId: chosen.videoId) {
-                alignment = "map=\(map.summary) confident=\(map.confident ? "yes" : "no") min-window=\(String(format: "%.3f", map.minimumWindowSimilarity))"
+        var chosen: Candidate?
+        var chosenMap: VideoVersionAlignment.Map?
+        var chosenIsQualified = false
+        var aligned = false
+        var unqualifiedFallback: (candidate: Candidate, map: VideoVersionAlignment.Map?)?
+        for candidate in candidates.prefix(3) {
+            let side: ResolvedVideoSide?
+            do {
+                side = try await InnertubeStreamResolver.shared.resolveVideo(videoId: candidate.videoId)
+            } catch {
+                print("  candidate \(candidate.videoId) resolve failed: \(error.localizedDescription)")
+                side = nil
             }
+
+            let map: VideoVersionAlignment.Map?
+            if let songId = song.videoId {
+                map = await VideoVersionAlignment.shared.map(songId: songId, videoId: candidate.videoId)
+            } else {
+                map = nil
+            }
+            guard let side else {
+                if unqualifiedFallback == nil { unqualifiedFallback = (candidate, map) }
+                continue
+            }
+            let qualifies = candidate.source == "counterpart"
+                ? side.qualifiesAsCounterpartVideo()
+                : side.qualifiesAsSearchVideo()
+            guard qualifies else { continue }
+
+            if chosen == nil {
+                chosen = candidate
+                chosenMap = map
+                chosenIsQualified = true
+            }
+            if let map, map.confident {
+                chosen = candidate
+                chosenMap = map
+                chosenIsQualified = true
+                aligned = true
+                break
+            }
+        }
+        if chosen == nil, let unqualifiedFallback {
+            chosen = unqualifiedFallback.candidate
+            chosenMap = unqualifiedFallback.map
+        }
+        var alignment = "map=none confident=no min-window=?"
+        if let map = chosenMap {
+            alignment = "map=\(map.summary) confident=\(map.confident ? "yes" : "no") min-window=\(String(format: "%.3f", map.minimumWindowSimilarity))"
         }
         let candidateText: String
         if let chosen {
@@ -133,7 +176,8 @@ for item in songs {
         } else {
             candidateText = "none type=- source=none title=-"
         }
-        print("\(item.title) — \(item.artist) → \(candidateText) · \(alignment)")
+        let selectionStatus = chosen == nil ? "no candidate" : !chosenIsQualified ? "unqualified" : aligned ? "aligned" : "own audio"
+        print("\(item.title) — \(item.artist) → \(candidateText) · \(selectionStatus) · \(alignment)")
 
         switch item.expectation {
         case .officialVideo:
