@@ -27,6 +27,37 @@ func check(_ label: String, _ ok: Bool, _ detail: String = "") {
 /// The exact text the store's `AuthenticationException` carries.
 let expired = "Your YouTube Music session has expired. Sign in again."
 
+// The shared item contains a bearer credential, so coverage uses only this
+// synthetic value and reports equality as a Boolean; it never prints payloads.
+let sharedFixture = SharedSessionCredential(
+    schemaVersion: SharedSessionCredential.currentSchemaVersion,
+    cookie: "fake-session-cookie",
+    accountName: "Test Listener",
+    email: "listener@example.invalid",
+    avatarURL: nil,
+    pageId: "fake-page",
+    dataSyncId: "fake-channel",
+    authUser: "0",
+    deviceName: "Test iPad",
+    createdAt: Date(timeIntervalSinceReferenceDate: 0)
+)
+let encodedSharedFixture = sharedFixture.encoded()
+let decodedSharedFixture = SharedSessionCredential.decode(encodedSharedFixture)
+check("shared session payload round-trips a synthetic credential",
+      decodedSharedFixture == sharedFixture)
+check("shared payload can be adopted as a validated capture",
+      decodedSharedFixture?.signInCapture.cookie == "fake-session-cookie"
+        && decodedSharedFixture?.signInCapture.loggedIn == true)
+check("unsupported shared payload schema is rejected",
+      SharedSessionCredential.decode("{\"schemaVersion\":99,\"cookie\":\"fake\"}") == nil)
+check("empty shared credentials are not adoptable",
+      !SharedSessionCredential(
+        schemaVersion: SharedSessionCredential.currentSchemaVersion,
+        cookie: "", accountName: "Test Listener", email: "listener@example.invalid",
+        avatarURL: nil, pageId: nil, dataSyncId: nil, authUser: nil,
+        deviceName: "Test iPad", createdAt: Date(timeIntervalSinceReferenceDate: 0)
+      ).isAdoptable)
+
 // 1. The app's search error carries its message once it is a LocalizedError.
 let searchError = InnertubeSearch.SearchError(message: expired)
 check("SearchError.localizedDescription carries the message",

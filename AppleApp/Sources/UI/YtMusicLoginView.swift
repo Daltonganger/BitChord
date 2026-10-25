@@ -7,14 +7,18 @@ import BitChordShared
 /// the live page's profile, as upstream does. Account/channel selection can
 /// reopen the same page without replacing its web view or losing its cookies.
 struct YtMusicLoginView: View {
+    @Environment(AuthController.self) private var auth
     var onCaptured: (SignInCapture, @escaping (Bool) -> Void) -> Void
     var onDismiss: () -> Void
 
     @State private var flow = LoginFlow()
+    @State private var adoptingSharedSession = false
 
     var body: some View {
         VStack(spacing: 0) {
-            if !flow.showsCompletion, let prompt = flow.prompt {
+            if let offer = auth.sharedSessionOffer {
+                sharedSessionAdoptionPrompt(offer)
+            } else if !flow.showsCompletion, let prompt = flow.prompt {
                 VStack(spacing: 10) {
                     Text(prompt)
                         .font(.footnote)
@@ -26,46 +30,92 @@ struct YtMusicLoginView: View {
                 .padding(.vertical, 12)
                 .background(.bar)
             }
-            ZStack {
-                // Keep the browser alive under the completion screen. Returning
-                // to Google's avatar menu must use this exact session.
-                LoginWebView(
-                    flow: flow,
-                    onCaptured: onCaptured,
-                    onUnavailable: { reason in flow.captureFailed(reason) }
-                )
-                .opacity(flow.showsCompletion ? 0 : 1)
-                .allowsHitTesting(!flow.showsCompletion)
-                .accessibilityHidden(flow.showsCompletion)
-
-                if flow.showsCompletion {
-                    SignInCompletionStep(
+            if auth.sharedSessionOffer == nil {
+                ZStack {
+                    // Keep the browser alive under the completion screen. Returning
+                    // to Google's avatar menu must use this exact session.
+                    LoginWebView(
                         flow: flow,
-                        onConfirm: { flow.session.take?() },
-                        onChoose: { flow.chooseProfile() }
+                        onCaptured: onCaptured,
+                        onUnavailable: { reason in flow.captureFailed(reason) }
                     )
+                    .opacity(flow.showsCompletion ? 0 : 1)
+                    .allowsHitTesting(!flow.showsCompletion)
+                    .accessibilityHidden(flow.showsCompletion)
+
+                    if flow.showsCompletion {
+                        SignInCompletionStep(
+                            flow: flow,
+                            onConfirm: { flow.session.take?() },
+                            onChoose: { flow.chooseProfile() }
+                        )
+                    }
                 }
             }
         }
-        .navigationTitle(flow.showsCompletion ? "Finish signing in" : "Sign in to YouTube Music")
+        .navigationTitle(auth.sharedSessionOffer != nil
+            ? "Use shared session?"
+            : (flow.showsCompletion ? "Finish signing in" : "Sign in to YouTube Music"))
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
-        .interactiveDismissDisabled(flow.taking)
+        .interactiveDismissDisabled(flow.taking || adoptingSharedSession)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Close", action: onDismiss)
-                    .disabled(flow.taking)
+                    .disabled(flow.taking || adoptingSharedSession)
                     #if os(macOS)
                     .keyboardShortcut(.cancelAction)
                     #endif
             }
             ToolbarItem(placement: .confirmationAction) {
-                if flow.pageReady && !flow.showsCompletion {
+                if auth.sharedSessionOffer == nil && flow.pageReady && !flow.showsCompletion {
                     Button("Use This Profile") { flow.session.take?() }
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func sharedSessionAdoptionPrompt(_ offer: SharedSessionCredential) -> some View {
+        VStack(spacing: 18) {
+            Image(systemName: "key.icloud")
+                .font(.system(size: 38, weight: .medium))
+                .foregroundStyle(.tint)
+            Text("Use \(offer.accountName.isEmpty ? offer.email : offer.accountName)’s BitChord session from \(offer.deviceName)?")
+                .font(.headline)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            if let reason = auth.sessionUnavailableReason {
+                Text(reason)
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+            Button {
+                adoptingSharedSession = true
+                auth.adoptSharedSessionOffer { accepted in
+                    adoptingSharedSession = false
+                    if accepted { onDismiss() }
+                }
+            } label: {
+                if adoptingSharedSession {
+                    ProgressView().frame(maxWidth: .infinity)
+                } else {
+                    Text("Use This Session").frame(maxWidth: .infinity)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(adoptingSharedSession)
+
+            Button("Sign in another way") {
+                auth.dismissSharedSessionOffer()
+            }
+            .disabled(adoptingSharedSession)
+        }
+        .padding(28)
+        .frame(maxWidth: 460, maxHeight: .infinity)
+        .frame(maxWidth: .infinity)
     }
 
 }
