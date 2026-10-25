@@ -20,6 +20,10 @@ struct DownloadsView: View {
     @State private var selecting = false
     @State private var selectedPaths: Set<String> = []
     @State private var confirmDelete = false
+    @State private var webDavStore = WebDavStore.shared
+    @State private var uploadingSelection = false
+    @State private var showUploadSummary = false
+    @State private var uploadSummary = ""
 
     enum Tab: String, CaseIterable, Identifiable {
         case songs = "Songs"
@@ -248,9 +252,9 @@ struct DownloadsView: View {
                 playShuffleRow
             }
             if selecting {
-                // Upstream's selection bar (LocalFolder.kt:687): count, select
-                // all, delete. Upload rides I8b with the WebDAV store work.
-                HStack(spacing: 12) {
+                // Upstream's selection bar (LocalFolder.kt:687), with the
+                // WebDAV batch action added alongside delete.
+                HStack(spacing: 6) {
                     Button("Done") {
                         selecting = false
                         selectedPaths = []
@@ -263,13 +267,24 @@ struct DownloadsView: View {
                         selectedPaths = Set(filteredAndSortedTracks.map(\.path))
                     }
                     .buttonStyle(.bordered)
+                    Button(action: uploadSelectedDownloads) {
+                        if uploadingSelection {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "icloud.and.arrow.up")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(selectedPaths.isEmpty || uploadingSelection || !webDavStore.isConfigured)
+                    .help("Upload selected to WebDAV")
+                    .accessibilityLabel("Upload selected to WebDAV")
                     Button("Delete", role: .destructive) {
                         confirmDelete = true
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(selectedPaths.isEmpty)
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 8)
             }
             List {
@@ -302,6 +317,46 @@ struct DownloadsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("They will download again when played.")
+        }
+        .alert("WebDAV upload", isPresented: $showUploadSummary) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(uploadSummary)
+        }
+    }
+
+    @MainActor
+    private func uploadSelectedDownloads() {
+        let selected = filteredAndSortedTracks.filter { selectedPaths.contains($0.path) }
+        guard !selected.isEmpty, webDavStore.isConfigured, !uploadingSelection else { return }
+        uploadingSelection = true
+        Task { @MainActor in
+            var uploaded = 0
+            var failed = 0
+            var firstFailure: String?
+            for track in selected {
+                do {
+                    _ = try await webDavStore.upload(
+                        path: track.path,
+                        title: track.title,
+                        artist: track.artist,
+                        refreshAfterUpload: false
+                    )
+                    uploaded += 1
+                } catch {
+                    failed += 1
+                    if firstFailure == nil { firstFailure = error.localizedDescription }
+                }
+            }
+            if uploaded > 0 { await webDavStore.load(force: true) }
+            uploadingSelection = false
+            var summary = "Uploaded \(uploaded) of \(selected.count) selected download\(selected.count == 1 ? "" : "s")."
+            if failed > 0 {
+                summary += " Failed: \(failed)."
+                if let firstFailure { summary += " \(firstFailure)" }
+            }
+            uploadSummary = summary
+            showUploadSummary = true
         }
     }
 

@@ -136,7 +136,12 @@ final class WebDavStore {
     /// Copy one local audio file to the share. PUTs stream from the file URL and
     /// carry `If-None-Match: *`; a collision gets a numbered sibling rather than
     /// replacing somebody else's recording.
-    func upload(path: String, title: String, artist: String) async throws -> String {
+    func upload(
+        path: String,
+        title: String,
+        artist: String,
+        refreshAfterUpload: Bool = true
+    ) async throws -> String {
         guard isConfigured, !path.hasPrefix("http://"), !path.hasPrefix("https://") else {
             throw WebDavUploadError.notAvailable
         }
@@ -177,7 +182,9 @@ final class WebDavStore {
             guard (200..<300).contains(http.statusCode) else {
                 throw WebDavUploadError.refused(http.statusCode)
             }
-            await load(force: true)
+            if refreshAfterUpload {
+                await load(force: true)
+            }
             return fileName
         }
         throw WebDavUploadError.tooManyConflicts
