@@ -618,6 +618,22 @@ extension PlaybackController {
                 }
             }
             let done = DownloadCallbackAdapter { path, message in
+                // The bridge reports a failure before the first byte — a refused
+                // or invalid opening range, a download with no bytes — on `done`
+                // alone and never calls `ready`. Unanswered, the continuation
+                // leaked and the load waiting on it hung for good: the next song
+                // never started and nothing said why. Answering it here is also
+                // what lets the caller's re-resolve on a rejected range run.
+                lock.lock()
+                let waiting = !resumed
+                resumed = true
+                lock.unlock()
+                if waiting, path == nil {
+                    continuation.resume(throwing: InnertubeStreamResolver.StreamError(
+                        message: message ?? "Stream ended before its first bytes"))
+                    return
+                }
+                if waiting, let path { continuation.resume(returning: path) }
                 if let path {
                     Task { await StreamFileCache.shared.store(videoId, path: path, sourceIdentity: DiskCache.hashName(url), codec: codec, kbps: kbps, quality: qualityIdentity, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds) }
                 } else if let message {
