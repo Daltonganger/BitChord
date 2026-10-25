@@ -50,61 +50,111 @@ struct DiscordLoginView: View {
 #if os(macOS)
 private struct DiscordWebView: NSViewRepresentable {
     var onToken: (String) -> Void
-    func makeNSView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        let view = WKWebView(frame: .zero, configuration: config)
-        view.navigationDelegate = context.coordinator
-        view.load(URLRequest(url: URL(string: "https://discord.com/login")!))
-        return view
-    }
+    func makeNSView(context: Context) -> WKWebView { context.coordinator.attach(WKWebView()) }
     func updateNSView(_ view: WKWebView, context: Context) {}
-    func makeCoordinator() -> Coordinator { Coordinator(onToken: onToken) }
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        let onToken: (String) -> Void
-        init(onToken: @escaping (String) -> Void) { self.onToken = onToken }
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            scrape(webView)
-        }
-        func scrape(_ webView: WKWebView) {
-            webView.evaluateJavaScript("(webpackChunkdiscord_app.push([[''],{},e=>{m=[];for(let c in e.c)m.push(e.c[c])}]),m).find(m=>m?.exports?.default?.getToken!==void 0).exports.default.getToken()") { result, _ in
-                if let token = result as? String, token.count > 20 {
-                    self.onToken(token)
-                }
-            }
-            webView.evaluateJavaScript("window.localStorage.getItem('token')") { result, _ in
-                if let raw = result as? String {
-                    let token = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                    if token.count > 20 { self.onToken(token) }
-                }
-            }
-        }
-    }
+    func makeCoordinator() -> DiscordTokenHarvester { DiscordTokenHarvester(onToken: onToken) }
 }
 #else
 private struct DiscordWebView: UIViewRepresentable {
     var onToken: (String) -> Void
-    func makeUIView(context: Context) -> WKWebView {
-        let view = WKWebView()
-        view.navigationDelegate = context.coordinator
+    func makeUIView(context: Context) -> WKWebView { context.coordinator.attach(WKWebView()) }
+    func updateUIView(_ view: WKWebView, context: Context) {}
+    func makeCoordinator() -> DiscordTokenHarvester { DiscordTokenHarvester(onToken: onToken) }
+}
+#endif
+
+/// Lifts the session token out of discord.com once the page has signed in —
+/// upstream's `DiscordLoginScreen`, on WebKit.
+///
+/// Two things kept the old version on the login page forever. Discord routes from
+/// the login form to the app with `pushState`, so no navigation finishes after
+/// sign-in and a `didFinish` hook only ever ran on the form itself. And once the
+/// client boots it takes `localStorage` away from the top-level window, so reading
+/// it there finds nothing even at the right moment. Watching `url` catches the
+/// `pushState`, and a fresh same-origin iframe still has an untouched handle on
+/// the store where the token sits.
+private final class DiscordTokenHarvester: NSObject, WKNavigationDelegate {
+    /// Returns the token, or `''` while the client is still booting so the caller
+    /// retries rather than waiting on a snippet that threw.
+    private static let tokenSnippet = """
+        (function () {
+          try {
+            var frame = document.createElement('iframe');
+            document.body.appendChild(frame);
+            var token = frame.contentWindow.localStorage.token;
+            document.body.removeChild(frame);
+            return token ? JSON.parse(token) : '';
+          } catch (e) {
+            return '';
+          }
+        })()
+        """
+    /// The token lands a moment after the client starts for `/app`, so the first
+    /// read is usually empty. Twelve tries half a second apart covers a slow boot.
+    private static let maxAttempts = 12
+
+    private let onToken: (String) -> Void
+    private weak var webView: WKWebView?
+    private var urlObservation: NSKeyValueObservation?
+    private var retry: Timer?
+    private var attempts = 0
+    private var captured = false
+
+    init(onToken: @escaping (String) -> Void) { self.onToken = onToken }
+
+    deinit {
+        retry?.invalidate()
+        urlObservation?.invalidate()
+    }
+
+    func attach(_ view: WKWebView) -> WKWebView {
+        webView = view
+        view.navigationDelegate = self
+        urlObservation = view.observe(\.url, options: [.new]) { [weak self] view, _ in
+            let url = view.url
+            DispatchQueue.main.async { self?.pageMoved(to: url) }
+        }
         view.load(URLRequest(url: URL(string: "https://discord.com/login")!))
         return view
     }
-    func updateUIView(_ view: WKWebView, context: Context) {}
-    func makeCoordinator() -> Coordinator { Coordinator(onToken: onToken) }
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        let onToken: (String) -> Void
-        init(onToken: @escaping (String) -> Void) { self.onToken = onToken }
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            webView.evaluateJavaScript("window.localStorage.getItem('token')") { result, _ in
-                if let raw = result as? String {
-                    let token = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
-                    if token.count > 20 { self.onToken(token) }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        pageMoved(to: webView.url)
+    }
+
+    /// Past the sign-in flow, wherever it landed: `/app` or `/channels/@me`
+    /// depending on how the session was established.
+    private static func isSignedIn(_ url: URL?) -> Bool {
+        guard let url, url.host == "discord.com" else { return false }
+        return !url.path.hasPrefix("/login") && !url.path.hasPrefix("/register")
+    }
+
+    private func pageMoved(to url: URL?) {
+        guard !captured, Self.isSignedIn(url) else { return }
+        // A fresh run of attempts per arrival: a 2FA step can bounce through more
+        // than one signed-in-looking address before the store is written.
+        attempts = 0
+        harvest()
+    }
+
+    private func harvest() {
+        retry?.invalidate()
+        retry = nil
+        guard !captured, attempts < Self.maxAttempts, let webView else { return }
+        attempts += 1
+        webView.evaluateJavaScript(Self.tokenSnippet) { [weak self] result, _ in
+            guard let self, !self.captured else { return }
+            if let token = result as? String, token.count > 20 {
+                self.captured = true
+                self.onToken(token)
+            } else {
+                self.retry = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+                    self?.harvest()
                 }
             }
         }
     }
 }
-#endif
 
 private final class TokenAdapter: DiscordBridgeTokenCallback {
     let handler: (Bool, String?) -> Void
