@@ -9,6 +9,58 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
         <description>BitChord for macOS updates</description>
         <language>en</language>
         <item>
+            <title>1.0.1</title>
+            <pubDate>Sun, 25 Oct 2026 14:36:47 +0100</pubDate>
+            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.1</sparkle:fullReleaseNotesLink>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# BitChord 1.0.1
+
+## Search and browse
+
+- Show up to 15 song, album, and artist suggestions while typing, up from 8.
+
+## Requirements
+
+- macOS 15 or later on Apple Silicon.
+- iOS or iPadOS 18 or later.
+
+## Downloads and installation
+
+- **Mac:** Apple Silicon DMG. It is ad-hoc signed, not notarized, and not Developer ID signed.
+- **iOS:** Unsigned IPA for sideloading with AltStore, SideStore, or Sideloadly, or for signing with your own Apple Developer team.
+
+### Install on Mac
+
+Drag BitChord to Applications, then open it. If Gatekeeper blocks the first launch, use either route:
+
+- **System Settings:** Open System Settings → Privacy & Security, scroll to Security, choose **Open Anyway** for BitChord, then confirm **Open** in the warning dialog.
+- **Terminal:** After moving BitChord to Applications, run:
+
+  ```sh
+  xattr -dr com.apple.quarantine "/Applications/BitChord.app"
+  open "/Applications/BitChord.app"
+  ```
+
+### Sideload on iPhone or iPad
+
+1. Install AltStore, SideStore, or Sideloadly and connect the device as required by that tool.
+2. Import the unsigned IPA and sign it with your Apple account or developer team.
+3. Install the signed app and trust the developer profile if iOS asks.
+
+To use iCloud lyrics-choice or sign-in sharing, sign the app with your own team and enable the matching iCloud Key-Value Store and iCloud Keychain capabilities and provisioning profile. Otherwise those features use local device storage.
+
+## Legal
+
+BitChord does not host or provide media. Playback uses configured third-party services and their APIs; availability and terms are controlled by those services. See the [README Disclaimer & Legal Notice](https://github.com/bagumamartin/BitChord/blob/v1.0.1/README.md#disclaimer--legal-notice).
+
+Every GitHub release is built from its tagged commit, and that tag's source archive is the Corresponding Source under GPLv3 §6. The source for this release is the [v1.0.1 tag](https://github.com/bagumamartin/BitChord/tree/v1.0.1).
+]]></description>
+            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v1.0.1/BitChord-1.0.1.dmg" length="41904837" type="application/octet-stream" sparkle:edSignature="xHD0Il14ymnYAkpiqtnIcYPyvEX1Il1GlaYifU5rL34Az1N3Bbcb7SGj1Vr7EVJ7Ub9aC1j2Lx0d9AIKh/E3Bw=="/>
+        </item>
+        <item>
             <title>1.0.0</title>
             <pubDate>Sun, 25 Oct 2026 14:17:53 +0100</pubDate>
             <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v1.0.0</sparkle:fullReleaseNotesLink>
@@ -187,39 +239,9 @@ This removes the downloaded-file quarantine attribute from the app bundle so Gat
 ]]></description>
             <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v0.1.3/BitChord-0.1.3.dmg" length="18888922" type="application/octet-stream" sparkle:edSignature="cuTIOCUff6NUW1VGv3s+IwTmM4tG6vJkncWysbxEe3FMpLtNJZWU5zAaBTJDgMBoJqzUVsSkKI2VTOk8wcqZCQ=="/>
         </item>
-        <item>
-            <title>0.1.2</title>
-            <pubDate>Sat, 03 Oct 2026 16:59:18 +0200</pubDate>
-            <sparkle:fullReleaseNotesLink>https://github.com/bagumamartin/BitChord/releases/tag/v0.1.2</sparkle:fullReleaseNotesLink>
-            <sparkle:version>2</sparkle:version>
-            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### What's changed
-- Recommendation queues now refresh on deliberate listening actions and refill only when fewer than three tracks remain, keeping natural song transitions steady.
-- Removing tracks from the queue no longer triggers an immediate refresh; Automix can still reorder queued tracks.
-- Google sign-in follows Google's own flow without BitChord intercepting password or passkey steps.
-- The macOS sidebar toggle stays visible, Recents loading layouts adapt to larger screens, and closing Now Playing returns to the same screen and position.
-
-### macOS download
-This Apple Silicon build is ad-hoc signed and is not notarized by Apple. macOS may block its first launch.
-
-Only continue if you downloaded BitChord from the official BitChord GitHub release and trust it.
-
-**System Settings:** Move BitChord to Applications and try to open it once. If macOS blocks it, open System Settings → Privacy & Security, scroll to Security, choose **Open Anyway** for BitChord, then confirm **Open** in the warning dialog.
-
-**Terminal:** After moving BitChord to Applications, open Terminal and run:
-```sh
-xattr -dr com.apple.quarantine "/Applications/BitChord.app"
-open "/Applications/BitChord.app"
-```
-This removes the downloaded-file quarantine attribute from the app bundle so Gatekeeper no longer blocks this launch.
-]]></description>
-            <enclosure url="https://github.com/bagumamartin/BitChord/releases/download/v0.1.2/BitChord-0.1.2.dmg" length="18888551" type="application/octet-stream" sparkle:edSignature="Gi03Hxfuw9UADe0qokK/PTN5lAw8n10+AKxOKF9Ua3OLBhWMO9ze0891iKFTtnwwfVpt2T5i3/24j6puNzHrAg=="/>
-        </item>
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: ccZFycfHUxqFlcKNgnxTfsbOYO+LdD1mWjKBL6ZSNhmbjKAbnu563wEYyqmty4MI+CAzHDn4fQ4+xDDaNbflDw==
-length: 14021
+edSignature: HwBOGT0BAlw5SSp1CZIX5y7Fr+p1/EDkLDdgF4pqz3FhQZzcH5W6V6nMe6egy4eB1g4NvIiCgLYSUVXY3SGsDA==
+length: 14685
 -->
