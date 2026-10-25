@@ -1,6 +1,41 @@
 //! The rendered shape of each transition style: no holes, no bumps, flat cold ends.
 
+use super::super::voice::CHUNK_FRAMES;
 use super::*;
+
+#[test]
+fn reusable_voice_output_matches_fixed_input_bit_for_bit() {
+    let dir = std::env::temp_dir().join(format!("bitchord-reused-pull-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fixed.wav");
+    level_wav(&path, 3.0, 440.0, 0.2);
+    let mut allocating = open_voice(&path);
+    let mut reused = open_voice(&path);
+    let mut scratch = Vec::new();
+
+    for _ in 0..8 {
+        let expected = allocating.pull(CHUNK_FRAMES, 48_000);
+        reused.pull_into(CHUNK_FRAMES, 48_000, &mut scratch);
+        assert_eq!(scratch, expected, "reused output changed decoded samples");
+    }
+
+    let pointer = scratch.as_ptr();
+    let capacity = scratch.capacity();
+    for _ in 0..8 {
+        reused.pull_into(CHUNK_FRAMES, 48_000, &mut scratch);
+        assert_eq!(
+            scratch.as_ptr(),
+            pointer,
+            "output buffer reallocated after warmup"
+        );
+        assert_eq!(
+            scratch.capacity(),
+            capacity,
+            "output buffer capacity grew after warmup"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
 
 /// F: the bridge captures one measured unit and replays it without
 /// advancing the decoder, so the record continues from exactly where it

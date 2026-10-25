@@ -626,30 +626,35 @@ impl Voice {
     /// frame count (`emitted_dev_frames`) still advances for the replay, so the
     /// blend's clock keeps moving.
     pub(super) fn pull(&mut self, frames: usize, device_rate: u32) -> Vec<f32> {
+        let mut out = Vec::with_capacity(frames * 2);
+        self.pull_into(frames, device_rate, &mut out);
+        out
+    }
+
+    /// Pull into caller-owned storage so the mixer can reuse its output buffer.
+    pub(super) fn pull_into(&mut self, frames: usize, device_rate: u32, out: &mut Vec<f32>) {
+        out.clear();
+        if out.capacity() < frames * 2 {
+            out.reserve(frames * 2);
+        }
         if let Some(bridge) = self.bridge.as_mut() {
             if bridge.stage == BridgeStage::Replaying {
-                let mut out = bridge.replay(frames, device_rate);
+                bridge.replay_into(frames, device_rate, out);
                 self.emitted_dev_frames += (out.len() / 2) as u64;
                 if bridge.stage == BridgeStage::Done && out.len() < frames * 2 {
-                    let more = self.pull_decoded((frames * 2 - out.len()) / 2, device_rate);
-                    out.extend(more);
+                    self.pull_decoded_into((frames * 2 - out.len()) / 2, device_rate, out);
                 }
-                return out;
+                return;
             }
         }
-        let mut out = self.pull_decoded(frames, device_rate);
+        self.pull_decoded_into(frames, device_rate, out);
         if let Some(mut bridge) = self.bridge.take() {
-            let held = bridge.after_pull(
-                &mut out,
-                &mut self.pending_dev,
-                &mut self.pending_dev_cursor,
-            );
+            let held = bridge.after_pull(out, &mut self.pending_dev, &mut self.pending_dev_cursor);
             if held > 0 {
                 self.emitted_dev_frames = self.emitted_dev_frames.saturating_sub(held as u64);
             }
             self.bridge = Some(bridge);
         }
-        out
     }
 
     /// Arms the bridge at the blend: `delay_frames` are served before the unit
@@ -662,19 +667,20 @@ impl Voice {
         self.bridge = Some(VoiceBridge::new(delay_frames, unit_frames, repeats));
     }
 
-    /// Pulls up to `frames` device-domain frames from the decoder. The public
-    /// `pull` is the wrapper that runs F's loop bridge around this.
-    pub(super) fn pull_decoded(&mut self, frames: usize, device_rate: u32) -> Vec<f32> {
+    fn pull_decoded_into(&mut self, frames: usize, device_rate: u32, out: &mut Vec<f32>) {
         if self.bit_perfect
             && device_rate == self.info.sample_rate
             && self.regions.excluded.is_empty()
             && self.regions.audible_start_seconds == 0.0
             && self.regions.audible_end_seconds.is_none()
         {
-            return self.pull_bitperfect(frames);
+            self.pull_bitperfect_into(frames, out);
+            return;
         }
-        let want = (frames * 2).max(2);
-        let mut out: Vec<f32> = Vec::with_capacity(want);
+        let want = out.len() + (frames * 2).max(2);
+        if out.capacity() < want {
+            out.reserve(want - out.len());
+        }
 
         let serve_pending = |out: &mut Vec<f32>, voice: &mut Voice| {
             let remaining = want - out.len();
@@ -688,7 +694,7 @@ impl Voice {
             voice.pending_dev_cursor += take;
             voice.emitted_dev_frames += (take / 2) as u64;
         };
-        serve_pending(&mut out, self);
+        serve_pending(out, self);
 
         // The handoff stretch has landed on unity: flush the stage and serve
         // what it was still holding before decoding anything more, so the
@@ -706,7 +712,7 @@ impl Voice {
                     self.pending_dev_cursor = take;
                 }
                 if out.len() >= want {
-                    return out;
+                    return;
                 }
             }
         }
@@ -831,8 +837,8 @@ impl Voice {
                 // order as upstream's sink processors, at the rate the DAC hears.
                 self.spatial.process(&mut self.pending_dev);
                 self.filter.process(&mut self.pending_dev);
-                serve_pending(&mut out, self);
-                break;
+                serve_pending(out, self);
+                return;
             }
             crate::diagnostics::capture_voice(0, &self.info.source, &src);
             self.pending_dev = self.resampler.process(&src);
@@ -888,31 +894,29 @@ impl Voice {
             } else {
                 self.silent_dev_frames = 0;
             }
-            serve_pending(&mut out, self);
+            serve_pending(out, self);
         }
-        out
     }
 
     /// Reads source frames directly. This branch is only used for stereo
     /// lossless PCM with the DAC clock set to the source rate; it deliberately
     /// avoids the resamplers, silence scan, spatial stage, and transition filter.
-    pub(super) fn pull_bitperfect(&mut self, frames: usize) -> Vec<f32> {
+    fn pull_bitperfect_into(&mut self, _frames: usize, out: &mut Vec<f32>) {
         if self.finished {
-            return Vec::new();
+            return;
         }
-        match self.decoder.read_stereo(frames) {
+        match self.decoder.read_stereo(_frames) {
             Ok(samples) => {
                 if samples.is_empty() {
                     self.finished = true;
                 } else {
                     self.emitted_dev_frames += (samples.len() / 2) as u64;
                 }
-                samples
+                out.extend_from_slice(&samples)
             }
             Err(error) => {
                 log::warn!("bit-perfect source read failed: {error}");
                 self.finished = true;
-                Vec::new()
             }
         }
     }

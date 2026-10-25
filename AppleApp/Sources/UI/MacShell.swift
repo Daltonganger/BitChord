@@ -384,7 +384,7 @@ private struct MacLyricsInspector: View {
     @State private var showProviderPicker = false
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+        TimelineView(.animation(minimumInterval: 0.25, paused: !controller.isPlaying)) { timeline in
             LyricsPane(
                 lines: controller.displayedLyrics,
                 originalLines: controller.lyrics,

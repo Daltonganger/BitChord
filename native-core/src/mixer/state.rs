@@ -58,6 +58,12 @@ pub(super) struct MixerState {
     pub(super) warned_no_duration: bool,
     pub(super) transition: Option<TransitionState>,
     pub(super) retiring: Vec<RetiringVoice>,
+    /// Reusable storage for one mixer chunk and the decks feeding it.
+    pub(super) render_scratch: Vec<f32>,
+    pub(super) voice_output_scratch: Vec<f32>,
+    pub(super) effect_dry_scratch: Vec<f32>,
+    /// Spare allocation used while retiring voices are filtered in render order.
+    pub(super) retiring_scratch: Vec<RetiringVoice>,
     pub(super) playing: bool,
     pub(super) bit_perfect: bool,
     pub(super) volume: f32,
@@ -94,6 +100,8 @@ pub(super) struct MixerState {
     pub(super) underrun_counter: Option<Arc<AtomicU64>>,
     pub(super) observed_underruns: u64,
     pub(super) nerd: Arc<Mutex<NerdSnapshot>>,
+    pub(super) last_diagnostic_signature: Option<u32>,
+    pub(super) last_diagnostic_publish: Option<Instant>,
     /// Loudness-normalization master switch (upstream
     /// `AppSettings.loudnessNormalization`, on by default). Per-voice figures
     /// ride on the voices; this decides whether the render uses them.

@@ -22,6 +22,7 @@ extension PlaybackController {
             holdAfterLoad = true
             state = .paused
             nowPlaying.updateRate(0, position: position)
+            VideoPlayback.shared.transportClockChanged()
             return
         }
         if holdAfterLoad, loadingGeneration == playGeneration {
@@ -137,9 +138,11 @@ extension PlaybackController {
                         self.positionSampledAt = Date()
                         self.nowPlaying.updateRate(speed, position: self.position)
                         self.nowPlaying.playbackDidStart()
+                        VideoPlayback.shared.transportClockChanged()
                     } catch {
                         self.nowPlaying.updateRate(0, position: self.position)
                         self.state = .paused
+                        VideoPlayback.shared.transportClockChanged()
                         self.lastError = "Audio output could not resume: \(error)"
                     }
                 }
@@ -156,6 +159,7 @@ extension PlaybackController {
     func settleHeldLoad() {
         holdAfterLoad = false
         try? engine.pause()
+        VideoPlayback.shared.transportClockChanged()
         dolbyRenderer?.pause()
         state = .paused
         positionSampledAt = Date()
@@ -171,6 +175,7 @@ extension PlaybackController {
         dolbyRenderer?.pause()
         positionSampledAt = Date()
         state = .paused
+        VideoPlayback.shared.transportClockChanged()
         #if os(macOS)
         Task { await HeadphoneRouting.shared.releaseWhenIdle() }
         #endif
@@ -299,6 +304,7 @@ extension PlaybackController {
         let headers = sourceHeadersByPath.removeValue(forKey: info.source) ?? [:]
         PlaybackTrackerBridge.shared.onTrackChanged(positionSeconds: Int64(position))
         loadDidSucceed(entry: entry, index: target, info: info, startAt: 0, headers: headers)
+        VideoPlayback.shared.transportClockChanged()
         return true
     }
 
@@ -379,6 +385,7 @@ extension PlaybackController {
         nowPlaying.update(position: seconds)
         position = seconds
         positionSampledAt = Date()
+        VideoPlayback.shared.transportClockChanged()
     }
 
     func removeFromQueue(at offsets: IndexSet) {

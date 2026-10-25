@@ -51,10 +51,9 @@ impl VoiceBridge {
     /// pass crossfades the audio just heard (the unit's end) into the unit's
     /// start; the replay's last sample is the same one the first pass ended on,
     /// so returning to the live stream needs no second fade.
-    pub(super) fn replay(&mut self, frames: usize, rate: u32) -> Vec<f32> {
+    pub(super) fn replay_into(&mut self, frames: usize, rate: u32, out: &mut Vec<f32>) {
         let seam =
             ((rate as u64 / 100).max(1) as usize).min((self.unit_frames / 4).max(1) as usize);
-        let mut out = Vec::with_capacity(frames * 2);
         while out.len() < frames * 2 && self.stage == BridgeStage::Replaying {
             let at = self.replay_at;
             if at >= self.unit_frames as usize {
@@ -76,7 +75,6 @@ impl VoiceBridge {
             }
             self.replay_at += 1;
         }
-        out
     }
 
     /// Reads the frames just served. While waiting it counts down; while

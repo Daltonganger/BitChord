@@ -7,6 +7,11 @@ import BitChordShared
 actor ArtistFacts {
     static let shared = ArtistFacts()
 
+    private struct Persisted: Codable {
+        var known: [String: [String]]
+        var fetchedAt: [String: Date]
+    }
+
     private var known: [String: [String]] = [:]
     private var fetchedAt: [String: Date] = [:]
     private let file: URL
@@ -14,9 +19,15 @@ actor ArtistFacts {
 
     init() {
         file = DiskCache.cachesSubfolder("meta").appendingPathComponent("artist_facts.json")
-        if let data = try? Data(contentsOf: file),
-           let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) {
-            known = decoded
+        if let data = try? Data(contentsOf: file) {
+            if let decoded = try? JSONDecoder().decode(Persisted.self, from: data) {
+                known = decoded.known
+                fetchedAt = decoded.fetchedAt
+            } else if let legacy = try? JSONDecoder().decode([String: [String]].self, from: data) {
+                // Preserve existing positive genre results while the next
+                // warmup gradually upgrades this cache to the timestamped form.
+                known = legacy
+            }
         }
     }
 
@@ -73,7 +84,7 @@ actor ArtistFacts {
     }
 
     private func persist() {
-        if let data = try? JSONEncoder().encode(known) {
+        if let data = try? JSONEncoder().encode(Persisted(known: known, fetchedAt: fetchedAt)) {
             try? data.write(to: file, options: .atomic)
         }
     }

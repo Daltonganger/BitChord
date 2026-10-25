@@ -84,6 +84,12 @@ final class VideoSideController {
     /// environment player); every surface passes the same closures.
     func setClock(_ clock: VideoClock) {
         self.clock = clock
+        clockChanged()
+    }
+
+    /// Called by transport events so a stopped timer can resume immediately
+    /// when audio starts, changes rate, or seeks.
+    func clockChanged() {
         tick()
     }
 
@@ -96,6 +102,12 @@ final class VideoSideController {
             return
         }
         self.timeMap = timeMap
+        if self.side?.url == side.url, state == .failed {
+            // Keep the failure stable after releasing its item; repeated body
+            // passes must not recreate and retry the same refused rendition.
+            self.side = side
+            return
+        }
         if self.side?.url == side.url, player.currentItem != nil {
             // Keep the current item, including a failed one: a repeated body
             // pass must not rebuild (and retry) a video that already refused.
@@ -171,7 +183,6 @@ final class VideoSideController {
             }
         }
         player.replaceCurrentItem(with: item)
-        startTimer()
         tick()
     }
 
@@ -186,6 +197,7 @@ final class VideoSideController {
     /// One policy pass. Called by the timer; exposed so a surface can force a
     /// pass after a transport change instead of waiting for the next 250 ms.
     func tick() {
+        updateTimer()
         if state != .idle, CACurrentMediaTime() - lastStatusLog >= 2,
            state != .ready || isSeeking || player.currentItem?.status != .readyToPlay {
             lastStatusLog = CACurrentMediaTime()
@@ -252,8 +264,10 @@ final class VideoSideController {
     }
 
     private func fail() {
+        // A failed AVPlayerItem can retain its asset and resource-loader work
+        // even though the surface has already fallen back to artwork.
+        tearDownItem()
         state = .failed
-        player.pause()
     }
 
     private func startTimer() {
@@ -266,18 +280,42 @@ final class VideoSideController {
         self.timer = timer
     }
 
+    private func updateTimer() {
+        guard state == .ready,
+              let item = player.currentItem,
+              item.status == .readyToPlay,
+              clock.isPlaying()
+        else {
+            stopTimer()
+            if !clock.isPlaying() { player.pause() }
+            return
+        }
+        startTimer()
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
     private func tearDownItem() {
         statusObservation = nil
         if let failedObserver {
             NotificationCenter.default.removeObserver(failedObserver)
         }
         failedObserver = nil
-        timer?.invalidate()
-        timer = nil
+        stopTimer()
         player.pause()
         player.replaceCurrentItem(with: nil)
         loader = nil
         isSeeking = false
         lastSeekAt = 0
+    }
+}
+
+@MainActor
+extension VideoPlayback {
+    func transportClockChanged() {
+        controller.clockChanged()
     }
 }

@@ -14,7 +14,7 @@ import AppKit
 // The stage: artwork or lyrics, the side panel, and the playback deck.
 extension NowPlayingView {
     var desktopLyricsPane: some View {
-        TimelineView(.animation) { timeline in
+        TimelineView(.animation(minimumInterval: nil, paused: !controller.isPlaying)) { timeline in
             LyricsPane(
                 lines: controller.displayedLyrics,
                 originalLines: controller.lyrics,
@@ -161,7 +161,8 @@ extension NowPlayingView {
                 entry: controller.current,
                 canvasURL: controller.canvasURL,
                 fallbackURL: controller.canvasFallbackURL,
-                isPlaying: controller.isPlaying
+                isPlaying: controller.isPlaying,
+                canvasActive: !VideoPlayback.shared.showsVideo
             )
             .id(controller.current?.id)
             // Hero size is the actual viewport width, independent of the
@@ -184,6 +185,7 @@ extension NowPlayingView {
                     canvasURL: controller.canvasURL,
                     fallbackURL: controller.canvasFallbackURL,
                     isPlaying: controller.isPlaying,
+                    canvasActive: !VideoPlayback.shared.showsVideo,
                     side: side
                 )
             }
@@ -209,7 +211,7 @@ extension NowPlayingView {
             // from a frame clock for exactly this reason. The interpolated
             // position is still the engine's measurement; the TimelineView only
             // decides how often we ask where it has got to.
-            TimelineView(.animation) { timeline in
+            TimelineView(.animation(minimumInterval: nil, paused: !controller.isPlaying)) { timeline in
             LyricsPane(
                 lines: controller.displayedLyrics,
                 originalLines: controller.lyrics,

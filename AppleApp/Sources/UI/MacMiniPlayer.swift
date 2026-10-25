@@ -45,7 +45,7 @@ struct MiniPlayerView: View {
                 // without the words is the one thing they came to the menu bar for
                 // and did not get. On the lyrics pane's clock, so the offset moves
                 // this line with everything else.
-                TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+                TimelineView(.animation(minimumInterval: 0.25, paused: !controller.isPlaying)) { timeline in
                     if let line = CurrentLyricLine.line(
                         in: controller.displayedLyrics,
                         at: controller.livePosition(at: timeline.date),
@@ -119,7 +119,7 @@ struct MiniPlayerView: View {
     }
 
     private var progress: some View {
-        TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+        TimelineView(.animation(minimumInterval: 0.5, paused: !controller.isPlaying)) { _ in
             let duration = max(controller.duration, 0)
             VStack(spacing: 2) {
                 Slider(
