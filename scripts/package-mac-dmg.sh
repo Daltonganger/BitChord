@@ -92,7 +92,7 @@ background_source="$repo_root/artwork/cover-exports/DMG-background.png"
 [[ -f "$background_source" ]] || fail "DMG background not found: $background_source"
 
 stage="$(mktemp -d "${TMPDIR:-/tmp}/bitchord-dmg.XXXXXX")"
-mounted_device=""; mountpoint="$stage/mount"
+mounted_device=""; mountpoint=""
 cleanup() {
   if [[ -n "$mounted_device" ]]; then hdiutil detach "$mounted_device" -quiet >/dev/null 2>&1 || true; fi
   rm -rf "$stage"
@@ -100,13 +100,16 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-mkdir -p "$stage/payload" "$mountpoint"
+mkdir -p "$stage/payload"
 ditto "$app_source" "$stage/payload/BitChord.app"
 app="$stage/payload/BitChord.app"
 rw_image="$stage/BitChord-$version-rw.dmg"
+created_image="$stage/BitChord-$version-created.dmg"
 candidate="$stage/BitChord-$version.dmg"
 safe_entitlements="$stage/ad-hoc-entitlements.plist"
+widget_entitlements="$stage/widget-ad-hoc-entitlements.plist"
 source_entitlements="$repo_root/AppleApp/BitChord.entitlements"
+source_widget_entitlements="$repo_root/AppleApp/BitChordWidget.entitlements"
 
 printf 'Preparing BitChord %s (build %s) as an unsigned, ad-hoc package…\n' "$version" "$build_version"
 # Save the input signature's entitlement claims before stripping it. The source
@@ -122,22 +125,18 @@ while IFS= read -r -d '' profile; do
   fi
 done < <(find "$app" -name embedded.provisionprofile -type f -print0)
 
-cat > "$safe_entitlements" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>com.apple.security.app-sandbox</key><true/>
-  <key>com.apple.security.network.client</key><true/>
-  <key>com.apple.security.files.user-selected.read-write</key><true/>
-</dict></plist>
-PLIST
+cp "$source_entitlements" "$safe_entitlements"
+/usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.ubiquity-kvstore-identifier' "$safe_entitlements"
+/usr/libexec/PlistBuddy -c 'Delete :com.apple.security.application-groups' "$safe_entitlements"
+cp "$source_widget_entitlements" "$widget_entitlements"
+/usr/libexec/PlistBuddy -c 'Delete :com.apple.security.application-groups' "$widget_entitlements"
 
-printf 'Ad-hoc entitlements retained: app sandbox, network client, user-selected read/write files.\n'
+printf 'Ad-hoc app entitlements retained from source, except restricted iCloud KVS and App Groups.\n'
 has_input_entitlement() {
   local key="$1" profile_plist
   if /usr/libexec/PlistBuddy -c "Print :$key" "$stage/input-entitlements.plist" >/dev/null 2>&1 \
      || /usr/libexec/PlistBuddy -c "Print :$key" "$source_entitlements" >/dev/null 2>&1; then return 0; fi
-  for profile_plist in "${profile_plists[@]}"; do
+  for profile_plist in ${profile_plists[@]+"${profile_plists[@]}"}; do
     if /usr/libexec/PlistBuddy -c "Print :Entitlements:$key" "$profile_plist" >/dev/null 2>&1; then return 0; fi
   done
   return 1
@@ -158,7 +157,6 @@ for key in \
     printf 'Dropped %s: %s.\n' "$key" "$reason"
   fi
 done
-printf 'Dropped source com.apple.security.app-sandbox=false; ad-hoc package enables the sandbox.\n'
 printf 'Audio-input entitlement omitted: the macOS app does not capture microphone input.\n'
 
 find "$app" -name embedded.provisionprofile -type f -delete
@@ -171,17 +169,38 @@ if ! otool -l "$app/Contents/MacOS/$executable" | grep -Fq '@executable_path/../
   install_name_tool -add_rpath '@executable_path/../Frameworks' "$app/Contents/MacOS/$executable"
 fi
 
-# Sign loose Mach-O helpers first, then nested code bundles deepest-first, then
-# the containing app. No --deep signing: each nested bundle gets its own seal.
+# Sign standalone dylibs first, then named nested code deepest-first, then
+# remaining bundles and the containing app. Bundle executables are signed as
+# part of their enclosing code bundle. No --deep signing: each nested bundle
+# gets its own seal.
 while IFS= read -r -d '' binary; do
   if file -b "$binary" | grep -q 'Mach-O'; then
     codesign --force --sign - --timestamp=none "$binary"
   fi
-done < <(find "$app/Contents" -type f -perm -111 -print0)
+done < <(find "$app/Contents" -type f -name '*.dylib' -print0)
+sign_nested() {
+  local bundle="$1" entitlements="${2:-}"
+  [[ -e "$bundle" ]] || return 0
+  if [[ -n "$entitlements" ]]; then
+    codesign --force --sign - --timestamp=none --entitlements "$entitlements" "$bundle"
+  else
+    codesign --force --sign - --timestamp=none "$bundle"
+  fi
+}
+sparkle="$app/Contents/Frameworks/Sparkle.framework/Versions/B"
+sign_nested "$sparkle/XPCServices/Downloader.xpc"
+sign_nested "$sparkle/XPCServices/Installer.xpc"
+sign_nested "$sparkle/Autoupdate"
+sign_nested "$sparkle/Updater.app"
+sign_nested "$app/Contents/Frameworks/Sparkle.framework"
+sign_nested "$app/Contents/Frameworks/BitChordShared.framework"
+sign_nested "$app/Contents/Frameworks/NativeCoreFFI.framework"
+sign_nested "$app/Contents/PlugIns/BitChordWidget.appex" "$widget_entitlements"
 while IFS= read -r -d '' code_bundle; do
   case "$code_bundle" in
-    *.app|*.appex) codesign --force --sign - --timestamp=none --entitlements "$safe_entitlements" "$code_bundle" ;;
-    *) codesign --force --sign - --timestamp=none "$code_bundle" ;;
+    "$app/Contents/Frameworks/Sparkle.framework"|"$app/Contents/Frameworks/BitChordShared.framework"|"$app/Contents/Frameworks/NativeCoreFFI.framework"|"$app/Contents/PlugIns/BitChordWidget.appex"|*/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc|*/Sparkle.framework/Versions/B/XPCServices/Installer.xpc|*/Sparkle.framework/Versions/B/Autoupdate|*/Sparkle.framework/Versions/B/Updater.app) ;;
+    *.appex) sign_nested "$code_bundle" "$widget_entitlements" ;;
+    *) sign_nested "$code_bundle" ;;
   esac
 done < <(find "$app/Contents" -depth \( -name '*.appex' -o -name '*.framework' -o -name '*.xpc' -o -name '*.app' \) -print0)
 codesign --force --sign - --timestamp=none --entitlements "$safe_entitlements" "$app"
@@ -190,6 +209,9 @@ lipo -verify_arch arm64 "$app/Contents/MacOS/$executable"
 signature_info="$(codesign -dv --verbose=4 "$app" 2>&1)"
 printf '%s\n' "$signature_info" | grep -Fq 'Signature=adhoc' || fail 'staged app is not ad-hoc signed'
 printf '%s\n' "$signature_info" | grep -Fq 'TeamIdentifier=not set' || fail 'ad-hoc app unexpectedly has a Team ID'
+if printf '%s\n' "$signature_info" | grep -E '^CodeDirectory .*flags=.*\(.*runtime' >/dev/null; then
+  fail 'ad-hoc app unexpectedly enables the hardened runtime'
+fi
 if printf '%s\n' "$signature_info" | grep -q '^Authority='; then fail 'ad-hoc app unexpectedly has a signing authority'; fi
 codesign -d --entitlements :- "$app" > "$stage/final-entitlements.plist" 2>/dev/null
 for forbidden in com.apple.developer.ubiquity-kvstore-identifier com.apple.security.application-groups com.apple.security.keychain-access-groups application-identifier com.apple.developer.team-identifier; do
@@ -210,7 +232,7 @@ tiffutil -cathidpicheck "$stage/dmg-background-1x.tiff" "$stage/dmg-background-2
 # Use a read/write staging image so the Finder layout can be saved and loaded
 # again from its .DS_Store before making the compressed, read-only distribution.
 create-dmg \
-  --overwrite --format UDRW \
+  --overwrite \
   --volname "BitChord $version" \
   --background "$stage/dmg-background.tiff" \
   --volicon "$icon_source" \
@@ -222,10 +244,18 @@ create-dmg \
   --hide-extension "BitChord.app" \
   --app-drop-link 576 280 \
   --hdiutil-quiet \
-  "$rw_image" "$stage/payload"
+  "$created_image" "$stage/payload"
 
-mounted_device="$(hdiutil attach -readwrite -nobrowse -mountpoint "$mountpoint" "$rw_image" | awk '/\/dev\// {print $1; exit}')"
-[[ -n "$mounted_device" ]] || fail 'could not mount the writable DMG'
+hdiutil convert "$created_image" -format UDRW -o "$rw_image" >/dev/null
+
+volume_mountpoint="/Volumes/BitChord $version"
+if mount | grep -Fq " on $volume_mountpoint ("; then
+  fail "a stale BitChord volume is already mounted at: $volume_mountpoint"
+fi
+attach_output="$(hdiutil attach -readwrite "$rw_image")"
+mounted_device="$(printf '%s\n' "$attach_output" | awk '/^\/dev\// {print $1; exit}')"
+mountpoint="$(printf '%s\n' "$attach_output" | awk '/\/Volumes\// { sub(/^.*\/Volumes\//, "/Volumes/"); print; exit }')"
+[[ -n "$mounted_device" && -n "$mountpoint" ]] || fail 'could not find the device and /Volumes mount path for the writable DMG'
 osascript - "$version" "$mountpoint" <<'APPLESCRIPT'
 on run argv
   set volumeName to "BitChord " & item 1 of argv
