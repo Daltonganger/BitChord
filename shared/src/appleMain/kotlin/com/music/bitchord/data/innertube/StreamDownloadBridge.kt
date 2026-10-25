@@ -2,6 +2,8 @@ package com.music.bitchord.data.innertube
 
 import com.music.bitchord.data.DebugLog
 import com.music.bitchord.data.http.Http
+import com.music.bitchord.data.http.HttpStatusException
+import com.music.bitchord.data.http.RawHttpBytes
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
@@ -120,10 +122,13 @@ object StreamDownloadBridge {
         maxKbps: Int,
         url: String,
         headers: Map<String, String>,
+        expectedMimeType: String?,
+        firstRangeRetry: Int,
         ready: DownloadCallback,
         done: DownloadCallback,
     ) {
-        startStream(null, url, headers, ready, done, videoId = videoId, maxKbps = maxKbps)
+        startStream(null, url, headers, ready, done, videoId = videoId, maxKbps = maxKbps,
+            expectedMimeType = expectedMimeType, firstRangeRetry = firstRangeRetry)
     }
 
     /**
@@ -164,6 +169,26 @@ object StreamDownloadBridge {
         }
     }
 
+    /** One bounded opening request; its response is the validation and audio read. */
+    private suspend fun fetchFirstRange(url: String, headers: Map<String, String>): RawHttpBytes? {
+        val startGeneration = networkGeneration.value
+        return coroutineScope {
+            val fetch = async { Http.getBytesRaw(url, headers, FIRST_RANGE_BYTES.toInt(), CHUNK_TIMEOUT_MS) }
+            val watcher = launch {
+                networkGeneration.first { it != startGeneration }
+                fetch.cancel(CancellationException("network changed"))
+            }
+            try {
+                fetch.await()
+            } catch (e: CancellationException) {
+                currentCoroutineContext().ensureActive()
+                null
+            } finally {
+                watcher.cancel()
+            }
+        }
+    }
+
     /** Sleep [millis], or less if the network path changes first. */
     private suspend fun backoff(millis: Long) {
         val startGeneration = networkGeneration.value
@@ -179,6 +204,8 @@ object StreamDownloadBridge {
         done: DownloadCallback,
         videoId: String? = null,
         maxKbps: Int = Int.MAX_VALUE,
+        expectedMimeType: String? = null,
+        firstRangeRetry: Int = 0,
     ) {
         val job = bridgeScope.launch(start = CoroutineStart.LAZY) {
             var tmpPath: String? = null
@@ -234,11 +261,27 @@ object StreamDownloadBridge {
                     val rangeHeaders = currentHeaders + ("Range" to "bytes=$offset-$rangeEnd")
 
                     val data = try {
-                        fetchRange(currentUrl, rangeHeaders) ?: throw NetworkChanged()
+                        if (offset == 0L) {
+                            val response = fetchFirstRange(currentUrl, rangeHeaders) ?: throw NetworkChanged()
+                            if (response.status in REFUSAL_CODES) throw HttpStatusException(response.status)
+                            if (response.status !in 200..299) throw HttpStatusException(response.status)
+                            validateFirstMediaRange(response, expectedMimeType)
+                        } else {
+                            fetchRange(currentUrl, rangeHeaders) ?: throw NetworkChanged()
+                        }
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Throwable) {
                         val code = httpCodeOf(e)
+                        if (offset == 0L && !readyFired && videoId != null &&
+                            (e is InvalidFirstMediaRangeException || (code != null && code in REFUSAL_CODES))) {
+                            val status = (e as? InvalidFirstMediaRangeException)?.responseCode ?: code ?: 0
+                            StreamResolver.onFirstRangeRejected(
+                                currentUrl, status, excludeClient = firstRangeRetry > 0
+                            )
+                            throw e
+                        }
+                        if (e is InvalidFirstMediaRangeException) throw e
                         if (code != null && code in REFUSAL_CODES) {
                             DebugLog.w("stream refused with $code at offset $offset")
                             StreamResolver.onPlaybackRefused(currentUrl, code)
@@ -350,7 +393,10 @@ object StreamDownloadBridge {
                 // with better networking". Tagging it here, rather than leaving the
                 // host to read the message, is the point of [isRefusal].
                 val code = httpCodeOf(e)
-                val detail = e.message ?: e.toString()
+                val detail = when (e) {
+                    is InvalidFirstMediaRangeException -> "$INVALID_FIRST_RANGE_PREFIX${e.message ?: "media rejected"}"
+                    else -> e.message ?: e.toString()
+                }
                 done.onResult(
                     null,
                     if (code != null && code in REFUSAL_CODES) "$REFUSED_PREFIX$code $detail"
@@ -399,12 +445,15 @@ object StreamDownloadBridge {
      */
     fun isRefusal(message: String?): Boolean = message?.startsWith(REFUSED_PREFIX) == true
 
+    fun isInvalidFirstRange(message: String?): Boolean = message?.startsWith(INVALID_FIRST_RANGE_PREFIX) == true
+
     /** The status code a refusal carried, when [isRefusal]. */
     fun refusalCode(message: String?): Int? =
         if (message == null || !isRefusal(message)) null
         else message.removePrefix(REFUSED_PREFIX).takeWhile { it.isDigit() }.toIntOrNull()
 
     private const val REFUSED_PREFIX = "refused: "
+    private const val INVALID_FIRST_RANGE_PREFIX = "invalid first range: "
     private val REFUSAL_CODES = setOf(403, 404, 410)
 
 

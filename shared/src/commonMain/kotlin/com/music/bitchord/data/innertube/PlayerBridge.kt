@@ -71,6 +71,7 @@ object PlayerBridge {
                     headers = resolved.headers,
                     loudnessDb = resolved.loudnessDb,
                     durationSeconds = resolved.durationSeconds,
+                    clientName = resolved.clientName,
                 )
                 Innertube.checkSession(generation)
                 callback.onResult(json.encodeToString(StreamPayload.serializer(), payload), null)
@@ -92,8 +93,8 @@ object PlayerBridge {
     /**
      * Feed a refusal observed on the *playback* path back into the resolver.
      *
-     * The probe runs before playback and not again, so nothing else would ever find
-     * out that a URL which served bytes once has stopped. Without this the client
+     * No probe runs after playback starts, so nothing else would ever find out
+     * that a URL which served bytes once has stopped. Without this the client
      * stays preferred and the URL stays cached, and every following track fails the
      * same way until the app is restarted.
      */
@@ -209,5 +210,6 @@ object PlayerBridge {
         /** Absent (null) on payloads minted before the figure was parsed. */
         val loudnessDb: Double? = null,
         val durationSeconds: Long? = null,
+        val clientName: String = "unknown",
     )
 }

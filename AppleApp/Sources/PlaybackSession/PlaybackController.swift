@@ -1,5 +1,6 @@
 import Foundation
 import BitChordShared
+import os
 #if os(iOS)
 import UIKit
 #if DEBUG
@@ -78,6 +79,18 @@ struct TransitionWindow: Equatable, Sendable {
     var end: Double
 }
 
+private enum PlaybackLatencySignposts {
+    private static let log = OSLog(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bitchord.app",
+        category: "PlaybackLatency"
+    )
+
+    static func record(_ name: StaticString, entryID: String, elapsed: TimeInterval) {
+        os_signpost(.event, log: log, name: name,
+                    "%{public}@ elapsed_ms=%{public}.1f", entryID as NSString, elapsed * 1_000)
+    }
+}
+
 /// The app-level playback controller: owns the Rust engine, the queue, and
 /// the session-layer integration (now playing, widget state).
 ///
@@ -90,6 +103,18 @@ struct TransitionWindow: Equatable, Sendable {
 @MainActor
 @Observable
 final class PlaybackController {
+    private typealias PlaybackLatencyRecorder = @Sendable (TimeInterval, String, String) async -> Void
+
+    private struct PlaybackLatencySample {
+        let entryID: String
+        let startedAt: TimeInterval
+        let initialPosition: Double
+        var resolvedAt: TimeInterval?
+        var firstBufferAt: TimeInterval?
+        var cacheState = "cold"
+        var client = "unknown"
+    }
+
     let engine = PlayerEngine()
 
     private(set) var state: PlaybackState = .stopped
@@ -98,11 +123,18 @@ final class PlaybackController {
     private(set) var playbackContext: String?
     /// Stable identity for the collection behind the queue, used by its hero control.
     private(set) var playbackContextID: String?
-    private(set) var queue: [QueueEntry] = []
-    private(set) var playingIndex: Int = 0
+    private(set) var queue: [QueueEntry] = [] {
+        didSet { refreshUpcomingURLPrefetch() }
+    }
+    private(set) var playingIndex: Int = 0 {
+        didSet { refreshUpcomingURLPrefetch() }
+    }
     private(set) var position: Double = 0
     private(set) var duration: Double = 0
     private(set) var lastError: String?
+    @ObservationIgnored private var pendingPlaybackLatency: PlaybackLatencySample?
+    @ObservationIgnored private var urlPrefetchTask: Task<Void, Never>?
+    @ObservationIgnored private var urlPrefetchFingerprint: String?
     /// A′3's session pacing: at most one transition in four may use an effect
     /// technique, so a set sounds mixed rather than gimmicky. The planner still
     /// *would* choose a technique for the pair; it blends instead and says
@@ -696,6 +728,23 @@ final class PlaybackController {
                 self.position = self.playbackPosition
                 self.positionSampledAt = Date()
                 self.nowPlaying.update(position: self.position)
+                if let sample = self.pendingPlaybackLatency,
+                   sample.entryID == self.current?.id,
+                   let resolvedAt = sample.resolvedAt,
+                   let firstBufferAt = sample.firstBufferAt,
+                   self.position > sample.initialPosition + 0.01 {
+                    let audibleAt = ProcessInfo.processInfo.systemUptime
+                    let summary = String(
+                        format: "latency: tap→resolved %.0fms, →first buffer %.0fms, →first audible %.0fms (%@, %@)",
+                        (resolvedAt - sample.startedAt) * 1_000,
+                        (firstBufferAt - sample.startedAt) * 1_000,
+                        (audibleAt - sample.startedAt) * 1_000,
+                        sample.cacheState as NSString,
+                        sample.client as NSString
+                    )
+                    PlaybackDebugLog.shared.record(summary, about: sample.entryID)
+                    self.pendingPlaybackLatency = nil
+                }
                 // The periodic output-health NSLog that used to sit here is
                 // gone: every figure it carried — buffered frames, silent
                 // callbacks, rebuilds, xruns and the output peak — is on the
@@ -2091,6 +2140,24 @@ final class PlaybackController {
            state == .buffering || state == .playing {
             return
         }
+        let latencyStartedAt = ProcessInfo.processInfo.systemUptime
+        pendingPlaybackLatency = PlaybackLatencySample(
+            entryID: entry.id, startedAt: latencyStartedAt, initialPosition: startAt ?? 0
+        )
+        PlaybackLatencySignposts.record("tap", entryID: entry.id, elapsed: 0)
+        let latencyRecorder: PlaybackLatencyRecorder = { [weak self] resolvedAt, cacheState, client in
+            await MainActor.run { [weak self] in
+                guard let self, var sample = self.pendingPlaybackLatency,
+                      sample.entryID == entry.id else { return }
+                sample.resolvedAt = resolvedAt
+                sample.cacheState = cacheState
+                sample.client = client
+                self.pendingPlaybackLatency = sample
+                PlaybackLatencySignposts.record(
+                    "resolved", entryID: entry.id, elapsed: resolvedAt - sample.startedAt
+                )
+            }
+        }
         durationRepairTask?.cancel()
         playGeneration += 1
         let generation = playGeneration
@@ -2166,7 +2233,9 @@ final class PlaybackController {
                 // could send LoadTrack before the engine had an output stream;
                 // the UI then had lyrics and a playing state without audio.
                 try await engineStartupTask?.value
-                let outcome = try await Self.resolveSource(entry, prefs: prefs)
+                let outcome = try await Self.resolveSource(
+                    entry, prefs: prefs, latencyResolved: latencyRecorder
+                )
                 let stillCurrent = await MainActor.run { [weak self] in
                     self?.playGeneration == generation
                 }
@@ -2338,6 +2407,8 @@ final class PlaybackController {
         /// hits and local files carry none). Rides to the engine's
         /// normalization stage with the load.
         var loudnessDb: Double? = nil
+        var clientName: String? = nil
+        var resolutionAt: TimeInterval? = nil
         var origin: Origin = .other
         var youtubeVideoId: String? = nil
 
@@ -2370,6 +2441,7 @@ final class PlaybackController {
         enum Winner: Sendable {
             case substitute(QualityUpgrade.Candidate)
             case youtube(ResolvedSource)
+            case timedOut
             case none
         }
 
@@ -2377,15 +2449,24 @@ final class PlaybackController {
         private var lookupFinished = false
         private var fallbackFinished = false
         private var continuation: CheckedContinuation<Winner, Never>?
+        private var timeoutTask: Task<Void, Never>?
 
-        func wait() async -> Winner {
+        func wait(timeoutNanoseconds: UInt64 = 800_000_000) async -> Winner {
             await withCheckedContinuation { continuation in
                 if let result {
                     continuation.resume(returning: result)
                 } else {
                     self.continuation = continuation
+                    timeoutTask = Task {
+                        try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                        await self.timeOut()
+                    }
                 }
             }
+        }
+
+        private func timeOut() {
+            finish(.timedOut)
         }
 
         func finishLookup(_ candidate: QualityUpgrade.Candidate?) {
@@ -2411,6 +2492,8 @@ final class PlaybackController {
         private func finish(_ winner: Winner) {
             guard result == nil else { return }
             result = winner
+            timeoutTask?.cancel()
+            timeoutTask = nil
             continuation?.resume(returning: winner)
             continuation = nil
         }
@@ -2437,16 +2520,21 @@ final class PlaybackController {
         }
     }
 
-    private static func resolveSource(_ entry: QueueEntry, prefs: ResolvePrefs) async throws -> ResolveOutcome {
+    private static func resolveSource(
+        _ entry: QueueEntry, prefs: ResolvePrefs,
+        latencyResolved: PlaybackLatencyRecorder? = nil
+    ) async throws -> ResolveOutcome {
         await DownloadStore.shared.waitUntilReady()
         try Task.checkCancellation()
         if let asset = DownloadStore.shared.asset(for: entry) {
+            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "download")
             return ResolveOutcome(source: ResolvedSource(source: asset.path, headers: [:], kbps: asset.kbps,
                 lossless: asset.lossless, codec: asset.codec, origin: .local, youtubeVideoId: asset.youtubeVideoId), leftover: nil)
         }
         if entry.source.hasPrefix("saavn:") || entry.id.hasPrefix("saavn:") {
             let id = entry.source.hasPrefix("saavn:") ? String(entry.source.dropFirst(6)) : String(entry.id.dropFirst(6))
             if let hit = await JioSaavn.streamURL(for: id) {
+                await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "JioSaavn")
                 return ResolveOutcome(
                     source: ResolvedSource(
                         source: hit.url, headers: [:], kbps: hit.kbps,
@@ -2468,6 +2556,7 @@ final class PlaybackController {
                 // length and reject every match.
                 durationSec: entry.durationSeconds > 0 ? Int(entry.durationSeconds.rounded()) : nil
             ) {
+                await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "source substitute")
                 return ResolveOutcome(
                     source: ResolvedSource(
                         source: stream.url, headers: stream.headers, kbps: stream.kbps ?? 0,
@@ -2481,10 +2570,12 @@ final class PlaybackController {
         }
         #if DEBUG
         if entry.source.hasPrefix("dolby-test:") {
+            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "fixture")
             return ResolveOutcome(source: ResolvedSource(source: String(entry.source.dropFirst(11)), headers: [:], kbps: 0, codec: "eac3-joc"), leftover: nil)
         }
         #endif
         guard entry.source.hasPrefix("yt:") else {
+            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "WebDAV/local")
             // A file on a remote library plays from its own address, and that address
             // needs the share's credential — the same header the cover fetch and the
             // listing used, asked of the one rule that decides which requests may carry
@@ -2504,6 +2595,7 @@ final class PlaybackController {
         let videoId = String(entry.source.dropFirst(3))
         if let growing = streamGate.lock.withLock({ streamGate.growing[videoId] }),
            FileManager.default.fileExists(atPath: growing) {
+            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "stream cache")
             return ResolveOutcome(
                 source: ResolvedSource(
                     source: growing, headers: [:], kbps: 0, durationSec: streamGate.lock.withLock { streamGate.durations[videoId] }, origin: .cache
@@ -2518,19 +2610,24 @@ final class PlaybackController {
         // arrive at the answer it already knew.
         if OriginalVersion.shared.isPinned(videoId: videoId) {
             let source = try await Self.resolveYouTube(videoId: videoId, prefs: prefs)
+            await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
+                                   "cold", source.clientName ?? "unknown")
             return ResolveOutcome(source: source, leftover: nil)
         }
         if let cached = await StreamFileCache.shared.path(for: videoId, maxKbps: prefs.maxKbps, requireLossless: prefs.wantLossless) {
+            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "stream cache")
             let metadata = await StreamFileCache.shared.metadata(at: cached)
             let cachedDuration = metadata?.durationSeconds
             return ResolveOutcome(
                 source: ResolvedSource(
-                    source: cached, headers: [:], kbps: metadata?.kbps ?? 0, lossless: QualityUpgrade.Format.isLosslessCodec(metadata?.codec), codec: metadata?.codec, durationSec: cachedDuration, loudnessDb: metadata?.relativeLoudnessDb, origin: .cache, youtubeVideoId: metadata?.youtubeVideoId ?? videoId
+                    source: cached, headers: [:], kbps: metadata?.kbps ?? 0, lossless: QualityUpgrade.Format.isLosslessCodec(metadata?.codec), codec: metadata?.codec, durationSec: cachedDuration, loudnessDb: metadata?.relativeLoudnessDb, clientName: "cache", origin: .cache, youtubeVideoId: metadata?.youtubeVideoId ?? videoId
                 ),
                 leftover: nil
             )
         }
-        return try await resolveWithModulePriority(entry, videoId: videoId, prefs: prefs)
+        return try await resolveWithModulePriority(
+            entry, videoId: videoId, prefs: prefs, latencyResolved: latencyResolved
+        )
     }
 
     /// Upstream `resolveWithModulePriority`: start YouTube and substitutes
@@ -2538,7 +2635,8 @@ final class PlaybackController {
     /// note hostage. A lookup that loses is **not** cancelled — it is handed
     /// to QualityUpgrade as `inFlight`.
     private static func resolveWithModulePriority(
-        _ entry: QueueEntry, videoId: String, prefs: ResolvePrefs
+        _ entry: QueueEntry, videoId: String, prefs: ResolvePrefs,
+        latencyResolved: PlaybackLatencyRecorder? = nil
     ) async throws -> ResolveOutcome {
         let lookup = Task<QualityUpgrade.Candidate?, Never> {
             await Self.resolveSubstitute(entry, prefs: prefs)?.asCandidate()
@@ -2556,6 +2654,7 @@ final class PlaybackController {
         if prefs.preferMusicOnly, entry.isVideo {
             if let stream = await lookup.value {
                 fallback.cancel()
+                await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "source substitute")
                 return ResolveOutcome(
                     source: ResolvedSource(
                         source: stream.url, headers: stream.headers,
@@ -2567,16 +2666,20 @@ final class PlaybackController {
                     leftover: nil
                 )
             }
-            return ResolveOutcome(source: try await fallback.value, leftover: nil)
+            let source = try await fallback.value
+            await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
+                                   "cold", source.clientName ?? "unknown")
+            return ResolveOutcome(source: source, leftover: nil)
         }
 
         let race = FirstUsableSourceRace()
         _ = Task { await race.finishLookup(await lookup.value) }
         _ = Task { await race.finishFallback(try? await fallback.value) }
 
-        switch await race.wait() {
+        switch await race.wait(timeoutNanoseconds: 800_000_000) {
         case .substitute(let stream):
             fallback.cancel()
+            await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "source substitute")
             let source = ResolvedSource(
                 source: stream.url, headers: stream.headers,
                 kbps: stream.format.kbps ?? 0,
@@ -2588,11 +2691,29 @@ final class PlaybackController {
         case .youtube(let source):
             // Preserve the slower substitute lookup for the in-playback quality
             // upgrade path instead of making it delay the first audible sample.
+            await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
+                                   "cold", source.clientName ?? "unknown")
             return ResolveOutcome(source: source, leftover: lookup)
+        case .timedOut:
+            // A substitute lookup gets a short head start, then the direct
+            // YouTube URL carries first sound while the lookup stays available
+            // to the existing in-playback quality-upgrade path.
+            do {
+                let source = try await fallback.value
+                await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
+                                       "cold", source.clientName ?? "unknown")
+                return ResolveOutcome(source: source, leftover: lookup)
+            } catch {
+                lookup.cancel()
+                throw error
+            }
         case .none:
             // Preserve the resolver's actual failure instead of replacing
             // account/CDN errors with an uninformative "No stream".
-            return ResolveOutcome(source: try await fallback.value, leftover: nil)
+            let source = try await fallback.value
+            await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
+                                   "cold", source.clientName ?? "unknown")
+            return ResolveOutcome(source: source, leftover: nil)
         }
     }
 
@@ -2621,8 +2742,10 @@ final class PlaybackController {
     /// engine — which has its own connection management and its own retries — is a
     /// better second chance than minting a new URL for a problem the new URL would
     /// not fix.
-    private static func resolveYouTube(videoId: String, prefs: ResolvePrefs) async throws -> ResolvedSource {
-        let stream: ResolvedYouTubeStream
+    private static func resolveYouTube(
+        videoId: String, prefs: ResolvePrefs
+    ) async throws -> ResolvedSource {
+        var stream: ResolvedYouTubeStream
         do {
             stream = try await InnertubeStreamResolver.shared.resolve(videoId: videoId, maxKbps: prefs.maxKbps)
         } catch {
@@ -2635,51 +2758,50 @@ final class PlaybackController {
             }
             throw error
         }
-        if let seconds = stream.durationSeconds, seconds > 0 {
-            streamGate.lock.withLock {
-                streamGate.durations[videoId] = seconds
+        var resolvedAt = ProcessInfo.processInfo.systemUptime
+        var rangeRetry = 0
+        while true {
+            if let seconds = stream.durationSeconds, seconds > 0 {
+                streamGate.lock.withLock { streamGate.durations[videoId] = seconds }
             }
-        }
-        do {
-            let localPath = try await streamViaKtor(
-                videoId: videoId, url: stream.url, headers: stream.headers, codec: stream.mimeType.lowercased().contains("opus") ? "Opus" : "AAC", kbps: stream.kbps, relativeLoudnessDb: stream.loudnessDb, youtubeVideoId: videoId, durationSeconds: stream.durationSeconds, maxKbps: prefs.maxKbps)
-            return ResolvedSource(
-                source: localPath, headers: [:], kbps: stream.kbps,
-                durationSec: stream.durationSeconds, loudnessDb: stream.loudnessDb, origin: .youtube, youtubeVideoId: videoId
-            )
-        } catch {
-            let reason = (error as? InnertubeStreamResolver.StreamError)?.message
-            if StreamDownloadBridge.shared.isRefusal(message: reason),
-               let code = StreamDownloadBridge.shared.refusalCode(message: reason) {
-                DebugLog.shared.d(
-                    message: "\(videoId): refused with \(code); the URL is dead, "
-                        + "so asking for a new one"
+            do {
+                let localPath = try await streamViaKtor(
+                    videoId: videoId, url: stream.url, headers: stream.headers,
+                    codec: stream.mimeType.lowercased().contains("opus") ? "Opus" : "AAC",
+                    kbps: stream.kbps, relativeLoudnessDb: stream.loudnessDb,
+                    youtubeVideoId: videoId, durationSeconds: stream.durationSeconds,
+                    maxKbps: prefs.maxKbps, expectedMimeType: stream.mimeType,
+                    firstRangeRetry: rangeRetry
                 )
-                // The stand-down above already happened inside the bridge.
-                let fresh = try await InnertubeStreamResolver.shared.resolve(
-                    videoId: videoId, maxKbps: prefs.maxKbps
+                return ResolvedSource(
+                    source: localPath, headers: [:], kbps: stream.kbps,
+                    durationSec: stream.durationSeconds, loudnessDb: stream.loudnessDb,
+                    clientName: stream.clientName, resolutionAt: resolvedAt,
+                    origin: .youtube, youtubeVideoId: videoId
                 )
-                do {
-                    let localPath = try await streamViaKtor(
-                        videoId: videoId, url: fresh.url, headers: fresh.headers, codec: fresh.mimeType.lowercased().contains("opus") ? "Opus" : "AAC", kbps: fresh.kbps, relativeLoudnessDb: fresh.loudnessDb, youtubeVideoId: videoId, durationSeconds: fresh.durationSeconds, maxKbps: prefs.maxKbps)
+            } catch {
+                let reason = (error as? InnertubeStreamResolver.StreamError)?.message
+                let rejected = StreamDownloadBridge.shared.isInvalidFirstRange(message: reason)
+                    || StreamDownloadBridge.shared.isRefusal(message: reason)
+                guard rejected else {
+                    DebugLog.shared.d(message: "\(videoId): stream failed: \(reason ?? "\(error)")")
                     return ResolvedSource(
-                        source: localPath, headers: [:], kbps: fresh.kbps,
-                        durationSec: fresh.durationSeconds, loudnessDb: fresh.loudnessDb, origin: .youtube, youtubeVideoId: videoId
-                    )
-                } catch {
-                    // Refused again, or never served. Say so rather than handing
-                    // on a URL already known to be refused — the engine would
-                    // retry it internally for as long as it liked.
-                    throw InnertubeStreamResolver.StreamError(
-                        message: "Refused (\(code)) and refused again on a fresh URL"
+                        source: stream.url, headers: stream.headers, kbps: stream.kbps,
+                        durationSec: stream.durationSeconds, loudnessDb: stream.loudnessDb,
+                        clientName: stream.clientName, resolutionAt: resolvedAt,
+                        origin: .youtube, youtubeVideoId: videoId
                     )
                 }
+                guard rangeRetry < 2 else {
+                    throw InnertubeStreamResolver.StreamError(
+                        message: "Opening media range was rejected after same-client and alternate-client retries: \(reason ?? "unknown response")"
+                    )
+                }
+                rangeRetry += 1
+                DebugLog.shared.d(message: "\(videoId): opening range rejected; resolving retry \(rangeRetry)")
+                stream = try await InnertubeStreamResolver.shared.resolve(videoId: videoId, maxKbps: prefs.maxKbps)
+                resolvedAt = ProcessInfo.processInfo.systemUptime
             }
-            DebugLog.shared.d(message: "\(videoId): stream failed: \(reason ?? "\(error)")")
-            return ResolvedSource(
-                source: stream.url, headers: stream.headers, kbps: stream.kbps,
-                durationSec: stream.durationSeconds, loudnessDb: stream.loudnessDb, origin: .youtube, youtubeVideoId: videoId
-            )
         }
     }
 
@@ -2752,31 +2874,46 @@ final class PlaybackController {
         let lossless: Bool?
     }
 
-    /// Warm the immediate successor after foreground playback loads. Back
-    /// reuses tracks already fetched into the stream cache. Keeping read-ahead
-    /// bounded avoids a burst of obsolete player walks during rapid Next taps.
+    /// Warm short-lived stream URLs for the upcoming queue window. This does
+    /// not request media bytes; the opening range remains coupled to playback.
     private func warmUpcoming(around index: Int, generation: UInt64) {
+        guard state == .playing || state == .buffering || state == .paused else { return }
         // Repeat-one never arms a different next track into the engine, but the
         // song after the loop still has to be measured while the loop runs —
         // otherwise turning repeat off starts a cold whole-track decode with
         // seconds left (upstream requestAnalysisAround). Automix self-mix only
         // needs the current file, which is already loaded.
-        // Previously played tracks are already in the stream cache. Resolve
-        // only the immediate successor, keeping rapid navigation from flooding
-        // the provider with obsolete requests two tracks ahead and behind.
-        let prefetch = queue.indices.contains(index + 1) ? [queue[index + 1]] : []
-        guard !prefetch.isEmpty else { return }
+        // The shared resolver caches issued URLs for 20 seconds. Keep the work
+        // within that freshness window and cap it to a visible queue-sized set.
+        let prefetch = queue.dropFirst(index + 1).prefix(3).filter {
+            $0.source.hasPrefix("yt:") && !$0.id.hasPrefix("saavn:")
+        }
         let prefs = ResolvePrefs.current()
-        for entry in prefetch {
-            let id = entry.id
-            Task.detached(priority: .userInitiated) { [weak self] in
+        let fingerprint = "\(prefs.maxKbps)|" + prefetch.map(\.id).joined(separator: "|")
+        guard fingerprint != urlPrefetchFingerprint else { return }
+        urlPrefetchFingerprint = fingerprint
+        urlPrefetchTask?.cancel()
+        guard !prefetch.isEmpty else { return }
+        PlaybackDebugLog.shared.record("latency: prefetch url \(prefetch.count) rows")
+        urlPrefetchTask = Task.detached(priority: .utility) { [weak self] in
+            for entry in prefetch {
+                guard !Task.isCancelled else { return }
+                let id = entry.id
                 let stillQueued = await MainActor.run { [weak self] in
                     guard let self else { return false }
                     return self.playGeneration == generation && self.queue.contains { $0.id == id }
                 }
-                guard stillQueued else { return }
-                _ = try? await Self.resolveSource(entry, prefs: prefs)
+                guard stillQueued else { continue }
+                let videoId = String(entry.source.dropFirst(3))
+                _ = try? await InnertubeStreamResolver.shared.resolve(videoId: videoId, maxKbps: prefs.maxKbps)
             }
+        }
+    }
+
+    private func refreshUpcomingURLPrefetch() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.warmUpcoming(around: self.playingIndex, generation: self.playGeneration)
         }
     }
 
@@ -2798,12 +2935,12 @@ final class PlaybackController {
     /// appending; [StreamFileCache] is filled when the last one lands so a
     /// re-tap does not fetch again.
     private static func streamViaKtor(
-        videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, maxKbps: Int = Int(Int32.max)
+        videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, maxKbps: Int = Int(Int32.max), expectedMimeType: String? = nil, firstRangeRetry: Int = 0
     ) async throws -> String {
         let taskKey = videoId + "|" + StreamFileCache.qualityIdentity + "|" + DiskCache.hashName(url)
         let task: Task<String, Error> = streamGate.lock.withLock {
             if let existing = streamGate.tasks[taskKey] { return existing }
-            let created = Task { try await streamViaKtorOnce(videoId: videoId, url: url, headers: headers, codec: codec, kbps: kbps, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds, maxKbps: maxKbps) }
+            let created = Task { try await streamViaKtorOnce(videoId: videoId, url: url, headers: headers, codec: codec, kbps: kbps, relativeLoudnessDb: relativeLoudnessDb, youtubeVideoId: youtubeVideoId, durationSeconds: durationSeconds, maxKbps: maxKbps, expectedMimeType: expectedMimeType, firstRangeRetry: firstRangeRetry) }
             streamGate.tasks[taskKey] = created
             return created
         }
@@ -2822,10 +2959,10 @@ final class PlaybackController {
     }
 
     private static func streamViaKtorOnce(
-        videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, maxKbps: Int = Int(Int32.max)
+        videoId: String, url: String, headers: [String: String], codec: String = "unknown", kbps: Int = 0, relativeLoudnessDb: Double? = nil, youtubeVideoId: String? = nil, durationSeconds: Int? = nil, maxKbps: Int = Int(Int32.max), expectedMimeType: String? = nil, firstRangeRetry: Int = 0
     ) async throws -> String {
         let qualityIdentity = StreamFileCache.qualityIdentity
-        return try await withCheckedThrowingContinuation { continuation in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             let lock = NSLock()
             var resumed = false
             let ready = DownloadCallbackAdapter { path, message in
@@ -2856,7 +2993,9 @@ final class PlaybackController {
             if let youtubeVideoId {
                 StreamDownloadBridge.shared.streamTrackToFile(
                     videoId: youtubeVideoId, maxKbps: Int32(clamping: maxKbps),
-                    url: url, headers: headers, ready: ready, done: done)
+                    url: url, headers: headers, expectedMimeType: expectedMimeType,
+                    firstRangeRetry: Int32(clamping: firstRangeRetry),
+                    ready: ready, done: done)
                 return
             }
             StreamDownloadBridge.shared.streamToFile(url: url, headers: headers, ready: ready, done: done)
@@ -2880,6 +3019,15 @@ final class PlaybackController {
         startAt: Double = 0,
         headers: [String: String]
     ) {
+        if var pending = pendingPlaybackLatency, pending.entryID == entry.id {
+            let firstBufferAt = ProcessInfo.processInfo.systemUptime
+            PlaybackLatencySignposts.record(
+                "first-buffer", entryID: entry.id,
+                elapsed: firstBufferAt - pending.startedAt
+            )
+            pending.firstBufferAt = firstBufferAt
+            pendingPlaybackLatency = pending
+        }
         NSLog("[BitChord] loaded track at %.2fs (duration %.2fs)", startAt, info.durationSeconds)
         loadingGeneration = nil
         playingIndex = index
@@ -2952,6 +3100,14 @@ final class PlaybackController {
     }
 
     private func loadDidFail(entry: QueueEntry, error: Error) {
+        if let pending = pendingPlaybackLatency, pending.entryID == entry.id {
+            let resolved = pending.resolvedAt.map { String(format: "%.0fms", ($0 - pending.startedAt) * 1_000) } ?? "unresolved"
+            PlaybackDebugLog.shared.record(
+                "latency: tap→resolved \(resolved), first buffer unavailable, first audible unavailable (\(pending.cacheState), \(pending.client))",
+                about: entry.id
+            )
+            pendingPlaybackLatency = nil
+        }
         loadingGeneration = nil
         holdAfterLoad = false
         lastError = "Couldn't play “\(entry.title)” — \(error.localizedDescription)"
