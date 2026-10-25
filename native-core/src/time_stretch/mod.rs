@@ -56,7 +56,7 @@
 //!
 //! ## Latency
 //!
-//! `frame + search` samples, about 12 ms at 48 kHz — small enough that the
+//! `frame + search` samples, about 50 ms at 48 kHz — small enough that the
 //! blend's own timing is unaffected, and it is bounded rather than growing with
 //! stream length, because the anchor only ever moves forward by `hop * rate` per
 //! output hop. [`TimeStretch::latency_frames`] reports it and the mixer
@@ -72,19 +72,26 @@
 
 use core::f32::consts::PI;
 
-/// Analysis frame. 512 samples is 10.7 ms at 48 kHz: short enough that a ±5 %
-/// stretch smears less than a pitch period of a bass note, long enough that the
-/// similarity search has something to correlate.
-const FRAME: usize = 512;
+/// Analysis frame. 2048 samples is 43 ms at 48 kHz, inside the 40–80 ms that
+/// music stretchers use. The first version used 10.7 ms, which is shorter than
+/// one cycle of a kick or a bass line: every overlap then mixed two different
+/// phases of the low end, and dense records came out grainy for as long as the
+/// stage ran.
+const FRAME: usize = 2048;
 /// Synthesis hop. A quarter of the frame is 75 % overlap — the usual WSOLA
 /// figure, and the minimum that keeps the Hann window sum flat enough to
 /// normalise away.
 const HOP: usize = FRAME / 4;
 /// How far the analysis position may slide to find a waveform match, in
-/// samples either way. Must be well under a pitch period of the content that
-/// matters: too wide and the search will happily lock onto a *different* cycle
-/// of a low note, which is an octave error wearing a similarity mask.
-const SEARCH: isize = 64;
+/// samples either way. 7.5 ms is half a cycle at 67 Hz, so the search can bring
+/// a kick or a bass note into phase rather than only the treble. At ±1.3 ms it
+/// could not reach anything under ~380 Hz, and the low end partly cancelled at
+/// every hop. Wider still would smear transients further than the ear fuses.
+const SEARCH: isize = 360;
+/// The first pass of the search tries every `COARSE`-th offset and correlates
+/// every `COARSE`-th sample; the second pass refines around the winner at full
+/// resolution. The wide window then costs less than the narrow one did.
+const COARSE: usize = 4;
 /// Correlation window, in samples. The overlap region is three quarters of the
 /// frame; correlating over half of it is enough to identify the waveform and
 /// halves the work.
@@ -244,9 +251,12 @@ impl TimeStretch {
             self.place(at);
         }
         // The accumulator's remaining window, normalised by the weight that
-        // actually landed on each sample. Past the end of the input both are
-        // zero, and the floor turns that into silence rather than a divide.
-        for frame in 0..FRAME {
+        // actually landed on each sample. `place` has already slid it one hop,
+        // so only the first `FRAME - HOP` samples carry the last frame; the
+        // final hop is zeros, and emitting it put 128 samples of silence
+        // between the stretched audio and the pass-through that follows it.
+        let held = if self.placed.is_some() { FRAME - HOP } else { 0 };
+        for frame in 0..held {
             // The window is zero at its first sample, so the divisor can be too.
             // The floor is only here to turn a 0/0 into silence; anywhere the
             // weight is merely small, dividing by it is the correct
@@ -314,18 +324,15 @@ impl TimeStretch {
             return self.anchor;
         }
         let reference_mono: Vec<f32> = (0..CORRELATE).map(|i| self.mid_at(reference + i)).collect();
-        let reference_energy: f32 = reference_mono
-            .iter()
-            .map(|s| s * s)
-            .sum::<f32>()
-            .max(1.0e-9);
-
         let earliest = self.anchor.saturating_sub(SEARCH as usize);
+        let latest = self.anchor + SEARCH as usize;
+        let usable = |candidate: usize| candidate >= earliest && candidate <= latest && candidate + FRAME <= limit;
+
         let mut best = self.anchor;
         let mut best_score = f32::NEG_INFINITY;
         // Walk outwards from the anchor so a tie resolves to the anchor — the
         // identity choice, and the one that makes a rate of 1.0 exact.
-        for distance in 0..=SEARCH as usize {
+        for distance in (0..=SEARCH as usize).step_by(COARSE) {
             let mut considered = false;
             for candidate in [
                 self.anchor.checked_sub(distance),
@@ -336,18 +343,11 @@ impl TimeStretch {
                 },
             ] {
                 let Some(candidate) = candidate else { continue };
-                if candidate < earliest || candidate + FRAME > limit {
+                if !usable(candidate) {
                     continue;
                 }
                 considered = true;
-                let mut dot = 0.0f32;
-                let mut energy = 0.0f32;
-                for i in 0..CORRELATE {
-                    let sample = self.mid_at(candidate + i);
-                    dot += sample * reference_mono[i];
-                    energy += sample * sample;
-                }
-                let score = dot / (reference_energy * energy).sqrt();
+                let score = self.similarity(&reference_mono, candidate, COARSE);
                 if score > best_score {
                     best_score = score;
                     best = candidate;
@@ -356,10 +356,45 @@ impl TimeStretch {
             if considered && best_score > 0.999 {
                 // A near-perfect match at the anchor; nothing further out is
                 // going to beat it.
+                if best == self.anchor {
+                    return best;
+                }
                 break;
             }
         }
+        // Refine between the coarse steps, at full resolution.
+        let centre = best;
+        let mut best_score = self.similarity(&reference_mono, centre, 1);
+        for distance in 1..COARSE {
+            for candidate in [centre.checked_sub(distance), Some(centre + distance)] {
+                let Some(candidate) = candidate else { continue };
+                if !usable(candidate) {
+                    continue;
+                }
+                let score = self.similarity(&reference_mono, candidate, 1);
+                if score > best_score {
+                    best_score = score;
+                    best = candidate;
+                }
+            }
+        }
         best
+    }
+
+    /// Normalised correlation of the input at `candidate` with `reference`,
+    /// over every `stride`-th sample. Normalised, so a quiet stretch of input
+    /// cannot win on level alone.
+    fn similarity(&self, reference: &[f32], candidate: usize, stride: usize) -> f32 {
+        let mut dot = 0.0f32;
+        let mut energy = 0.0f32;
+        let mut reference_energy = 0.0f32;
+        for i in (0..CORRELATE).step_by(stride) {
+            let sample = self.mid_at(candidate + i);
+            dot += sample * reference[i];
+            energy += sample * sample;
+            reference_energy += reference[i] * reference[i];
+        }
+        dot / (reference_energy.max(1.0e-9) * energy.max(1.0e-9)).sqrt()
     }
 
     /// Windows the frame at `at` into the accumulator and emits one hop.
@@ -373,7 +408,16 @@ impl TimeStretch {
             self.weight[frame] += weight;
         }
         for frame in 0..HOP {
-            let norm = self.weight[frame].max(WEIGHT_FLOOR);
+            if self.weight[frame] <= WEIGHT_FLOOR {
+                // Only the very first sample of a stream: the window is zero
+                // there and nothing else has landed, so the input is the
+                // reconstruction. Emitting the 0/0 as silence was a one-sample
+                // dropout every time the stage engaged.
+                self.out.push(self.left_at(at + frame));
+                self.out.push(self.right_at(at + frame));
+                continue;
+            }
+            let norm = self.weight[frame];
             self.out.push(self.accum[frame * 2] / norm);
             self.out.push(self.accum[frame * 2 + 1] / norm);
         }
@@ -492,6 +536,32 @@ mod tests {
             best_delay <= FRAME + SEARCH as usize,
             "latency of {best_delay} frames exceeded the {FRAME}+{SEARCH} bound"
         );
+    }
+
+    /// The hand-back to a plain pass-through must not leave a hole. A ramp
+    /// makes any inserted silence or dropped sample show as a value out of
+    /// sequence; the flush used to put 128 zeros right at the seam.
+    #[test]
+    fn flushing_hands_over_without_a_gap() {
+        let frames = RATE as usize;
+        let input: Vec<f32> = (0..frames * 2)
+            .map(|i| 0.1 + (i / 2) as f32 * 1.0e-6)
+            .collect();
+        let unity = stretch_whole(&input, 1.0);
+        assert_eq!(unity.len(), input.len(), "unity must keep every sample");
+        for (i, (a, b)) in unity.iter().zip(&input).enumerate() {
+            assert!(
+                (a - b).abs() < 1.0e-5,
+                "unity flush moved sample {} from {b} to {a}",
+                i / 2
+            );
+        }
+        for rate in [0.97f64, 1.03] {
+            let output = stretch_whole(&input, rate);
+            if let Some(i) = output.iter().position(|s| *s < 0.05) {
+                panic!("rate {rate}: silent sample at output frame {}", i / 2);
+            }
+        }
     }
 
     #[test]

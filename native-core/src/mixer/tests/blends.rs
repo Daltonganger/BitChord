@@ -747,3 +747,36 @@ fn a_dj_blend_beds_the_incoming_track_then_swaps() {
         "the dip is on the incoming; the outgoing is still leaving slowly, got {outgoing_at_dip}"
     );
 }
+
+/// One of the two records always carries the low end. With an early swap the
+/// incoming's entry high-pass used to outlast the outgoing's bass, and for
+/// seconds the mix had neither kick nor bass line.
+#[test]
+fn a_bass_swap_never_leaves_the_mix_without_bass() {
+    for swap in [0.12, 0.19, 0.4, 0.62, 0.85] {
+        for clash in [0.0, 1.0] {
+            let plan = TransitionPlan {
+                style: TransitionStyle::DjBlend,
+                bass_swap: true,
+                bass_swap_fraction: swap,
+                vocal_overlap: clash,
+                fade_seconds: 32.0,
+                ..Default::default()
+            };
+            let mut out = crate::transition_filter::TransitionFilter::new(2, 48_000);
+            let mut inc = crate::transition_filter::TransitionFilter::new(2, 48_000);
+            for step in 0..=1000 {
+                let p = step as f64 / 1000.0;
+                super::super::curves::ride_bass_swap(p, &plan, &mut out, &mut inc);
+                let lowest = out.target_high_pass_hz().min(inc.target_high_pass_hz());
+                assert!(
+                    lowest < 70.0,
+                    "swap {swap} clash {clash}: at {p:.3} both records were high-passed \
+                     (outgoing {:.0} Hz, incoming {:.0} Hz)",
+                    out.target_high_pass_hz(),
+                    inc.target_high_pass_hz()
+                );
+            }
+        }
+    }
+}

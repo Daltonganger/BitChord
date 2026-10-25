@@ -7,7 +7,7 @@ use super::cue::{beat_seconds_of, incoming_entry};
 use super::technique::loud_reference;
 use super::{
     AUTO_TRANSITION_MAX_SECONDS, MAX_BPM, MAX_STRETCH_DEVIATION, MIN_BEATMATCH_CONFIDENCE, MIN_BPM,
-    MIN_DJ_CONFIDENCE, VOCAL_ACTIVE_THRESHOLD,
+    MIN_DJ_CONFIDENCE, NEGLIGIBLE_STRETCH, VOCAL_ACTIVE_THRESHOLD,
 };
 use crate::mixer::{TransitionPlan, TransitionStyle};
 
@@ -57,7 +57,9 @@ pub(super) fn transparent_playback_rate(
     }
     let aligned = align_tempo_octave(outgoing_bpm, incoming_bpm);
     let rate = outgoing_bpm / aligned;
-    if (rate - 1.0).abs() <= max_deviation {
+    if (rate - 1.0).abs() < NEGLIGIBLE_STRETCH {
+        Some(1.0)
+    } else if (rate - 1.0).abs() <= max_deviation {
         Some(((rate * 10_000.0).round()) / 10_000.0)
     } else {
         None

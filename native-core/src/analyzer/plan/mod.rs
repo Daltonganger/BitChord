@@ -120,8 +120,14 @@ const UPSTREAM_MAX_OVERLAP_SECONDS: f64 = 16.0;
 const LONG_BLEND_BEATS: usize = 64;
 const LONG_BLEND_SECONDS: f64 = 32.0;
 /// After the blend, walk the matched tempo back to the record's own over
-/// this many beats of the tempo it was matched to.
-const POST_BLEND_GLIDE_BEATS: f64 = 32.0;
+/// this many beats of the tempo it was matched to. Every beat of it runs
+/// through the stretcher; 32 beats kept the first ~40 s of each song stretched,
+/// and the tempo walk is just as even over eight.
+const POST_BLEND_GLIDE_BEATS: f64 = 8.0;
+/// A stretch this close to unity drifts less than 10 ms across the longest
+/// blend, which is inside what the ear hears as one beat. Matching it would
+/// buy nothing and run the whole blend through the stretcher.
+const NEGLIGIBLE_STRETCH: f64 = 0.010 / LONG_BLEND_SECONDS;
 /// Incoming level while it plays underneath, before the swap.
 const BED_GAIN_DB: f64 = -14.0;
 const ARRANGEMENT_OVERLAP_BEATS: f64 = 8.0;
