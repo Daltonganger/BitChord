@@ -76,6 +76,11 @@ pub struct SymphoniaDecoder {
     seek_skip_frames: usize,
     decoder_eof_drained: bool,
     sanitized_samples: u64,
+    /// Packets dropped since the last one that decoded, and why: each is
+    /// audio the listener never hears, so a run of them is reported.
+    dropped_packets: u32,
+    drop_reason: String,
+    drop_at: f64,
     priming_total_frames: usize,
     priming_remaining: usize,
     valid_frames: Option<u64>,
@@ -284,6 +289,9 @@ impl SymphoniaDecoder {
             seek_skip_frames: 0,
             decoder_eof_drained: false,
             sanitized_samples: 0,
+            dropped_packets: 0,
+            drop_reason: String::new(),
+            drop_at: 0.0,
             priming_total_frames: timing.map(|t| t.1).unwrap_or(0),
             priming_remaining: timing.map(|t| t.1).unwrap_or(0),
             valid_frames: timing.map(|t| t.0),
@@ -443,6 +451,11 @@ impl SymphoniaDecoder {
                 }
                 Err(e) => {
                     log::debug!("next_packet: {e}");
+                    if self.dropped_packets == 0 {
+                        self.drop_at = self.position_seconds();
+                    }
+                    self.dropped_packets += 1;
+                    self.drop_reason = format!("demux: {e}");
                     skipped += 1;
                     if skipped > 256 {
                         return Err(DecodeError(format!("demuxing failed: {e}")));
@@ -495,6 +508,11 @@ impl SymphoniaDecoder {
                 Ok(d) => d,
                 Err(SymphoniaError::DecodeError(e)) => {
                     log::debug!("decode error, skipping packet: {e}");
+                    if self.dropped_packets == 0 {
+                        self.drop_at = self.position_seconds();
+                    }
+                    self.dropped_packets += 1;
+                    self.drop_reason = format!("decode: {e}");
                     continue;
                 }
                 Err(e) => {
@@ -502,6 +520,17 @@ impl SymphoniaDecoder {
                 }
             };
 
+            if self.dropped_packets > 0 {
+                // Debug-level lines never reach the diagnostics file; a jump
+                // the listener hears has to.
+                log::warn!(
+                    "decoder dropped {} packet(s) at {:.2}s ({}); audible as a skip",
+                    self.dropped_packets,
+                    self.drop_at,
+                    self.drop_reason
+                );
+                self.dropped_packets = 0;
+            }
             interleaved.clear();
             copy_interleaved_f32(&decoded, &mut interleaved);
             for s in &mut interleaved {
