@@ -12,6 +12,7 @@ struct ResolvedYouTubeStream {
     /// (nil when the response carried none, or the payload predates it).
     let durationSeconds: Int?
     let loudnessDb: Double?
+    let clientName: String
 }
 
 /// The track's video side: one AVC/MP4 rendition the picture player can
@@ -90,7 +91,8 @@ final class InnertubeStreamResolver: Sendable {
                             do {
                                 let decoded = try JSONDecoder().decode(StreamPayload.self, from: Data(json.utf8))
                                 request.finish(.success(ResolvedYouTubeStream(url: decoded.url, kbps: decoded.kbps,
-                                    mimeType: decoded.mimeType, headers: decoded.headers, durationSeconds: decoded.durationSeconds, loudnessDb: decoded.loudnessDb)))
+                                    mimeType: decoded.mimeType, headers: decoded.headers, durationSeconds: decoded.durationSeconds,
+                                    loudnessDb: decoded.loudnessDb, clientName: decoded.clientName)))
                             } catch { request.finish(.failure(error)) }
                         } else {
                             let raw = message ?? "Stream resolution failed"
@@ -208,8 +210,9 @@ private struct StreamPayload: Codable {
     /// Nil on payloads minted before the shared module parsed the figure.
     let durationSeconds: Int?
     let loudnessDb: Double?
+    let clientName: String
 
-    private enum CodingKeys: String, CodingKey { case url, kbps, mimeType, headers, loudnessDb, durationSeconds }
+    private enum CodingKeys: String, CodingKey { case url, kbps, mimeType, headers, loudnessDb, durationSeconds, clientName }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         url = try values.decode(String.self, forKey: .url)
@@ -220,6 +223,7 @@ private struct StreamPayload: Codable {
         headers = try values.decodeIfPresent([String: String].self, forKey: .headers) ?? [:]
         durationSeconds = try values.decodeIfPresent(Int.self, forKey: .durationSeconds)
         loudnessDb = try values.decodeIfPresent(Double.self, forKey: .loudnessDb)
+        clientName = try values.decodeIfPresent(String.self, forKey: .clientName) ?? "unknown"
     }
 }
 

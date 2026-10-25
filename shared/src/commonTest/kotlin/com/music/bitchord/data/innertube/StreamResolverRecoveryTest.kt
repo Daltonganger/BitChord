@@ -1,51 +1,71 @@
 package com.music.bitchord.data.innertube
 
-import com.music.bitchord.data.http.ProbeResult
 import kotlinx.coroutines.*
 import kotlinx.coroutines.test.runTest
+import com.music.bitchord.data.http.RawHttpBytes
 import kotlin.test.*
 
 /** The production resolver shell around upstream extraction, with synthetic media. */
 class StreamResolverRecoveryTest {
     private suspend fun fixture(body: suspend () -> Unit) {
         val extract = StreamResolver.extraction
-        val probe = StreamResolver.streamProbe
         try {
             Innertube.cookie = null
             StreamResolver.onSessionChanged()
-            StreamResolver.streamProbe = { _, _ -> ProbeResult(206, "audio/mp4", true) }
             body()
         } finally {
-            StreamResolver.extraction = extract; StreamResolver.streamProbe = probe
+            StreamResolver.extraction = extract
             Innertube.cookie = null; StreamResolver.onSessionChanged()
         }
     }
     private fun stream(id: String) = StreamResolver.ResolvedStream(
         "https://media.invalid/$id", 128, "audio/mp4", mapOf("User-Agent" to "synthetic-profile"))
 
-    @Test fun rejectedMediaGetsFreshExtractionWithoutReplayingDeadUrl() = runTest {
-        fixture {
-            var attempts = 0
-            val probes = mutableListOf<String>()
-            StreamResolver.extraction = { _, _ -> stream(if (++attempts == 1) "dead" else "fresh") }
-            StreamResolver.streamProbe = { url, headers ->
-                assertEquals("synthetic-profile", headers["User-Agent"])
-                probes += url; ProbeResult(if (url.endsWith("dead")) 403 else 206, "audio/mp4", true)
-            }
-            assertTrue(StreamResolver.resolve("track")!!.url.endsWith("fresh"))
-            assertEquals(2, attempts)
-            assertEquals(listOf("https://media.invalid/dead", "https://media.invalid/fresh"), probes)
+    @Test fun openingRangeMustBePartialMediaAndCannotAcceptTruncatedFullBody() {
+        val bytes = ByteArray(MIN_FIRST_RANGE_BYTES) { 7 }
+        assertContentEquals(bytes, validateFirstMediaRange(RawHttpBytes(206, bytes, "audio/mp4")))
+        assertFailsWith<InvalidFirstMediaRangeException> {
+            validateFirstMediaRange(RawHttpBytes(403, bytes, "text/html"))
+        }
+        assertFailsWith<InvalidFirstMediaRangeException> {
+            validateFirstMediaRange(RawHttpBytes(206, bytes, "text/html"))
+        }
+        assertFailsWith<InvalidFirstMediaRangeException> {
+            validateFirstMediaRange(RawHttpBytes(206, bytes, "application/json"))
+        }
+        assertFailsWith<InvalidFirstMediaRangeException> {
+            validateFirstMediaRange(RawHttpBytes(206, bytes, "video/mp4"), "audio/mp4")
+        }
+        assertFailsWith<InvalidFirstMediaRangeException> {
+            validateFirstMediaRange(RawHttpBytes(206, null, "audio/mp4"))
+        }
+        assertFailsWith<InvalidFirstMediaRangeException> {
+            validateFirstMediaRange(RawHttpBytes(206, ByteArray(0), "audio/mp4"))
+        }
+        assertFailsWith<InvalidFirstMediaRangeException> {
+            validateFirstMediaRange(RawHttpBytes(206, ByteArray(1_024), "audio/mp4"))
         }
     }
-    @Test fun refusalRecoveryIsBoundedAndDoesNotDisableOtherTracks() = runTest {
+
+    @Test fun resolutionReturnsUrlWithoutASeparateMediaProbe() = runTest {
+        fixture {
+            var attempts = 0
+            StreamResolver.extraction = { _, _ -> attempts++; stream("direct") }
+            val first = StreamResolver.resolve("track")!!
+            val cached = StreamResolver.resolve("track")!!
+            assertEquals("https://media.invalid/direct", first.url)
+            assertEquals(first, cached)
+            assertEquals(1, attempts)
+        }
+    }
+    @Test fun distinctTracksResolveIndependently() = runTest {
         fixture {
             var attempts = 0
             StreamResolver.extraction = { id, _ -> attempts++; stream(id) }
-            StreamResolver.streamProbe = { url, _ -> ProbeResult(if (url.endsWith("bad")) 403 else 206, "audio/mp4", true) }
-            assertFailsWith<IllegalStateException> { StreamResolver.resolve("bad") }
-            assertEquals(3, attempts)
+            assertNotNull(StreamResolver.resolve("bad"))
+            assertEquals(1, attempts)
             assertNotNull(StreamResolver.resolve("good"))
-            assertEquals(4, attempts)
+            assertEquals(2, attempts)
         }
     }
     @Test fun duplicateRequestsShareOneExtraction() = runTest {

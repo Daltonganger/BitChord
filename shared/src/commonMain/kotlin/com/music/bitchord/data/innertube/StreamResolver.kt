@@ -1,19 +1,20 @@
 package com.music.bitchord.data.innertube
 import com.music.bitchord.data.DebugLog
-import com.music.bitchord.data.http.Http
 import com.music.bitchord.data.http.ProbeResult
+import com.music.bitchord.data.http.RawHttpBytes
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
-import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
-/** Maintained upstream extraction, with account-scoped coalescing and verified media URLs. */
+/** Maintained upstream extraction, with account-scoped coalescing and short-lived media URLs. */
 object StreamResolver {
     data class ResolvedStream(val url: String, val kbps: Int, val mimeType: String,
-                              val headers: Map<String, String>, val loudnessDb: Double? = null, val durationSeconds: Long? = null)
+                              val headers: Map<String, String>, val loudnessDb: Double? = null,
+                              val durationSeconds: Long? = null, val clientName: String = "unknown")
     class PermanentlyUnplayableException(reason: String) : Exception(reason)
     private class Resolved(val stream: ResolvedStream, val generation: Long, val at: TimeMark)
     private val recent = CowMap<String, Resolved>()
@@ -21,30 +22,19 @@ object StreamResolver {
     private val inFlight = CowMap<String, Flight>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     internal var extraction: suspend (String, Int) -> ResolvedStream? = { id, ceiling -> UpstreamPlaybackExtractor.extract(id, ceiling) }
-    internal var streamProbe: suspend (String, Map<String, String>) -> ProbeResult = { url, headers -> Http.probe(url, headers) }
     suspend fun resolve(videoId: String, maxKbps: Int = Int.MAX_VALUE): ResolvedStream? {
         val generation = Innertube.sessionGeneration
         val key = "$generation|$videoId|$maxKbps"
-        recent.snapshot()[key]?.takeIf { it.at.elapsedNow() < 20.minutes }?.let { return it.stream }
+        recent.snapshot()[key]?.takeIf { it.at.elapsedNow() < 20.seconds }?.let { return it.stream }
         val candidate = scope.async(start = CoroutineStart.LAZY) {
-            repeat(3) { attempt ->
-                Innertube.checkSession(generation)
-                val stream = extraction(videoId, maxKbps) ?: error("No playable stream for $videoId")
-                Innertube.checkSession(generation)
-                val proof = streamProbe(stream.url, stream.headers)
-                Innertube.checkSession(generation)
-                if (proof.classify(stream.mimeType) == ProbeVerdict.OK) return@async stream
-                // A URL may be refused transiently even though its profile
-                // works. Remint once with a fresh nonce before excluding that
-                // profile and taking upstream's alternate-client path.
-                if (attempt > 0) {
-                    onPlaybackRefused(stream.url, proof.status)
-                    UpstreamPlaybackExtractor.onRefused(stream.url, excludeClient = true)
-                }
-                if (attempt == 2) error("Upstream media refused (HTTP ${proof.status})")
-                DebugLog.w("$videoId: issued URL failed media validation; requesting a fresh extraction")
-            }
-            error("No playable stream for $videoId")
+            Innertube.checkSession(generation)
+            val stream = extraction(videoId, maxKbps) ?: error("No playable stream for $videoId")
+            Innertube.checkSession(generation)
+            // Validate on the first bounded media range, which is also the
+            // first request capable of producing sound. A separate probe
+            // duplicated the CDN round trip and could validate a different
+            // URL path from the one the downloader actually consumed.
+            stream
         }
         var selected = candidate
         inFlight.update { map ->
@@ -83,6 +73,11 @@ object StreamResolver {
         recent.update { map -> map.entries.removeAll { it.value.stream.url == url } }
         UpstreamPlaybackExtractor.onRefused(url)
         DebugLog.w("served media URL refused; next resolution will use fresh upstream extraction")
+    }
+    fun onFirstRangeRejected(url: String, responseCode: Int, excludeClient: Boolean) {
+        recent.update { map -> map.entries.removeAll { it.value.stream.url == url } }
+        UpstreamPlaybackExtractor.onRefused(url, excludeClient = excludeClient)
+        DebugLog.w("first media range rejected (HTTP $responseCode); retrying upstream extraction")
     }
     internal class AudioFormat(
         val url: String?,
@@ -148,6 +143,25 @@ object StreamResolver {
     }
 
 }
+
+/** Reject ignored Range requests: accepting a bounded 200 body would truncate audio. */
+internal fun validateFirstMediaRange(response: RawHttpBytes, expectedMimeType: String? = null): ByteArray {
+    val bytes = response.body ?: ByteArray(0)
+    val verdict = ProbeResult(
+        status = response.status,
+        contentType = response.contentType,
+        bodyArrived = bytes.isNotEmpty(),
+    ).classify(expectedMimeType)
+    if (response.status != 206 || verdict != ProbeVerdict.OK || bytes.size < MIN_FIRST_RANGE_BYTES) {
+        throw InvalidFirstMediaRangeException(response.status,
+            "Invalid first media range: HTTP ${response.status}, content-type ${response.contentType ?: "missing"}"
+        )
+    }
+    return bytes
+}
+
+internal const val MIN_FIRST_RANGE_BYTES = 4 * 1024
+internal class InvalidFirstMediaRangeException(val responseCode: Int, message: String) : Exception(message)
 
 @OptIn(ExperimentalAtomicApi::class)
 private class CowMap<K : Any, V : Any> {
