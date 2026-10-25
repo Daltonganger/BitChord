@@ -46,6 +46,9 @@ done
 
 fw="$repo/AppleApp/Frameworks/BitChordShared.xcframework/macos-arm64"
 bin="$(mktemp -d)/webdav-verify"
+grep -Fq 'refreshAfterUpload: false' "$repo/AppleApp/Sources/UI/Library/DownloadsView.swift"
+grep -Fq 'Upload selected to WebDAV' "$repo/AppleApp/Sources/UI/Library/DownloadsView.swift"
+echo "  ok  Downloads selection uploads through the deferred-refresh batch path"
 xcrun swiftc -O -o "$bin" \
   -F "$fw" -framework BitChordShared \
   -Xlinker -rpath -Xlinker "$fw/BitChordShared.framework/Versions/A" \

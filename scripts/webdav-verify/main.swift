@@ -110,10 +110,19 @@ func verifyLocalUpload(_ sourcePath: String) async {
         return
     }
     do {
-        let first = try await WebDavStore.shared.upload(path: sourcePath, title: "Upload Test", artist: "Björk")
-        let second = try await WebDavStore.shared.upload(path: sourcePath, title: "Upload Test", artist: "Björk")
+        let first = try await WebDavStore.shared.upload(
+            path: sourcePath, title: "Upload Test", artist: "Björk", refreshAfterUpload: false
+        )
+        let second = try await WebDavStore.shared.upload(
+            path: sourcePath, title: "Upload Test", artist: "Björk", refreshAfterUpload: false
+        )
         checkEqual("the upload uses a safe artist-title filename", first, "Björk - Upload Test.flac")
         checkEqual("a name conflict keeps both files", second, "Björk - Upload Test (1).flac")
+        check(
+            "a deferred batch upload does not relist after each file",
+            !WebDavStore.shared.albums.flatMap(\.songs).contains { $0.title.hasPrefix("Upload Test") }
+        )
+        await WebDavStore.shared.load(force: true)
         let copies = WebDavStore.shared.albums.flatMap(\.songs).filter { $0.title.hasPrefix("Upload Test") }
         checkEqual("the refreshed share lists both uploaded copies", copies.count, 2)
     } catch {
