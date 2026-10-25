@@ -153,23 +153,45 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
         pictureInPictureController?.startPictureInPicture()
     }
 
-    func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    nonisolated func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        Task { @MainActor [weak self] in
+            self?.didStartPictureInPicture()
+        }
+    }
+
+    @MainActor
+    private func didStartPictureInPicture() {
         pictureInPictureActive = true
         gate.setPictureInPictureActive(true)
         reconcile()
     }
 
-    func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        Task { @MainActor [weak self] in
+            self?.didStopPictureInPicture()
+        }
+    }
+
+    @MainActor
+    private func didStopPictureInPicture() {
         pictureInPictureActive = false
         gate.setPictureInPictureActive(false)
         reconcile()
     }
 
-    func pictureInPictureController(
+    nonisolated func pictureInPictureController(
         _ pictureInPictureController: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
-        PlaybackDebugLog.shared.record("video: PiP failed to start: \(error.localizedDescription)", about: gate.trackId)
+        let message = error.localizedDescription
+        Task { @MainActor [weak self] in
+            self?.didFailToStartPictureInPicture(message: message)
+        }
+    }
+
+    @MainActor
+    private func didFailToStartPictureInPicture(message: String) {
+        PlaybackDebugLog.shared.record("video: PiP failed to start: \(message)", about: gate.trackId)
     }
 
     /// A surface asked to show a track: resolve only the one it needs, and only
