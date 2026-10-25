@@ -23,8 +23,30 @@ struct LyricsLanguageSheet: View {
         guard !needle.isEmpty else { return all }
         return all.filter {
             $0.name.localizedCaseInsensitiveContains(needle)
+                || englishFallbackName(for: $0).localizedCaseInsensitiveContains(needle)
                 || $0.code.localizedCaseInsensitiveContains(needle)
         }
+    }
+
+    private func englishFallbackName(for language: LyricsTranslator.Language) -> String {
+        Locale(identifier: "en").localizedString(forIdentifier: language.code) ?? language.name
+    }
+
+    private var appDefaultTarget: LyricsTranslator.Language? {
+        let appLanguage = UserDefaults.standard.string(forKey: "app_language") ?? ""
+        let code = appLanguage.isEmpty ? Locale.current.identifier : appLanguage
+        let available = translator.languages(for: .translate)
+        return available.first { $0.code.caseInsensitiveCompare(code) == .orderedSame }
+            ?? available.first {
+                $0.code.split(separator: "-").first
+                    == code.split(whereSeparator: { $0 == "-" || $0 == "_" }).first
+            }
+    }
+
+    private var showsAppDefault: Bool {
+        let needle = search.trimmingCharacters(in: .whitespaces)
+        return mode == .translate
+            && (needle.isEmpty || "Follow App Default".localizedCaseInsensitiveContains(needle))
     }
 
     /// Grouped by the first letter of the *displayed* name, so a localised list
@@ -46,6 +68,34 @@ struct LyricsLanguageSheet: View {
     var body: some View {
         NavigationStack {
             List {
+                if showsAppDefault {
+                    Button {
+                        UserDefaults.standard.set("", forKey: "translation_language")
+                        if let target = appDefaultTarget {
+                            translator.run(
+                                mode: .translate,
+                                target: target,
+                                trackId: trackId,
+                                lines: lines,
+                                then: onResult
+                            )
+                        }
+                        dismiss()
+                    } label: {
+                        HStack {
+                            Text("Follow App Default")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            if let target = appDefaultTarget {
+                                Text(target.name)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
                 if languages.isEmpty {
                     ContentUnavailableView.search(text: search)
                 } else {
