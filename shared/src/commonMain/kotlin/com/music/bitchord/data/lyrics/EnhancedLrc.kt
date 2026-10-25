@@ -38,13 +38,14 @@ object EnhancedLrc {
                 val lineOffset = offsetWords.firstOrNull()?.second ?: 0L
                 val lineEnd = rows.getOrNull(index + 1)?.first
                     ?: (stamp(wordMatches.last()) + lineOffset + TAIL_MS)
-                val words = wordMatches.mapIndexedNotNull { i, match ->
-                    val text = decodeEntities(match.groupValues[4]).trim()
+                val runs = wordMatches.mapIndexedNotNull { i, match ->
+                    val text = decodeEntities(match.groupValues[4])
                     if (text.isEmpty()) return@mapIndexedNotNull null
                     val start = (stamp(match) + offsetWords[i].second).coerceAtLeast(0L)
                     val end = wordMatches.getOrNull(i + 1)?.let { stamp(it) + offsetWords[i].second } ?: lineEnd
-                    LyricWordDto(start, end.coerceAtLeast(start), text)
+                    TimedRun(start, end.coerceAtLeast(start), text)
                 }
+                val words = wordsFromRuns(runs)
                 if (words.isEmpty()) null
                 else LyricLineDto(
                     timeMs = minOf(timeMs, words.first().startMs),

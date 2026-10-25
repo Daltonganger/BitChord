@@ -170,11 +170,12 @@ internal object KaraokeLrc {
             // Both spellings turn up, sometimes in one file. The one that
             // accounts for more of the line's characters is the one that was
             // actually the words; the other is usually an annotation.
-            val words = if (prefixed.sumOf { it.text.length } >= suffixed.sumOf { it.text.length }) {
+            val runs = if (prefixed.sumOf { it.raw.trim().length } >= suffixed.sumOf { it.raw.trim().length }) {
                 prefixed
             } else {
                 suffixed
             }
+            val words = wordsFromRuns(runs)
             if (words.isEmpty()) return@mapNotNull null
             LyricLineDto(
                 timeMs = minOf(lineStart, words.first().startMs),
@@ -186,11 +187,11 @@ internal object KaraokeLrc {
         return rows.withInstrumentalGaps()
     }
 
-    private fun timedWord(text: String, start: String, duration: String): LyricWordDto? {
-        val clean = EnhancedLrc.decodeEntities(text).trim()
-        if (clean.isEmpty()) return null
+    private fun timedWord(text: String, start: String, duration: String): TimedRun? {
+        val raw = EnhancedLrc.decodeEntities(text)
+        if (raw.isEmpty()) return null
         val startMs = start.toLong()
-        return LyricWordDto(startMs, startMs + duration.toLong(), clean)
+        return TimedRun(startMs, startMs + duration.toLong(), raw)
     }
 
     /**
