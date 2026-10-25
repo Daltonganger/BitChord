@@ -241,7 +241,7 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
                 // posted as one): same file, same timeline.
                 let sameFileIsPlayable = side.isAuthoritativeMusicVideo
                     ? side.qualifiesAsCounterpartVideo()
-                    : side.qualifiesAsSearchVideo()
+                    : side.qualifiesAsSearchVideo(isOfficialMusicVideo: false)
                 if sameFileIsPlayable {
                     PlaybackDebugLog.shared.record("video: attaching the picture", about: id)
                     self.preparing = false
@@ -263,7 +263,9 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
                     let isCounterpart = candidate.source == "counterpart"
                     let qualifies = isCounterpart
                         ? videoSide.qualifiesAsCounterpartVideo()
-                        : videoSide.qualifiesAsSearchVideo()
+                        : videoSide.qualifiesAsSearchVideo(
+                            isOfficialMusicVideo: candidate.type == "MUSIC_VIDEO_TYPE_OMV"
+                        )
                     guard qualifies else {
                         if isCounterpart {
                             PlaybackDebugLog.shared.record(
@@ -349,14 +351,21 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
         aheadTask?.cancel()
         aheadTask = Task(priority: .utility) {
             let own = try? await InnertubeStreamResolver.shared.resolveVideo(videoId: next.videoId)
-            if let own, own.isAuthoritativeMusicVideo ? own.qualifiesAsCounterpartVideo() : own.qualifiesAsSearchVideo() { return }
+            if let own {
+                let qualifies = own.isAuthoritativeMusicVideo
+                    ? own.qualifiesAsCounterpartVideo()
+                    : own.qualifiesAsSearchVideo(isOfficialMusicVideo: false)
+                if qualifies { return }
+            }
             let track = (title: next.title, artist: next.artist, seconds: next.seconds, durationText: next.durationText)
             for candidate in await Self.findVideoVersions(videoId: next.videoId, track: track).prefix(3) {
                 guard !Task.isCancelled else { return }
                 guard let side = try? await InnertubeStreamResolver.shared.resolveVideo(videoId: candidate.videoId) else { continue }
                 let qualifies = candidate.source == "counterpart"
                     ? side.qualifiesAsCounterpartVideo()
-                    : side.qualifiesAsSearchVideo()
+                    : side.qualifiesAsSearchVideo(
+                        isOfficialMusicVideo: candidate.type == "MUSIC_VIDEO_TYPE_OMV"
+                    )
                 guard qualifies else { continue }
                 let map = await VideoVersionAlignment.shared.map(songId: next.videoId, videoId: candidate.videoId)
                 PlaybackDebugLog.shared.record(

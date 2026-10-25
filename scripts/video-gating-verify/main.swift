@@ -22,6 +22,46 @@ func check(_ label: String, _ ok: Bool, _ detail: String = "") {
     }
 }
 
+func videoSide(kbpsPerMegapixel: Double, musicVideoType: String?) -> ResolvedVideoSide {
+    let width = 1920
+    let height = 1080
+    let bitrate = Int((kbpsPerMegapixel * 1000 * Double(width * height) / 1_000_000).rounded())
+    return ResolvedVideoSide(
+        url: "https://example.invalid/video",
+        width: width,
+        height: height,
+        itag: 137,
+        mimeType: "video/mp4",
+        codecs: "avc1.640028",
+        bitrate: bitrate,
+        headers: [:],
+        availableVideoHeights: [1080],
+        hasNParameter: false,
+        clientName: "test",
+        profileId: "test",
+        musicVideoType: musicVideoType
+    )
+}
+
+let lowMotionOMV = videoSide(kbpsPerMegapixel: 120, musicVideoType: "MUSIC_VIDEO_TYPE_OMV")
+check("a low-bitrate OMV qualifies for search", lowMotionOMV.qualifiesAsSearchVideo(isOfficialMusicVideo: true),
+      "\(Int(lowMotionOMV.kbpsPerMegapixel ?? 0)) kbps/MP")
+
+let lowBitrateNonOMV = videoSide(kbpsPerMegapixel: 120, musicVideoType: nil)
+check("a low-bitrate non-OMV does not qualify for search",
+      !lowBitrateNonOMV.qualifiesAsSearchVideo(isOfficialMusicVideo: false),
+      "\(Int(lowBitrateNonOMV.kbpsPerMegapixel ?? 0)) kbps/MP")
+
+let unknownTypeOMV = videoSide(kbpsPerMegapixel: 120, musicVideoType: nil)
+check("a low-bitrate side qualifies when the search row identifies its OMV type",
+      unknownTypeOMV.qualifiesAsSearchVideo(isOfficialMusicVideo: true),
+      "\(Int(unknownTypeOMV.kbpsPerMegapixel ?? 0)) kbps/MP")
+
+let staticOMV = videoSide(kbpsPerMegapixel: 30, musicVideoType: "MUSIC_VIDEO_TYPE_OMV")
+check("a static OMV qualifies for neither search nor counterpart",
+      !staticOMV.qualifiesAsSearchVideo(isOfficialMusicVideo: true) && !staticOMV.qualifiesAsCounterpartVideo(),
+      "\(Int(staticOMV.kbpsPerMegapixel ?? 0)) kbps/MP")
+
 var gate = VideoSurfaceState()
 gate.setEnabled(true)
 
