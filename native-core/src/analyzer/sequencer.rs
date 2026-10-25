@@ -72,7 +72,9 @@ pub fn rank_candidates(
             TransitionStyle::EchoOut
             | TransitionStyle::LoopRoll
             | TransitionStyle::ReverbWash
-            | TransitionStyle::DropCut => cost += 0.1,
+            | TransitionStyle::DropCut
+            | TransitionStyle::Texture
+            | TransitionStyle::Brake => cost += 0.1,
         }
         // Prefer candidates the planner already trusts enough to blend.
         if matches!(plan.style, TransitionStyle::DjBlend) && stretch <= 0.04 {

@@ -89,7 +89,7 @@ extension PlaybackController {
     /// must not cut across.
     private static func isRealMix(_ plan: TransitionPlanRec) -> Bool {
         switch plan.style {
-        case .djBlend, .djFilter, .echoOut, .loopRoll, .reverbWash, .dropCut: return true
+        case .djBlend, .djFilter, .echoOut, .loopRoll, .reverbWash, .dropCut, .texture, .brake: return true
         case .equalPower, .gapless: return plan.fadeSeconds >= 1
         }
     }
@@ -104,6 +104,8 @@ extension PlaybackController {
         case .loopRoll: return "loop roll"
         case .reverbWash: return "reverb wash"
         case .dropCut: return "cut on the one"
+        case .texture: return "texture sweep"
+        case .brake: return "tape stop"
         }
     }
 

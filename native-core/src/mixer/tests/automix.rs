@@ -65,7 +65,7 @@ fn automix_winner_record_uses_stable_style_and_final_reason() {
 }
 
 #[test]
-fn all_eight_transition_styles_have_unique_stable_telemetry_names() {
+fn all_ten_transition_styles_have_unique_stable_telemetry_names() {
     let styles = [
         TransitionStyle::EqualPower,
         TransitionStyle::DjFilter,
@@ -75,6 +75,8 @@ fn all_eight_transition_styles_have_unique_stable_telemetry_names() {
         TransitionStyle::LoopRoll,
         TransitionStyle::ReverbWash,
         TransitionStyle::DropCut,
+        TransitionStyle::Texture,
+        TransitionStyle::Brake,
     ];
     let names: Vec<_> = styles.iter().map(|style| style.telemetry_name()).collect();
     assert_eq!(
@@ -88,9 +90,26 @@ fn all_eight_transition_styles_have_unique_stable_telemetry_names() {
             "loop_roll",
             "reverb_wash",
             "drop_cut",
+            "texture",
+            "brake",
         ]
     );
-    assert_eq!(names.iter().collect::<std::collections::HashSet<_>>().len(), 8);
+    assert_eq!(names.iter().collect::<std::collections::HashSet<_>>().len(), 10);
+}
+
+#[test]
+fn texture_and_brake_round_trip_through_the_plan_record() {
+    for style in [TransitionStyle::Texture, TransitionStyle::Brake] {
+        let record = crate::TransitionPlanRec::from(TransitionPlan {
+            style,
+            ..TransitionPlan::default()
+        });
+        assert_eq!(
+            TransitionPlan::from(record).style,
+            style,
+            "{style:?} was lost through the FFI plan record"
+        );
+    }
 }
 
 #[test]

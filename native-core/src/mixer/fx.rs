@@ -42,6 +42,8 @@ pub(crate) enum Technique {
     LoopRoll,
     ReverbWash,
     Cut,
+    Texture,
+    Brake,
 }
 
 impl Technique {
@@ -51,6 +53,8 @@ impl Technique {
             TransitionStyle::LoopRoll => Some(Self::LoopRoll),
             TransitionStyle::ReverbWash => Some(Self::ReverbWash),
             TransitionStyle::DropCut => Some(Self::Cut),
+            TransitionStyle::Texture => Some(Self::Texture),
+            TransitionStyle::Brake => Some(Self::Brake),
             _ => None,
         }
     }
@@ -69,12 +73,14 @@ impl Technique {
             Self::ReverbWash => (8.0, 0.5),
             // A two-beat build into the cut.
             Self::Cut => (2.0, 1.0),
+            Self::Texture => (8.0, 0.5),
+            Self::Brake => (4.0, 1.0),
         }
     }
 
     /// Whether the window has to grow by the overlap after the landing.
     fn extends_window(self) -> bool {
-        matches!(self, Self::LoopRoll | Self::Cut)
+        matches!(self, Self::LoopRoll | Self::Cut | Self::Brake)
     }
 }
 
@@ -169,6 +175,8 @@ pub(crate) struct DeckFx {
     reverb: Reverb,
     roll: BeatRepeat,
     build: HighPass,
+    texture: Flanger,
+    brake: BrakeStop,
 }
 
 impl DeckFx {
@@ -232,6 +240,8 @@ impl DeckFx {
             reverb: Reverb::new(rate),
             roll: BeatRepeat::new(beat_frames),
             build: HighPass::default(),
+            texture: Flanger::new(rate),
+            brake: BrakeStop::new(beat_frames),
         })
     }
 
@@ -367,12 +377,106 @@ impl DeckFx {
                     let out = self.dry_gain();
                     (hl * out, hr * out)
                 }
+                Technique::Texture => {
+                    let send = texture_send_gain(n, land, beat);
+                    let (wl, wr) = self.texture.process(l * send, r * send, n, self.rate);
+                    let wet_fade = ((window - n) / (window - land).max(1.0)).clamp(0.0, 1.0) as f32;
+                    let dry = self.dry_gain();
+                    (l * dry + wl * wet_fade * 0.32, r * dry + wr * wet_fade * 0.32)
+                }
+                Technique::Brake => {
+                    let (bl, br) = self.brake.process(l, r, n, beat, land);
+                    let dry = self.dry_gain();
+                    (bl * dry, br * dry)
+                }
             };
             dest[i * 2] += out_l;
             dest[i * 2 + 1] += out_r;
             self.elapsed += 1;
         }
     }
+}
+
+fn texture_send_gain(elapsed: f64, land: f64, beat: f64) -> f32 {
+    if elapsed >= land {
+        return 0.0;
+    }
+    ((elapsed - (land - 2.0 * beat)) / (2.0 * beat).max(1.0)).clamp(0.0, 1.0) as f32
+}
+
+struct Flanger {
+    buffer: Vec<[f32; 2]>,
+    write: usize,
+}
+
+impl Flanger {
+    fn new(rate: f64) -> Self {
+        Self {
+            buffer: vec![[0.0; 2]; (rate * 0.02).ceil().max(2.0) as usize],
+            write: 0,
+        }
+    }
+
+    fn process(&mut self, left: f32, right: f32, elapsed: f64, rate: f64) -> (f32, f32) {
+        let phase = elapsed / rate.max(1.0) * 2.0 * core::f64::consts::PI * 0.7;
+        let delay = (rate * (0.005 + 0.004 * (phase.sin() * 0.5 + 0.5)))
+            .clamp(1.0, (self.buffer.len() - 1) as f64);
+        self.buffer[self.write] = [left, right];
+        let read = (self.write as f64 - delay).rem_euclid(self.buffer.len() as f64);
+        let index = read.floor() as usize;
+        let next = (index + 1) % self.buffer.len();
+        let fraction = (read - index as f64) as f32;
+        let delayed = [
+            self.buffer[index][0] + (self.buffer[next][0] - self.buffer[index][0]) * fraction,
+            self.buffer[index][1] + (self.buffer[next][1] - self.buffer[index][1]) * fraction,
+        ];
+        self.write = (self.write + 1) % self.buffer.len();
+        (delayed[0], delayed[1])
+    }
+}
+
+/// A varispeed tape stop. The first beat is captured at unity, then the
+/// captured phrase loops while its playback head decelerates toward the drop.
+struct BrakeStop {
+    buffer: Vec<[f32; 2]>,
+    captured: usize,
+    cursor: f64,
+}
+
+impl BrakeStop {
+    fn new(beat_frames: usize) -> Self {
+        Self {
+            buffer: vec![[0.0; 2]; beat_frames.max(1)],
+            captured: 0,
+            cursor: 0.0,
+        }
+    }
+
+    fn process(&mut self, left: f32, right: f32, elapsed: f64, beat: f64, land: f64) -> (f32, f32) {
+        if elapsed < beat && self.captured < self.buffer.len() {
+            self.buffer[self.captured] = [left, right];
+            self.captured += 1;
+            return (left, right);
+        }
+        if self.captured == 0 {
+            return (left, right);
+        }
+        let rate = brake_varispeed(elapsed, beat, land);
+        let index = self.cursor.floor() as usize % self.captured;
+        let next = (index + 1) % self.captured;
+        let fraction = (self.cursor - self.cursor.floor()) as f32;
+        let output = [
+            self.buffer[index][0] + (self.buffer[next][0] - self.buffer[index][0]) * fraction,
+            self.buffer[index][1] + (self.buffer[next][1] - self.buffer[index][1]) * fraction,
+        ];
+        self.cursor = (self.cursor + rate).rem_euclid(self.captured as f64);
+        (output[0], output[1])
+    }
+}
+
+fn brake_varispeed(elapsed: f64, beat: f64, land: f64) -> f64 {
+    let progress = ((elapsed - beat) / (land - beat).max(1.0)).clamp(0.0, 1.0);
+    1.0 - 0.75 * progress * progress
 }
 
 fn echo_send_gain(elapsed: f64, land: f64, beat: f64, _window: f64) -> f32 {
@@ -779,6 +883,8 @@ mod tests {
             TransitionStyle::LoopRoll,
             TransitionStyle::ReverbWash,
             TransitionStyle::DropCut,
+            TransitionStyle::Texture,
+            TransitionStyle::Brake,
         ] {
             let rate = 48_000u32;
             let mut fx = DeckFx::new(style, rate, 0.5).unwrap();
@@ -794,6 +900,38 @@ mod tests {
             }
             assert!(loudest < 1.0, "{style:?} peaked at {loudest}");
             assert!(fx.incoming_gain() > 0.99, "{style:?} left the incoming down");
+        }
+    }
+
+    #[test]
+    fn texture_and_brake_change_the_outgoing_render_without_clipping() {
+        for style in [TransitionStyle::Texture, TransitionStyle::Brake] {
+            let rate = 48_000u32;
+            let mut fx = DeckFx::new(style, rate, 0.5).unwrap();
+            let input = tone(fx.window_frames as usize, rate as f64);
+            let mut output = vec![0.0; input.len()];
+            fx.render(&input, &mut output, input.len() / 2);
+            let changed = input
+                .iter()
+                .zip(&output)
+                .map(|(dry, wet)| (dry - wet).abs())
+                .fold(0.0f32, f32::max);
+            assert!(changed > 0.05, "{style:?} did not color the outgoing signal");
+            assert!(peak(&output) < 1.0, "{style:?} peaked at {}", peak(&output));
+            let land = fx.land_frame as usize;
+            let end = fx.window_frames as usize;
+            let near_end = peak(&output[(end - 128) * 2..end * 2]);
+            assert!(near_end < 0.02, "{style:?} did not fade by the window end: {near_end}");
+            let mut gain_probe = DeckFx::new(style, rate, 0.5).unwrap();
+            let three_quarters_overlap =
+                land + gain_probe.overlap_frames as usize * 3 / 4;
+            advance_to(&mut gain_probe, three_quarters_overlap as u64);
+            assert!(
+                gain_probe.dry_gain() < 0.4,
+                "{style:?} dry gain at three quarters of overlap: {}",
+                gain_probe.dry_gain()
+            );
+            assert!(fx.finished(), "{style:?} did not finish its render window");
         }
     }
 
@@ -893,12 +1031,26 @@ mod tests {
     }
 
     #[test]
+    fn texture_send_ramps_to_the_landing_and_brake_reaches_quarter_speed() {
+        let beat = 24_000.0;
+        let land = 4.0 * beat;
+        assert_eq!(texture_send_gain(land - 2.0 * beat, land, beat), 0.0);
+        assert_eq!(texture_send_gain(land - beat, land, beat), 0.5);
+        assert_eq!(texture_send_gain(land, land, beat), 0.0);
+        assert!((brake_varispeed(beat, beat, land) - 1.0).abs() < 1e-9);
+        assert!(brake_varispeed(2.0 * beat, beat, land) < 1.0);
+        assert!((brake_varispeed(land, beat, land) - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
     fn only_the_window_extending_techniques_grow() {
         let beat = 0.5;
         assert!((window_seconds(TransitionStyle::EchoOut, beat).unwrap() - 2.5).abs() < 1e-9);
         assert!((window_seconds(TransitionStyle::ReverbWash, beat).unwrap() - 4.0).abs() < 1e-9);
         assert!((window_seconds(TransitionStyle::LoopRoll, beat).unwrap() - 3.0).abs() < 1e-9);
         assert!((window_seconds(TransitionStyle::DropCut, beat).unwrap() - 1.125).abs() < 1e-9);
+        assert!((window_seconds(TransitionStyle::Texture, beat).unwrap() - 4.0).abs() < 1e-9);
+        assert!((window_seconds(TransitionStyle::Brake, beat).unwrap() - 3.0).abs() < 1e-9);
         assert!((landing_fraction(TransitionStyle::LoopRoll, beat).unwrap() - 2.0 / 3.0).abs() < 1e-9);
         assert!((landing_fraction(TransitionStyle::EchoOut, beat).unwrap() - 0.2).abs() < 1e-9);
     }

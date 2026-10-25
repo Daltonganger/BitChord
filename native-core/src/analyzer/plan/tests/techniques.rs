@@ -1,7 +1,12 @@
 //! When a pair earns a DJ technique, and the intro that brings the next record in.
 
 use super::*;
-use crate::analyzer::plan::technique::{effect_window_start, phrase_window_or_adaptive};
+use crate::analyzer::plan::technique::{
+    avoid_threepeat, effect_window_start, phrase_window_or_adaptive, technique_style_weight,
+    with_recent_techniques,
+};
+use crate::analyzer::plan::choose::pair_salt;
+use crate::analyzer::plan::technique::technique_plan;
 
 #[test]
 fn an_unmatched_pair_crosses_over_where_the_tail_falls() {
@@ -104,6 +109,106 @@ fn the_effect_memory_skips_its_own_pair_and_keeps_two_others() {
         recent_techniques(3),
         vec![TransitionStyle::LoopRoll, TransitionStyle::ReverbWash]
     );
+}
+
+#[test]
+fn recent_style_history_reweights_candidates_and_blocks_a_third_repeat() {
+    let texture = technique_style_weight(
+        TransitionStyle::Texture,
+        0.1,
+        false,
+        false,
+        false,
+        false,
+        &[],
+    );
+    let repeated_texture = technique_style_weight(
+        TransitionStyle::Texture,
+        0.1,
+        false,
+        false,
+        false,
+        false,
+        &[TransitionStyle::Texture],
+    );
+    let older_texture = technique_style_weight(
+        TransitionStyle::Texture,
+        0.1,
+        false,
+        false,
+        false,
+        false,
+        &[TransitionStyle::Brake, TransitionStyle::Texture],
+    );
+    assert!(repeated_texture < texture, "a recent style must be downweighted");
+    assert!(older_texture > repeated_texture, "the newest history counts most");
+
+    let candidates = [
+        (TransitionStyle::Texture, "texture"),
+        (TransitionStyle::Brake, "brake"),
+        (TransitionStyle::EchoOut, "echo"),
+    ];
+    let varied = avoid_threepeat(
+        &candidates,
+        &[TransitionStyle::Texture, TransitionStyle::Texture],
+    );
+    assert!(!varied.iter().any(|(style, _)| *style == TransitionStyle::Texture));
+    assert_eq!(varied.len(), 2);
+    let only_texture = avoid_threepeat(
+        &candidates[..1],
+        &[TransitionStyle::Texture, TransitionStyle::Texture],
+    );
+    assert_eq!(only_texture.len(), 1);
+    assert_eq!(only_texture[0].0, TransitionStyle::Texture);
+}
+
+#[test]
+fn replan_of_the_same_pair_keeps_its_weighted_style() {
+    let (out, inc) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
+    let first = plan_from(&out, &inc, 8.0, true);
+    let second = plan_from(&out, &inc, 8.0, true);
+    assert_eq!(first.style, second.style);
+}
+
+#[test]
+fn texture_and_brake_are_selectable_when_their_grid_evidence_fits() {
+    for (vocal, expected) in [
+        (0.1, TransitionStyle::Texture),
+        (0.9, TransitionStyle::Brake),
+    ] {
+        let (mut out, mut inc) = flat_out_and_tempo_gap(200.0, 120.0, 121.0);
+        out.beat_confidence = 0.42;
+        let duration = out.duration;
+        with_vocal_curve(&mut out, duration, vocal);
+        let incoming_duration = inc.duration;
+        with_energy(&mut inc, incoming_duration, |_| 0.2);
+        out.key = "C major".into();
+        out.key_confidence = 0.9;
+        inc.key = "C major".into();
+        inc.key_confidence = 0.9;
+        let salt = pair_salt(&out, &inc);
+        with_recent_techniques(|recent| {
+            recent.clear();
+            recent.push((salt.wrapping_add(1), TransitionStyle::EchoOut));
+            recent.push((salt.wrapping_add(2), TransitionStyle::EchoOut));
+        });
+        let plan = technique_plan(&out, &inc, Tier::Plain, 8.0, None, None, 8)
+            .expect("eligible technique fixture should produce a plan");
+        assert_eq!(plan.style, expected, "{} vocal fixture: {}", vocal, plan.reason);
+    }
+}
+
+#[test]
+fn interleaved_replans_exclude_only_their_own_pair_history() {
+    let (out_a, inc_a) = flat_out_and_tempo_gap(200.0, 120.0, 130.0);
+    let (out_b, inc_b) = flat_out_and_tempo_gap(210.0, 120.0, 130.0);
+    let salt_a = pair_salt(&out_a, &inc_a);
+    let salt_b = pair_salt(&out_b, &inc_b);
+    note_technique(salt_a, TransitionStyle::Texture);
+    note_technique(salt_b, TransitionStyle::Brake);
+    note_technique(salt_a, TransitionStyle::EchoOut);
+    assert_eq!(recent_techniques(salt_a), vec![TransitionStyle::Brake]);
+    assert_eq!(recent_techniques(salt_b), vec![TransitionStyle::EchoOut]);
 }
 
 #[test]

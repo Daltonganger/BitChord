@@ -83,6 +83,10 @@ pub enum TransitionStyle {
     ReverbWash,
     /// A two-beat high-pass build and a hard cut on the downbeat — the drop swap.
     DropCut,
+    /// A short, tempo-synced flanger send that colors the outgoing phrase before handoff.
+    Texture,
+    /// A tape-style varispeed slowdown that brakes the outgoing phrase into the handoff.
+    Brake,
 }
 
 impl TransitionStyle {
@@ -99,6 +103,8 @@ impl TransitionStyle {
             Self::LoopRoll => "loop_roll",
             Self::ReverbWash => "reverb_wash",
             Self::DropCut => "drop_cut",
+            Self::Texture => "texture",
+            Self::Brake => "brake",
         }
     }
 

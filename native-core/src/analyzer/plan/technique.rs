@@ -354,6 +354,18 @@ pub(super) fn technique_plan(
             "loop roll: a strong grid and an instrumental ending",
         ));
     }
+    if grid && outgoing.beat_confidence >= 0.4 && out_vocal < 0.8 {
+        eligible.push((
+            TransitionStyle::Texture,
+            "texture send: a reliable grid gives the outro a light flanger ride",
+        ));
+    }
+    if grid && outgoing.beat_confidence >= 0.35 && (slow || out_vocal >= 0.2) {
+        eligible.push((
+            TransitionStyle::Brake,
+            "varispeed brake: the outgoing phrase slows into the handoff",
+        ));
+    }
     // A cut needs a record still going: on a tail that is already falling
     // it holds the next record back across a quiet stretch, a gap.
     if grid && incoming_grid && energetic_in && !outgoing_falls {
@@ -382,23 +394,42 @@ pub(super) fn technique_plan(
             "echo out: tempos too far apart for a blend",
         ));
     }
-    // Variety: an effect the last two other transitions used is passed over
-    // while an unused one fits. Re-plans of this same pair (keyed by its
-    // salt) never count as a repeat of themselves.
+    // History changes the score rather than making a style ineligible after
+    // one use. A pair re-plan excludes its own prior result, so it remains
+    // deterministic against the same surrounding set history.
     let salt = pair_salt(outgoing, incoming);
     let recent = recent_techniques(salt);
-    let fresh = |depth: usize| -> Vec<(TransitionStyle, &str)> {
-        eligible
-            .iter()
-            .copied()
-            .filter(|(candidate, _)| !recent.iter().take(depth).any(|used| used == candidate))
-            .collect()
-    };
-    let choices = [fresh(2), fresh(1), eligible.clone()]
-        .into_iter()
-        .find(|list| !list.is_empty())
-        .unwrap_or_default();
-    let (style, why) = *choices.get(salt % choices.len().max(1))?;
+    let candidates = avoid_threepeat(&eligible, &recent);
+    let weights = candidates
+        .iter()
+        .map(|(style, _)| {
+            technique_style_weight(
+                *style,
+                out_vocal,
+                slow,
+                key_clash,
+                energetic_in,
+                outgoing_falls,
+                &recent,
+            )
+        })
+        .collect::<Vec<_>>();
+    let total_weight: f64 = weights.iter().sum();
+    if total_weight <= 0.0 {
+        return None;
+    }
+    let mixed = (salt as u64) ^ ((salt as u64).rotate_left(21)) ^ 0x9E37_79B9_7F4A_7C15;
+    let unit = (mixed >> 11) as f64 / ((1u64 << 53) as f64);
+    let target = unit * total_weight;
+    let mut cumulative = 0.0;
+    let selected = weights
+        .iter()
+        .position(|weight| {
+            cumulative += *weight;
+            target < cumulative
+        })
+        .unwrap_or(weights.len() - 1);
+    let (style, why) = candidates[selected];
     note_technique(salt, style);
 
     // The effect sits on a real crossfade: the analysed blend supplies the
@@ -416,7 +447,13 @@ pub(super) fn technique_plan(
     let intro = (EFFECT_INTRO_BEATS * beat).max(EFFECT_INTRO_MIN_SECONDS);
     let mut available_outgoing = (duration - outgoing.audible_start_time.max(0.0)).max(0.0);
     if phrase_bars != 0
-        && matches!(style, TransitionStyle::EchoOut | TransitionStyle::ReverbWash)
+        && matches!(
+            style,
+            TransitionStyle::EchoOut
+                | TransitionStyle::ReverbWash
+                | TransitionStyle::Texture
+                | TransitionStyle::Brake
+        )
         && (mix_end - duration).abs() <= 1.5
     {
         if let Some(chord) = final_chord_attack(outgoing) {
@@ -540,6 +577,75 @@ pub(super) fn technique_plan(
             outgoing.beat_confidence
         ),
     })
+}
+
+/// A deterministic musical-fit score, reweighted by recent session history.
+/// Musical evidence supplies the base; the recency multipliers spread a set
+/// without making a weak technique eligible on a pair that cannot support it.
+pub(super) fn technique_style_weight(
+    style: TransitionStyle,
+    outgoing_vocal: f64,
+    slow: bool,
+    key_clash: bool,
+    energetic_incoming: bool,
+    falling_tail: bool,
+    recent: &[TransitionStyle],
+) -> f64 {
+    let outgoing_vocal = if outgoing_vocal.is_finite() {
+        outgoing_vocal.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+    let instrumental = 1.0 - outgoing_vocal;
+    let fit = match style {
+        TransitionStyle::EchoOut => 0.75 + outgoing_vocal * 0.55,
+        TransitionStyle::LoopRoll => 0.80 + instrumental * 0.45,
+        TransitionStyle::DropCut => {
+            0.70 + (if energetic_incoming { 0.65 } else { 0.0 })
+        }
+        TransitionStyle::ReverbWash => {
+            0.72 + (if slow { 0.28 } else { 0.0 }) + (if key_clash { 0.28 } else { 0.0 })
+        }
+        TransitionStyle::Texture => 1.0 + instrumental * 0.25,
+        TransitionStyle::Brake => {
+            0.68 + (if slow { 0.4 } else { 0.0 }) + (if falling_tail { 0.3 } else { 0.0 })
+        }
+        TransitionStyle::EqualPower
+        | TransitionStyle::DjFilter
+        | TransitionStyle::DjBlend
+        | TransitionStyle::Gapless => 0.0,
+    };
+    let history = recent
+        .iter()
+        .take(2)
+        .enumerate()
+        .fold(1.0, |weight, (age, used)| {
+            if *used == style {
+                weight * if age == 0 { 0.28 } else { 0.58 }
+            } else {
+                weight
+            }
+        });
+    fit * history
+}
+
+pub(super) fn avoid_threepeat<'a>(
+    candidates: &[(TransitionStyle, &'a str)],
+    recent: &[TransitionStyle],
+) -> Vec<(TransitionStyle, &'a str)> {
+    if recent.len() < 2 || recent[0] != recent[1] {
+        return candidates.to_vec();
+    }
+    let varied = candidates
+        .iter()
+        .copied()
+        .filter(|(candidate, _)| *candidate != recent[0])
+        .collect::<Vec<_>>();
+    if varied.is_empty() {
+        candidates.to_vec()
+    } else {
+        varied
+    }
 }
 
 pub(super) fn phrase_window_or_adaptive(

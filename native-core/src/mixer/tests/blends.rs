@@ -96,7 +96,7 @@ fn a_transition_match_is_settled_before_the_first_audible_frame() {
     outgoing_source.loudness_db = Some(-2.0);
     let mut incoming_source = transition_source(&quiet);
     incoming_source.loudness_db = Some(-8.0);
-    let mut outgoing =
+    let outgoing =
         Voice::open(&outgoing_source, false, 0.0, 48_000, 1.0, false, false).unwrap();
     let mut incoming =
         Voice::open(&incoming_source, false, 0.0, 48_000, 1.0, false, false).unwrap();
@@ -344,6 +344,8 @@ fn every_style_has_no_hole_at_the_handover() {
         TransitionStyle::LoopRoll,
         TransitionStyle::ReverbWash,
         TransitionStyle::DropCut,
+        TransitionStyle::Texture,
+        TransitionStyle::Brake,
         TransitionStyle::EqualPower,
         TransitionStyle::DjBlend,
         TransitionStyle::DjFilter,

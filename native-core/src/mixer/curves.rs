@@ -388,7 +388,9 @@ pub(super) fn ride_filters(
         TransitionStyle::EchoOut
         | TransitionStyle::LoopRoll
         | TransitionStyle::ReverbWash
-        | TransitionStyle::DropCut => {
+        | TransitionStyle::DropCut
+        | TransitionStyle::Texture
+        | TransitionStyle::Brake => {
             out.open();
             inc.open();
         }
