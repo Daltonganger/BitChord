@@ -8,12 +8,17 @@ import UIKit
 /// platforms. Ports upstream's `MiniPlayer.kt`: artwork thumbnail (tap →
 /// Now Playing), title/artist, transport. The pill is **always visible** —
 /// with nothing playing it shows the empty state, exactly as Music keeps its
-/// bottom pill around. The macOS variant carries Music's full cluster:
-/// shuffle / prev / play / next / repeat on the left, lyrics + volume right.
+/// bottom pill around. The macOS variant floats over the content column and
+/// carries Music's full cluster: shuffle / prev / play / next / repeat and the
+/// party on the left, the now-playing slot in the middle, the lyrics and queue
+/// panels, track actions, volume and AirPlay on the right.
 struct PlaybackPill: View {
     @Environment(PlaybackController.self) private var controller
     @Environment(AppModel.self) private var appModel
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    #if os(macOS)
+    @Environment(\.macInspectorSelection) private var inspector
+    #endif
 
     var body: some View {
         #if os(macOS)
@@ -25,8 +30,31 @@ struct PlaybackPill: View {
 
     // ---- iOS: mini-player above the tab bar --------------------------------
     #if os(iOS)
+    private enum PillDragAxis: Equatable {
+        case horizontal
+        case vertical
+    }
+
+    private struct PillDragState: Equatable {
+        var axis: PillDragAxis? = nil
+        var translation = CGSize.zero
+
+        mutating func track(_ translation: CGSize) {
+            if axis == nil, max(abs(translation.width), abs(translation.height)) >= 10 {
+                axis = abs(translation.height) > abs(translation.width) ? .vertical : .horizontal
+            }
+            self.translation = translation
+        }
+    }
+
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @GestureState private var pillDrag = PillDragState()
+    @State private var lockedPillDrag: (start: CGPoint, axis: PillDragAxis)?
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
+    private var pillPullLift: CGFloat {
+        guard pillDrag.axis == .vertical, pillDrag.translation.height < 0 else { return 0 }
+        return min(max(-pillDrag.translation.height * 0.5, 0), 72)
+    }
 
     private var iOSPill: some View {
         HStack(spacing: 12) {
@@ -59,14 +87,57 @@ struct PlaybackPill: View {
         .modifier(MiniPlayerChrome(fill: chromeFill))
         .overlay(alignment: .bottom) { progressHairline.clipShape(Capsule()) }
         .contentShape(.rect)
+        // Long press: what is coming next. Upstream's mini player answers a long
+        // press with the queue, and on a phone the pill has no queue button beside
+        // the transport — this is the way to reach the next few tracks without
+        // opening the player first.
+        .contextMenu { quickQueueMenu }
+        .offset(y: -pillPullLift)
+        // Direct gesture-state updates make the pill follow the finger at half
+        // rate. Only the release back to rest springs; the pull itself does not lag.
+        .animation(
+            pillDrag == PillDragState()
+                ? .spring(response: 0.38, dampingFraction: 0.86)
+                : nil,
+            value: pillDrag
+        )
         .modifier(NowPlayingZoomSource())
-        // Horizontal swipe to skip, matching upstream MiniPlayer's 72dp fling:
-        // left for next, right for previous.
-        // `minimumDistance: 20` keeps ordinary taps on the tap-to-expand path.
+        // One detector resolves the axis after the system's touch slop: an
+        // upward pull opens Now Playing, while a 72 pt horizontal swipe skips.
         .gesture(
-            DragGesture(minimumDistance: 20)
+            DragGesture(minimumDistance: 10)
+                .updating($pillDrag) { value, state, _ in
+                    state.track(value.translation)
+                }
+                .onChanged { value in
+                    if let lockedPillDrag, lockedPillDrag.start != value.startLocation {
+                        self.lockedPillDrag = nil
+                    }
+                    if lockedPillDrag == nil,
+                       max(abs(value.translation.width), abs(value.translation.height)) >= 10 {
+                        lockedPillDrag = (
+                            start: value.startLocation,
+                            axis: abs(value.translation.height) > abs(value.translation.width)
+                                ? .vertical
+                                : .horizontal
+                        )
+                    }
+                }
                 .onEnded { value in
                     let dx = value.translation.width
+                    let dy = value.translation.height
+                    let axis = lockedPillDrag?.axis
+                        ?? (abs(dy) > abs(dx) ? PillDragAxis.vertical : .horizontal)
+                    lockedPillDrag = nil
+                    if axis == .vertical {
+                        guard dy < -10 else { return }
+                        let heldPull = min(max(-dy * 0.5, 0), 72)
+                        let flickedUp = value.predictedEndTranslation.height < dy - 72
+                        guard flickedUp || heldPull > 36 else { return }
+                        Haptics.play(.tap)
+                        appModel.nowPlayingPresented = true
+                        return
+                    }
                     guard abs(dx) >= 72 else { return }
                     guard !PartyStore.shared.state.controlsLocked else {
                         Haptics.play(.tap)
@@ -89,7 +160,7 @@ struct PlaybackPill: View {
     // ---- macOS: Music's floating glass pill --------------------------------
     #if os(macOS)
     private var macOSPill: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 16) {
             HStack(spacing: 4) {
                 pillButton("Shuffle", icon: .bchShuffle) {
                     controller.toggleShuffle()
@@ -143,40 +214,71 @@ struct PlaybackPill: View {
             )
             .frame(minWidth: 180, maxWidth: 360)
 
-            Button {
-                appModel.nowPlayingPresented = true
-            } label: {
-                Image(.bchLyrics)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 15, height: 15)
-                    .frame(width: 28, height: 28)
-                    .contentShape(.rect)
+            HStack(spacing: 2) {
+                // Lyrics and the queue open the panel beside the library, so
+                // the list stays where it is; a second click closes it.
+                inspectorToggle(.lyrics, icon: .bchLyrics)
+                inspectorToggle(.queue, icon: .bchQueue)
+                playerActionsButton
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("Lyrics")
 
-            playerActionsButton
-            queueButton
-
-            if !controller.hideVolumeBar {
-                PillSlider(volume: Binding(
-                    get: { controller.volume },
-                    set: { controller.volume = $0 }
-                ))
-                .frame(width: 128)
+            HStack(spacing: 6) {
+                if !controller.hideVolumeBar {
+                    PillSlider(volume: Binding(
+                        get: { controller.volume },
+                        set: { controller.volume = $0 }
+                    ))
+                    .frame(width: 112)
+                    .help("Volume")
+                    .accessibilityLabel("Volume")
+                }
+                AirPlayRouteButton()
+                    .frame(width: 20, height: 20)
+                    .frame(width: 28, height: 32)
+                    .help("AirPlay")
+                    .accessibilityLabel("AirPlay")
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background {
+            // Over the library the pill has artwork under it, so the glass is
+            // the regular weight with the window's own colour beneath: thin
+            // material let the sleeves show through the controls.
+            let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+            if reduceTransparency || reduceBlur {
+                shape.fill(Color(nsColor: .windowBackgroundColor))
+            } else {
+                shape.fill(Color(nsColor: .windowBackgroundColor).opacity(0.55))
+                    .background(.regularMaterial, in: shape)
+            }
+        }
+        .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(chromeFill)
+                .strokeBorder(.primary.opacity(0.1), lineWidth: 0.5)
         }
         .clipShape(.rect(cornerRadius: 18, style: .continuous))
-        .shadow(color: .black.opacity(0.16), radius: 10, y: 4)
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func inspectorToggle(_ kind: MacInspectorKind, icon: ImageResource) -> some View {
+        let active = inspector.wrappedValue == kind
+        return Button {
+            inspector.wrappedValue = active ? nil : kind
+        } label: {
+            Image(icon)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 15, height: 15)
+                .frame(width: 32, height: 32)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(active ? Color.accentColor : .secondary)
+        .help(active ? "Hide \(kind.label)" : "Show \(kind.label)")
+        .accessibilityLabel(kind.label)
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 
     /// Shared 32pt hit target; glyphs sit at 15pt so shuffle, skip and
@@ -202,6 +304,7 @@ struct PlaybackPill: View {
         }
         .buttonStyle(.plain)
         .help(label)
+        .accessibilityLabel(label)
     }
     #endif
 
@@ -210,9 +313,12 @@ struct PlaybackPill: View {
     @ViewBuilder
     private var artworkOrPlaceholder: some View {
         if controller.current != nil {
-            ArtworkView(entry: controller.current, side: 40)
-                .clipShape(.rect(cornerRadius: 8, style: .continuous))
-                .overlay {
+            VideoSurface(cornerRadius: 8) {
+                ArtworkView(entry: controller.current, side: 40)
+            }
+            .frame(width: 40, height: 40)
+            .clipShape(.rect(cornerRadius: 8, style: .continuous))
+            .overlay {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(.white.opacity(0.10), lineWidth: 0.5)
                 }
@@ -273,12 +379,12 @@ struct PlaybackPill: View {
         } label: {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "person.2.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .frame(width: 32, height: 32)
                     .contentShape(.rect)
                 if party.inParty, party.state.members.count > 1 {
                     Text("\(party.state.members.count)")
-                        .font(.system(size: 9, weight: .bold))
+                        .scaledFont(size: 9, weight: .bold)
                         .monospacedDigit()
                         .foregroundStyle(.white)
                         .padding(.horizontal, 3)
@@ -325,7 +431,7 @@ struct PlaybackPill: View {
 
     private var playerActionLabel: some View {
         Image(systemName: "ellipsis")
-            .font(.system(size: 15, weight: .semibold))
+            .scaledFont(size: 15, weight: .semibold)
             .frame(width: 32, height: 32)
             .contentShape(Circle())
             .foregroundStyle(.secondary)
@@ -366,6 +472,11 @@ struct PlaybackPill: View {
         if reduceTransparency || reduceBlur {
             return AnyShapeStyle(Color.primary.opacity(0.12))
         }
+        if #available(iOS 26.0, *) {
+            // The system bottom accessory is glass already; a material inside it
+            // would be a second, opaque surface inside the first.
+            return AnyShapeStyle(.clear)
+        }
         return AnyShapeStyle(.ultraThinMaterial)
     }
 
@@ -392,10 +503,10 @@ struct PlaybackPill: View {
     /// as do iOS 26 and the pre-26 fallback.
     private struct MiniPlayerChrome: ViewModifier {
         var fill: AnyShapeStyle
+        @Environment(\.horizontalSizeClass) private var sizeClass
 
         func body(content: Content) -> some View {
-            if #available(iOS 27.0, *),
-               UIDevice.current.userInterfaceIdiom == .phone {
+            if #available(iOS 27.0, *), sizeClass == .compact {
                 content
             } else {
                 content
@@ -408,6 +519,64 @@ struct PlaybackPill: View {
     #endif
 
     #if os(iOS)
+    /// The pill's long-press menu: up next, then the two panes the pill does not
+    /// otherwise reach.
+    ///
+    /// Only a handful of rows: a menu is a glance, and the queue pane is one
+    /// button away at the bottom of it. Jumps go through `playQueueItem`, which is
+    /// what the queue pane's own rows use, so a jump from here and a jump from
+    /// there cannot mean different things.
+    @ViewBuilder
+    private var quickQueueMenu: some View {
+        let start = controller.playingIndex + 1
+        let upcoming: [(offset: Int, entry: QueueEntry)] = controller.queue.indices.contains(start)
+            ? Array(controller.queue[start...].prefix(4).enumerated()).map { (offset: $0.offset, entry: $0.element) }
+            : []
+
+        if upcoming.isEmpty {
+            Button("Nothing Queued") {}.disabled(true)
+        } else {
+            // Keyed by position, not by track id: the same song may sit in the
+            // queue twice, and two rows sharing an id would collapse into one.
+            ForEach(upcoming, id: \.offset) { item in
+                Button {
+                    Haptics.play(.tap)
+                    controller.playQueueItem(at: start + item.offset)
+                } label: {
+                    Text(item.entry.artist.isEmpty
+                         ? item.entry.title
+                         : "\(item.entry.title) — \(item.entry.artist)")
+                }
+            }
+            Button("Clear Up Next", role: .destructive) {
+                Haptics.play(.tap)
+                controller.clearUpcoming()
+            }
+        }
+
+        Divider()
+
+        Button {
+            PlatformSettings.shared.putString(key: "last_player_screen", value: "QUEUE")
+            appModel.nowPlayingPresented = true
+        } label: {
+            Label("Queue", systemImage: "list.bullet")
+        }
+
+        Button {
+            PlatformSettings.shared.putString(key: "last_player_screen", value: "LYRICS")
+            appModel.nowPlayingPresented = true
+        } label: {
+            Label("Lyrics", systemImage: "quote.bubble")
+        }
+
+        Button {
+            appModel.nowPlayingPresented = true
+        } label: {
+            Label("Open Player", systemImage: "arrow.up.left.and.arrow.down.right")
+        }
+    }
+
     private var buttons: some View {
         HStack(spacing: 8) {
             Button {
@@ -418,19 +587,20 @@ struct PlaybackPill: View {
                     ProgressView().controlSize(.small).frame(width: 22, height: 22)
                 } else {
                     Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 20, weight: .semibold))
+                        .scaledFont(size: 20, weight: .semibold)
                 }
             }
             .buttonStyle(.plain)
             .frame(width: 40, height: 40)
             .disabled(controller.current == nil && !controller.isBuffering)
+            .accessibilityLabel(controller.isPlaying ? "Pause" : "Play")
 
             Button {
                 Haptics.play(.skipNext)
                 controller.next()
             } label: {
                 Image(systemName: "forward.fill")
-                    .font(.system(size: 19, weight: .semibold))
+                    .scaledFont(size: 19, weight: .semibold)
             }
             .buttonStyle(.plain)
             .frame(width: 40, height: 40)
@@ -438,6 +608,7 @@ struct PlaybackPill: View {
                 PartyStore.shared.state.controlsLocked ? Color.primary.opacity(0.3) : Color.primary
             )
             .disabled(!controller.canPlayNext || PartyStore.shared.state.controlsLocked)
+            .accessibilityLabel("Next")
 
             partyButton.frame(width: 40, height: 40)
         }
@@ -452,12 +623,13 @@ struct PlaybackPill: View {
                 controller.previous()
             } label: {
                 Image(systemName: "backward.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .frame(width: 34, height: 34)
                     .contentShape(.rect)
             }
             .buttonStyle(.plain)
             .disabled(!controller.canPlayPrevious)
+            .accessibilityLabel("Previous")
 
             if controller.isBuffering {
                 ProgressView()
@@ -469,12 +641,13 @@ struct PlaybackPill: View {
                     controller.togglePlayPause()
                 } label: {
                     Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 18, weight: .semibold))
+                        .scaledFont(size: 18, weight: .semibold)
                         .frame(width: 34, height: 34)
                         .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
                 .disabled(controller.current == nil && !controller.isBuffering)
+                .accessibilityLabel(controller.isPlaying ? "Pause" : "Play")
             }
 
             Button {
@@ -483,7 +656,7 @@ struct PlaybackPill: View {
                 controller.next()
             } label: {
                 Image(systemName: "forward.fill")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .frame(width: 34, height: 34)
                     .contentShape(.rect)
             }
@@ -492,6 +665,7 @@ struct PlaybackPill: View {
                 PartyStore.shared.state.controlsLocked ? Color.primary.opacity(0.3) : Color.primary
             )
             .disabled(!controller.canPlayNext || PartyStore.shared.state.controlsLocked)
+            .accessibilityLabel("Next")
         }
         .foregroundStyle(.primary)
     }
@@ -641,7 +815,7 @@ struct PillSlider: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: volume == 0 ? "speaker.slash.fill" : "speaker.fill")
-                .font(.system(size: 12, weight: .semibold))
+                .scaledFont(size: 12, weight: .semibold)
                 .foregroundStyle(.secondary)
                 .frame(width: 16, height: 16)
             GeometryReader { geo in

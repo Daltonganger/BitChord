@@ -9,6 +9,10 @@ attributes:
   LastUpgradeCheck: "1520"
 options:
   createIntermediateGroups: true
+  developmentLanguage: en
+  # The locales the String Catalog ships. XcodeGen writes these into the
+  # project's knownRegions so the localized .lproj folders are packaged.
+  knownRegions: [en, de, es, fr, he, hi, id, it, ja, pl, pt-BR, ru, th, tr, vi, zh-Hans, zh-Hant, zh-HK]
   xcodeVersion: "15.0"
   deploymentTarget:
     iOS: "18.0"
@@ -16,10 +20,14 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5"
-    MARKETING_VERSION: "0.1.3"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "1.0.1"
+    CURRENT_PROJECT_VERSION: "5"
     # Typed asset symbols (Image(.bchHome)) — Xcode 15+ asset codegen.
     ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: "YES"
+    # String Catalog localization (upstream ships 19 locales; translations
+    # carried over from its strings.xml where the English matches exactly).
+    LOCALIZATION_PREFERS_STRING_CATALOGS: "YES"
+    SWIFT_EMIT_LOC_STRINGS: "YES"
     # Each developer selects their own Team in Xcode's Signing & Capabilities.
     CODE_SIGN_STYLE: Automatic
     # The spec (§0) ports arm64 targets only: iosArm64, iosSimulatorArm64,
@@ -49,12 +57,19 @@ targets:
         excludes:
           - "Widget/**"
       - path: Assets.xcassets
+      # Icon Composer app icon (Liquid Glass, with dark/tinted/clear modes on
+      # OS 26+). Same name as the asset-catalog AppIcon, which older systems use.
+      - path: AppIcon.icon
+        type: file
+        buildPhase: resources
       # UniFFI-generated NativeCore.swift lands here via scripts/build-native-core.sh.
       - path: Generated
         optional: true
       - path: Resources/Models
         optional: true
         type: folder
+        buildPhase: resources
+      - path: Resources/Localization
         buildPhase: resources
       - path: Resources/AudioLicenses
         type: folder
@@ -96,6 +111,12 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: app.bitchord.BitChord
             CFBundleURLSchemes: [bitchord]
+        # Handoff of playback: the activity type the payload is carried in. The
+        # system only launches this app for an activity it has been told about,
+        # so the type is declared here as well as written in
+        # `PlaybackHandoffPayload.activityType`.
+        NSUserActivityTypes:
+          - app.bitchord.playback
         UIBackgroundModes:
           - audio
         UISupportedInterfaceOrientations:
@@ -110,6 +131,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UILaunchScreen: {}
         NSMotionUsageDescription: BitChord uses headphone motion to keep its spatial effect anchored when you turn your head.
+        NSPhotoLibraryAddUsageDescription: BitChord saves the lyric share cards you choose to add to Photos.
         NSSpeechRecognitionUsageDescription: BitChord uses on-device speech recognition to align fetched lyrics with the playing audio. Audio is not sent to a server for alignment.
     entitlements:
       path: BitChord.entitlements
@@ -124,6 +146,8 @@ targets:
         com.apple.security.files.user-selected.read-write: true
         com.apple.security.application-groups:
           - group.app.bitchord.BitChord
+        # iCloud key-value store: syncs the per-song lyrics provider choice (O1).
+        com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)$(CFBundleIdentifier)
   BitChordWidget:
     type: app-extension
     supportedDestinations: [iOS, macOS]

@@ -45,8 +45,8 @@ actor StreamFileCache {
 
     var folder: URL { DiskCache.cachesSubfolder("audio") }
 
-    func path(for videoId: String, maxKbps: Int = Int.max, requireLossless: Bool = false) -> String? {
-        if let active = inFlight[videoId], active.quality == Self.qualityIdentity,
+    func path(for videoId: String, maxKbps: Int = Int.max, requireLossless: Bool = false, allowGrowing: Bool = true) -> String? {
+        if allowGrowing, let active = inFlight[videoId], active.quality == Self.qualityIdentity,
            FileManager.default.fileExists(atPath: active.path),
            !requireLossless, active.kbps <= maxKbps { return active.path }
         for ext in Self.extensions {
@@ -158,6 +158,56 @@ actor StreamFileCache {
         DiskCache.clearFolder(folder)
     }
 
+    // MARK: - What is on disk
+
+    /// One cached track, as the Cached Songs list needs it.
+    struct CachedEntry: Identifiable, Sendable {
+        let videoId: String
+        let bytes: Int64
+        let durationSeconds: Int?
+        let codec: String
+        let modified: Date
+
+        var id: String { videoId }
+    }
+
+    /// Every finished track in the cache, newest first.
+    ///
+    /// The manifest is what says whether a file is a finished track or a
+    /// half-written one, so a file without a readable manifest is not listed —
+    /// it is not something the listener could play from the cache anyway.
+    func entries() -> [CachedEntry] {
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
+        )) ?? []
+        var out: [CachedEntry] = []
+        for manifestFile in urls where manifestFile.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: manifestFile),
+                  let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
+                  manifest.complete else { continue }
+            let audio = manifestFile.deletingPathExtension()
+            guard FileManager.default.fileExists(atPath: audio.path) else { continue }
+            let values = try? audio.resourceValues(forKeys: Set(keys))
+            out.append(CachedEntry(
+                videoId: manifest.youtubeVideoId ?? manifest.recordingIdentity,
+                bytes: Int64(values?.fileSize ?? 0),
+                durationSeconds: manifest.durationSeconds,
+                codec: manifest.codec,
+                modified: values?.contentModificationDate ?? .distantPast
+            ))
+        }
+        return out.sorted { $0.modified > $1.modified }
+    }
+
+    /// Drops one track's cached audio and its manifest.
+    func remove(_ videoId: String) {
+        let url = cachedURL(for: videoId)
+        try? FileManager.default.removeItem(at: url)
+        try? FileManager.default.removeItem(at: manifestURL(url.path))
+        inFlight.removeValue(forKey: videoId)
+    }
+
     /// Drops everything cached for one track, and forgets where it was growing.
     ///
     /// The growing path has to go too, and not only the finished copy: a revert
@@ -206,7 +256,12 @@ actor StreamFileCache {
 actor CanvasFileCache {
     static let shared = CanvasFileCache()
     private static let limit: Int64 = 150 * 1024 * 1024
-    private var inFlight: [URL: Task<URL, Never>] = [:]
+    private struct InFlightDownload {
+        let id: UUID
+        var task: Task<Void, Never>?
+        var waiters: [UUID: CheckedContinuation<URL, Never>]
+    }
+    private var inFlight: [URL: InFlightDownload] = [:]
 
     var folder: URL { DiskCache.cachesSubfolder("canvas") }
 
@@ -225,12 +280,63 @@ actor CanvasFileCache {
             DiskCache.touch(dest)
             return dest
         }
-        if let task = inFlight[remote] { return await task.value }
-        let task = Task { await download(remote, to: dest) }
-        inFlight[remote] = task
-        let result = await task.value
+        let waiterID = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: remote)
+                    return
+                }
+                registerWaiter(continuation, id: waiterID, remote: remote, destination: dest)
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(for: remote, waiterID: waiterID) }
+        }
+    }
+
+    private func registerWaiter(
+        _ continuation: CheckedContinuation<URL, Never>,
+        id waiterID: UUID,
+        remote: URL,
+        destination: URL
+    ) {
+        if var flight = inFlight[remote] {
+            flight.waiters[waiterID] = continuation
+            inFlight[remote] = flight
+            return
+        }
+
+        let operationID = UUID()
+        inFlight[remote] = InFlightDownload(id: operationID, task: nil, waiters: [waiterID: continuation])
+        let task = Task { [weak self] in
+            guard let self else { return }
+            let result = await self.download(remote, to: destination)
+            await self.finishDownload(for: remote, operationID: operationID, result: result)
+        }
+        if var flight = inFlight[remote], flight.id == operationID {
+            flight.task = task
+            inFlight[remote] = flight
+        }
+    }
+
+    private func cancelWaiter(for remote: URL, waiterID: UUID) {
+        guard var flight = inFlight[remote],
+              let continuation = flight.waiters.removeValue(forKey: waiterID) else { return }
+        continuation.resume(returning: remote)
+        if flight.waiters.isEmpty {
+            inFlight[remote] = nil
+            flight.task?.cancel()
+        } else {
+            inFlight[remote] = flight
+        }
+    }
+
+    private func finishDownload(for remote: URL, operationID: UUID, result: URL) {
+        guard let flight = inFlight[remote], flight.id == operationID else { return }
         inFlight[remote] = nil
-        return result
+        for continuation in flight.waiters.values {
+            continuation.resume(returning: result)
+        }
     }
 
     private func download(_ remote: URL, to dest: URL) async -> URL {

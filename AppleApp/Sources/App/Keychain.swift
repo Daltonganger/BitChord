@@ -18,6 +18,7 @@ import Security
 /// backup that would restore it to a different device.
 enum Keychain {
     private static let service = "app.bitchord.BitChord.credentials"
+    private static let synchronizableService = "app.bitchord.BitChord"
 
     /// Read a value, or nil when there is none.
     ///
@@ -69,6 +70,48 @@ enum Keychain {
         return false
     }
 
+    /// Read the iCloud-synchronizable session item. It has a separate service
+    /// and accessibility class from the local playback cookie.
+    static func getSynchronizable(_ account: String) -> String? {
+        var query = synchronizableQuery(account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data
+        else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Upsert a synchronizable item using an accessibility class supported by
+    /// iCloud Keychain. Errors intentionally carry no credential data.
+    @discardableResult
+    static func putSynchronizable(_ account: String, _ value: String) -> Bool {
+        let data = Data(value.utf8)
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+        ]
+        let update = SecItemUpdate(synchronizableQuery(account) as CFDictionary, attributes as CFDictionary)
+        if update == errSecSuccess { return true }
+        guard update == errSecItemNotFound else { return false }
+        var item = synchronizableQuery(account)
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        let added = SecItemAdd(item as CFDictionary, nil)
+        guard added == errSecDuplicateItem else { return added == errSecSuccess }
+        return SecItemUpdate(synchronizableQuery(account) as CFDictionary, attributes as CFDictionary) == errSecSuccess
+    }
+
+    @discardableResult
+    static func clearSynchronizable(_ account: String) -> Bool {
+        let status = SecItemDelete(synchronizableQuery(account) as CFDictionary)
+        // No iCloud Keychain capability means no shared item exists to clear;
+        // local sign-out must continue normally in that case.
+        return status == errSecSuccess || status == errSecItemNotFound
+            || status == errSecNotAvailable || status == errSecMissingEntitlement
+    }
+
     /// Whether an item exists but cannot be read yet — a device that has not been
     /// unlocked since boot.
     ///
@@ -88,6 +131,15 @@ enum Keychain {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
+        ]
+    }
+
+    private static func synchronizableQuery(_ account: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: synchronizableService,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: true,
         ]
     }
 }

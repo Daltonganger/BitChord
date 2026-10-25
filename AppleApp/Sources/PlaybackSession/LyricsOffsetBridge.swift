@@ -70,4 +70,19 @@ extension Notification.Name {
     /// that only took effect on the next track would be unusable for adjusting
     /// against the track you are listening to.
     static let lyricsOffsetChanged = Notification.Name("bitchord.lyricsOffsetChanged")
+
+    /// A playlist was created in the account (by hand or by an import). The
+    /// Playlists page and the Mac sidebar load their lists once, so without
+    /// this a new playlist only appeared after relaunching.
+    static let libraryPlaylistsChanged = Notification.Name("bitchord.libraryPlaylistsChanged")
+
+    /// A signed-in request was refused because the session itself is over.
+    /// `AuthController` observes it and goes signed-out, so every screen can
+    /// offer a sign-in rather than an error a retry could never fix.
+    static let sessionExpired = Notification.Name("bitchord.sessionExpired")
+
+    /// A playlist was deleted. On the Mac the detail column is not a push
+    /// stack, so `dismiss()` does nothing there and the page a deleted playlist
+    /// left behind has to give way to the Playlists list itself.
+    static let playlistDeleted = Notification.Name("bitchord.playlistDeleted")
 }

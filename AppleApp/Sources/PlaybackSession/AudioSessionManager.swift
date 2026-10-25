@@ -111,16 +111,21 @@ enum AudioSessionManager {
                 if session.category != .playback || session.mode != .default || session.categoryOptions != options || session.routeSharingPolicy != policy {
                     try session.setCategory(.playback, mode: .default, policy: policy, options: options)
                 }
+                let outputKind = session.currentRoute.outputs.first?.portType.rawValue ?? ""
+                let effectivePreferredRate = LosslessRoute.cappedLosslessSampleRate(
+                    routeKind: outputKind,
+                    requested: preferredSampleRate
+                )
                 if PlatformSettings.shared.getBoolean(
                     key: "match_source_sample_rate", default: true
-                ), let preferredSampleRate, preferredSampleRate > 0,
-                   session.preferredSampleRate != preferredSampleRate {
+                ), let effectivePreferredRate,
+                   session.preferredSampleRate != effectivePreferredRate {
                     // A preference is a request, not a promise: read sampleRate
                     // after activation and give that actual value to the engine.
                     do {
-                        try session.setPreferredSampleRate(preferredSampleRate)
+                        try session.setPreferredSampleRate(effectivePreferredRate)
                     } catch {
-                        record("preferred output rate \(preferredSampleRate) Hz rejected (nonfatal): \(error)")
+                        record("preferred output rate \(effectivePreferredRate) Hz rejected (nonfatal): \(error)")
                     }
                 }
                 try session.setActive(true)

@@ -9,6 +9,7 @@ import BitChordShared
 /// caller of rather than a second implementation of.
 enum AuthStore {
     private static let account = "ytmusic.cookie"
+    private static let sharedAccount = "ytmusic.session.shared"
 
     static var cookie: String? {
         get { Keychain.get(account) }
@@ -28,6 +29,24 @@ enum AuthStore {
     /// A failed delete must not masquerade as a durable sign-out.
     @discardableResult
     static func clear() -> Bool { Keychain.clear(account) }
+
+    static var sharedSession: SharedSessionCredential? {
+        SharedSessionCredential.decode(Keychain.getSynchronizable(sharedAccount))
+    }
+
+    @discardableResult
+    static func saveSharedSession(_ credential: SharedSessionCredential) -> Bool {
+        guard let encoded = credential.encoded() else { return false }
+        guard Keychain.putSynchronizable(sharedAccount, encoded) else { return false }
+        // Read back through the synchronizable namespace before treating the
+        // upsert as durable; unavailable Security status leaves sharing inert.
+        return Keychain.getSynchronizable(sharedAccount) == encoded
+    }
+
+    @discardableResult
+    static func clearSharedSession() -> Bool {
+        Keychain.clearSynchronizable(sharedAccount)
+    }
 }
 
 /// Wires the shared module's Keychain seam to [Keychain] at launch.

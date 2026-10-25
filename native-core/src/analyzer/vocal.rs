@@ -1,4 +1,11 @@
-//! Port of upstream `VocalSpectrogram` + `VocalTracker.kt`.
+//! Port of upstream `VocalSpectrogram` + `VocalTracker.kt`, reading the bundled
+//! open-unmix **umxhq** vocals graph (`AppleApp/Resources/Models/vocals_umxhq_int8.onnx`).
+//!
+//! The graph is an ONNX export of the official sigsep umxhq vocals checkpoint
+//! (MIT), fixed at `[1, 2, 2049, 960]` magnitude spectrogram → vocals magnitude
+//! in the same shape. The three BiLSTM layers are float; only the MatMul/Gemm
+//! layers are int8. `plan.rs` trims the decoder's chunk overshoot to the window
+//! asked for so the 960-frame input is exact.
 
 use super::models;
 use super::resample;
@@ -105,9 +112,15 @@ fn infer(model: &rten::Model, spec: &Spectrogram) -> Option<Vec<f32>> {
     let input_id = *model.input_ids().first()?;
     let mix = fill_fixed_frames(&spec.values, spec.frames);
     let tensor = NdTensor::from_data([1, CHANNELS, BINS, FIXED_FRAMES], mix.clone());
-    let outputs = model
-        .run(vec![(input_id, tensor.into())], model.output_ids(), None)
-        .ok()?;
+    let outputs = match model.run(vec![(input_id, tensor.into())], model.output_ids(), None) {
+        Ok(outputs) => outputs,
+        Err(error) => {
+            // Silence here is how the analyser ends up on the DSP heuristic while
+            // everyone believes the 113 MB graph is doing the work.
+            log::warn!("automix: vocal inference failed: {error}");
+            return None;
+        }
+    };
     let target = super::models::flatten_f32(outputs.first()?)?;
     if target.len() < CHANNELS * BINS * FIXED_FRAMES {
         return None;

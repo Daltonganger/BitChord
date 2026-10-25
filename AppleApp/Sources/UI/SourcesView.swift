@@ -26,6 +26,7 @@ struct SourcesView: View {
     @State private var health: [String: Health] = [:]
     @State private var probing = Set<String>()
     @State private var editing: ConfigDocument?
+    @State private var removingAddon: ConfigDocument?
     /// The confirm JioSaavn opens before it is opted into — see `onConfirmJioSaavn`.
     @State private var confirmingJioSaavn = false
     /// The WebDAV editor. A sheet on this screen rather than inside Settings, which is
@@ -33,6 +34,9 @@ struct SourcesView: View {
     /// to come from, and a personal library is exactly that.
     @State private var editingWebDav = false
     @State private var webDavStore = WebDavStore.shared
+    @State private var upgradeLengthSlackSeconds = Int(
+        PlatformSettings.shared.getInt(key: "upgrade_length_slack_seconds", default: 3)
+    )
     /// iOS only: `EditMode` does not exist on macOS, where the list is reordered
     /// by click-to-move instead.
     #if os(iOS)
@@ -95,6 +99,19 @@ struct SourcesView: View {
         .sheet(isPresented: $editingWebDav) {
             WebDavSettingsSheet()
         }
+        .alert(
+            "Remove addon?",
+            isPresented: Binding(
+                get: { removingAddon != nil },
+                set: { if !$0 { removingAddon = nil } }
+            ),
+            presenting: removingAddon
+        ) { config in
+            Button("Remove addon", role: .destructive) { removeAddon(config.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: { config in
+            Text("Remove \(config.displayName) from BitChord's sources?")
+        }
         .confirmationDialog(
             jioSaavnWarning,
             isPresented: $confirmingJioSaavn,
@@ -135,6 +152,16 @@ struct SourcesView: View {
                 // setting for when it is switched back on.
                 handle: config.kind == "ADDON" ? { AnyView(dragHandle(config.id)) } : nil
             )
+            #if os(iOS)
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                if config.kind == "ADDON" {
+                    Button("Remove", systemImage: "trash") {
+                        removingAddon = config
+                    }
+                    .tint(.red)
+                }
+            }
+            #endif
         }
         .onMove(perform: moveAddons)
     }
@@ -193,6 +220,36 @@ struct SourcesView: View {
             } else if !anyLosslessSource {
                 Text("No enabled source can provide lossless audio. Add an addon to play lossless files without transcoding.")
             }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Track Length Tolerance")
+                            .foregroundStyle(.primary)
+                        Text("Maximum duration difference allowed for a replacement stream")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Text("\(upgradeLengthSlackSeconds) s")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(upgradeLengthSlackSeconds) },
+                        set: { upgradeLengthSlackSeconds = Int($0.rounded()) }
+                    ),
+                    in: Double(AppSettings.shared.MIN_UPGRADE_LENGTH_SLACK_SECONDS)...Double(AppSettings.shared.MAX_UPGRADE_LENGTH_SLACK_SECONDS),
+                    step: 1
+                )
+                .accessibilityLabel("Track Length Tolerance")
+                .accessibilityValue("\(upgradeLengthSlackSeconds) seconds")
+                .onChange(of: upgradeLengthSlackSeconds) { _, value in
+                    AppSettings.shared.setUpgradeLengthSlackSeconds(value: Int32(value))
+                }
+            }
+            .padding(.top, 6)
+            Text("A larger tolerance accepts more source matches; a smaller tolerance is stricter. The default is 3 seconds.")
         }
         .foregroundStyle(.secondary)
     }
@@ -324,6 +381,22 @@ struct SourcesView: View {
         Task { await reload() }
     }
 
+    private func removeAddon(_ id: String) {
+        guard configs.contains(where: { $0.id == id && $0.kind == "ADDON" }) else { return }
+        SourceResolverBridge.shared.remove(
+            configId: id,
+            callback: NoReply { ok, message in
+                Task { @MainActor in
+                    if ok {
+                        await reload()
+                    } else {
+                        toast.show(message ?? "Could not remove addon", kind: .failure)
+                    }
+                }
+            }
+        )
+    }
+
     // MARK: - Reordering
 
     #if os(iOS)
@@ -352,6 +425,7 @@ struct SourcesView: View {
                 Image(systemName: "line.3.horizontal")
                     .foregroundStyle(.secondary)
                     .help("Change this addon's position")
+                    .accessibilityLabel("Reorder")
             }
         )
         #else

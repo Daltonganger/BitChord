@@ -39,6 +39,12 @@ SOURCES=(
   "$APP/Sources/UI/ListenTogetherView.swift"
   "$APP/Sources/UI/ListenTogetherSheets.swift"
   "$APP/Sources/UI/PartyMembersSheet.swift"
+  "$APP/Sources/UI/Theme.swift"
+  "$APP/Sources/UI/YtMusicLoginView.swift"
+  "$APP/Sources/UI/SignInCapture.swift"
+  "$APP/Sources/UI/SignInNavigation.swift"
+  "$APP/Sources/UI/SignInUserAgent.swift"
+  "$APP/Sources/App/GuardedHTTP.swift"
   "$APP/Sources/PlaybackSession/PartySync.swift"
   "$APP/Sources/PlaybackSession/PartySocket.swift"
   "$APP/Sources/UI/Toast.swift"
@@ -59,6 +65,7 @@ cat > "$CHECK_DIR/Stubs.swift" <<'STUBS'
 import Foundation
 import SwiftUI
 import Observation
+import BitChordShared
 
 /// The queue entry, as the party screen needs it: an id, some labels, and a
 /// duration. The real one lives with the player and carries far more than a party
@@ -135,6 +142,58 @@ final class PlaybackController {
     func togglePlayPause() { isPlaying.toggle() }
     func play(_ entries: [QueueEntry], at index: Int = 0) {}
     func pauseForBackground() {}
+}
+
+/// The two Toast hooks that live in ActionMenus.swift, stubbed: pulling that
+/// file in would drag every menu in the app with it, and the party screens
+/// never open either of these sheets.
+struct TrackLogSheet: View {
+    let entry: QueueEntry
+
+    var body: some View {
+        Text("Track log")
+    }
+}
+
+struct ConfirmationDialog<ConfirmLabel: View>: View {
+    let title: String
+    let message: String
+    let destructive: Bool
+    let confirmLabel: () -> ConfirmLabel
+    let onConfirm: () -> Void
+
+    init(title: String, message: String, confirm: String, onConfirm: @escaping () -> Void)
+        where ConfirmLabel == Text {
+        self.title = title
+        self.message = message
+        self.destructive = true
+        self.confirmLabel = { Text(confirm) }
+        self.onConfirm = onConfirm
+    }
+
+    var body: some View {
+        EmptyView()
+    }
+}
+
+/// The request-infrastructure AuthController touches, stubbed: PageSession and
+/// PageRequestCoordinator are whole request-pipeline files, and LikeStore lives
+/// next to the library actions. The party screens only need the symbols to
+/// exist; `generation()` still reads the real bridge, because sign-in state is
+/// what it measures.
+enum PageSession {
+    static func reset() {}
+    static func generation() -> Int64 { AuthBridge.shared.sessionGeneration() }
+}
+
+final class LikeStore {
+    static let shared = LikeStore()
+    func clear() {}
+}
+
+actor PageRequestCoordinator {
+    static let shared = PageRequestCoordinator()
+    func invalidate(partition: String? = nil) {}
 }
 STUBS
 

@@ -103,6 +103,33 @@ func sha16(_ data: Data) -> String {
 let embeddedMark = Array("embedded-cover".utf8)
 let filedMark = Array("filed-cover".utf8)
 
+@MainActor
+func verifyLocalUpload(_ sourcePath: String) async {
+    guard WebDavStore.shared.canUpload(path: sourcePath, id: sourcePath) else {
+        check("a readable local audio file can be uploaded", false, "the menu gate refused it")
+        return
+    }
+    do {
+        let first = try await WebDavStore.shared.upload(
+            path: sourcePath, title: "Upload Test", artist: "Björk", refreshAfterUpload: false
+        )
+        let second = try await WebDavStore.shared.upload(
+            path: sourcePath, title: "Upload Test", artist: "Björk", refreshAfterUpload: false
+        )
+        checkEqual("the upload uses a safe artist-title filename", first, "Björk - Upload Test.flac")
+        checkEqual("a name conflict keeps both files", second, "Björk - Upload Test (1).flac")
+        check(
+            "a deferred batch upload does not relist after each file",
+            !WebDavStore.shared.albums.flatMap(\.songs).contains { $0.title.hasPrefix("Upload Test") }
+        )
+        await WebDavStore.shared.load(force: true)
+        let copies = WebDavStore.shared.albums.flatMap(\.songs).filter { $0.title.hasPrefix("Upload Test") }
+        checkEqual("the refreshed share lists both uploaded copies", copies.count, 2)
+    } catch {
+        check("local audio uploads without overwriting an existing file", false, error.localizedDescription)
+    }
+}
+
 func mark(_ data: Data, _ text: [UInt8]) -> String {
     let bytes = [UInt8](data)
     guard bytes.count >= text.count else { return "short (\(bytes.count))" }
@@ -219,6 +246,14 @@ if let time = songs.first(where: { $0.title == "Time" }) {
     )
 }
 
+// ---- Streaming local upload, collision safety and refresh ------------------
+
+if let uploadPath = ProcessInfo.processInfo.environment["WEBDAV_UPLOAD_SOURCE"] {
+    await verifyLocalUpload(uploadPath)
+} else {
+    check("a local file is available for upload verification", false, "WEBDAV_UPLOAD_SOURCE is unset")
+}
+
 // ---- The cover filed beside the track --------------------------------------
 
 let timeSong = songs.first { $0.title == "Time" }
@@ -317,7 +352,7 @@ do {
     check("a track on another host has no cover rather than the password handed over", false, describe(error))
 }
 
-let logPath = "/tmp/bitchord-webdav-requests.log"
+let logPath = ProcessInfo.processInfo.environment["WEBDAV_REQUEST_LOG"] ?? "/tmp/bitchord-webdav-requests.log"
 if let log = try? String(contentsOfFile: logPath, encoding: .utf8) {
     let refused = log.split(separator: "\n").filter { $0.contains("401") }
     check(

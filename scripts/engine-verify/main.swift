@@ -311,7 +311,8 @@ do {
         outgoingText: "out", incomingText: "in",
         albumSequential: false, crossfadeSeconds: 8,
         outgoingDurationSeconds: 0, incomingDurationSeconds: 0,
-        outgoingHeaders: [:], incomingHeaders: [:])
+        outgoingHeaders: [:], incomingHeaders: [:],
+        allowEffects: true)
     check("a plan comes back for a real pair", true,
           "style=\(cue.style) cue=\(String(format: "%.2f", cue.cueSeconds))s "
           + "fade=\(String(format: "%.2f", cue.fadeSeconds))s "

@@ -73,19 +73,37 @@ object TtmlLyrics {
             val role = ROLE.find(attrs)?.groupValues?.get(1).orEmpty()
             if (role == "x-translation" || role == "x-roman") return@mapNotNull null
             val inner = p.groupValues[2]
-            val lead = mutableListOf<LyricWordDto>()
-            val backing = mutableListOf<LyricWordDto>()
+            val leadRuns = mutableListOf<TimedRun>()
+            val backingRuns = mutableListOf<TimedRun>()
+            var previousEnd = 0
+            var previousRun: Pair<MutableList<TimedRun>, Int>? = null
             SPAN.findAll(inner).forEach { span ->
+                val gap = inner.substring(previousEnd, span.range.first)
+                if (gap.isNotEmpty()) {
+                    previousRun?.let { (runs, index) ->
+                        runs[index] = runs[index].copy(raw = runs[index].raw + gap)
+                    }
+                }
+                previousEnd = span.range.last + 1
                 val sattrs = span.groupValues[1]
                 val srole = ROLE.find(sattrs)?.groupValues?.get(1).orEmpty()
                 if (srole == "x-translation" || srole == "x-roman") return@forEach
                 val begin = time(BEGIN.find(sattrs)?.groupValues?.get(1)) ?: return@forEach
                 val end = time(END.find(sattrs)?.groupValues?.get(1)) ?: begin + 200
-                val text = span.groupValues[2].replace(Regex("<[^>]+>"), "").trim()
+                val text = decode(span.groupValues[2].replace(Regex("<[^>]+>"), ""))
+                val target = if (srole == "x-bg") backingRuns else leadRuns
                 if (text.isEmpty()) return@forEach
-                val word = LyricWordDto(begin, end, decode(text))
-                if (srole == "x-bg") backing += word else lead += word
+                target += TimedRun(begin, end, text)
+                previousRun = target to target.lastIndex
             }
+            if (previousEnd < inner.length) {
+                previousRun?.let { (runs, index) ->
+                    val trailingText = inner.substring(previousEnd)
+                    runs[index] = runs[index].copy(raw = runs[index].raw + trailingText)
+                }
+            }
+            val lead = wordsFromRuns(leadRuns)
+            val backing = wordsFromRuns(backingRuns)
             val pBegin = time(BEGIN.find(attrs)?.groupValues?.get(1))
             val pEnd = time(END.find(attrs)?.groupValues?.get(1))
             val background = backing.takeIf { it.isNotEmpty() }?.let {

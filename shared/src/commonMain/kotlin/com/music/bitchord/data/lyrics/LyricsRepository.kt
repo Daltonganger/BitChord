@@ -81,14 +81,16 @@ object LyricsRepository {
         prioritizeSyllableSync: Boolean = true,
         isrc: String? = null,
         /** Called from the provider job itself, including for lazily-started ones. */
-        onSourceStarted: ((LyricsSource) -> Unit)? = null,
+        onSourceStarted: (suspend (LyricsSource) -> Unit)? = null,
         /**
          * Reports a completed provider attempt. A null result is a genuine miss; a
          * cancelled race loser is deliberately not reported as one.
          */
-        onSourceResult: ((LyricsSource, Result?) -> Unit)? = null,
+        onSourceResult: (suspend (LyricsSource, Result?) -> Unit)? = null,
         /** Lets callers turn a cancelled race loser back into "not fetched". */
-        onSourceCancelled: ((LyricsSource) -> Unit)? = null,
+        onSourceCancelled: (suspend (LyricsSource) -> Unit)? = null,
+        /** A provider-wide refusal is not a per-track miss. */
+        onSourceBlocked: (suspend (LyricsSource) -> Unit)? = null,
     ): Result? = coroutineScope {
         val configuredSequence = order.filter { it in sources } +
             LyricsSource.entries.filter { it in sources && it !in order }
@@ -136,6 +138,10 @@ object LyricsRepository {
                 } catch (cancelled: CancellationException) {
                     onSourceCancelled?.invoke(source)
                     throw cancelled
+                } catch (blocked: SimpMusicBlockedException) {
+                    DebugLog.d("${source.name} is blocked for third-party apps")
+                    onSourceBlocked?.invoke(source)
+                    null
                 } catch (e: Exception) {
                     DebugLog.d("${source.name} failed: ${e.message}")
                     onSourceResult?.invoke(source, null)
@@ -217,6 +223,7 @@ object LyricsRepository {
         LyricsSource.BETTER_LYRICS -> BetterLyrics.lyrics(title, artist, durationMs, album)
         LyricsSource.BETTER_LYRICS_PORTATO -> BetterLyrics.portato(title, artist, durationMs, album)
         LyricsSource.LYRICS_PLUS -> LyricsPlus.lyrics(title, artist, durationMs, album, isrc)
+        LyricsSource.LRC_RED -> LrcRed.lyrics(title, artist, durationMs, isrc ?: hit?.isrc)
         LyricsSource.BINI_LYRICS ->
             (hit?.let { BiniLyrics.lyricsFor(it) }
                 ?: BiniLyrics.lyrics(title, artist, durationMs, album, isrc))

@@ -312,6 +312,36 @@ class TrackMatcherTest {
         assertEquals("audio", found?.videoId)
     }
 
+    @Test
+    fun officialVideoRankingAcceptsLongAndShortCutsWithoutLettingDurationVeto() {
+        val target = TrackMatcher.Target("Thriller", "Michael Jackson", 5 * 60 + 57, isVideo = true)
+        val ranked = TrackMatcher.rankedOfficialVideos(
+            listOf(
+                song("Thriller", "Michael Jackson", "13:42", id = "long-cut"),
+                song("Thriller", "Michael Jackson", "3:22", id = "short-cut"),
+            ),
+            target,
+        )
+
+        assertEquals(listOf("short-cut", "long-cut"), ranked.map { it.videoId })
+    }
+
+    @Test
+    fun officialVideoRankingRejectsSameTitleByDifferentArtist() {
+        val target = TrackMatcher.Target("Down", "Shayne Ward", 205, isVideo = true)
+        val jaySean = song("Down (feat. Lil Wayne)", "Jay Sean", "4:00", id = "jay-sean")
+
+        assertTrue(TrackMatcher.rankedOfficialVideos(listOf(jaySean), target).isEmpty())
+    }
+
+    @Test
+    fun officialVideoRankingRejectsLiveVersionForStudioTarget() {
+        val target = TrackMatcher.Target("Bohemian Rhapsody", "Queen", 355, isVideo = true)
+        val wembley = song("Bohemian Rhapsody (Live At Wembley Stadium)", "Queen", "5:57", id = "wembley")
+
+        assertTrue(TrackMatcher.rankedOfficialVideos(listOf(wembley), target).isEmpty())
+    }
+
     // ── Catalogue collisions ────────────────────────────────────────────────
 
     @Test

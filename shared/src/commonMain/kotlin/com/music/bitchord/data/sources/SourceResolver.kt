@@ -181,7 +181,17 @@ object SourceResolver {
         if (target.title.isBlank() || target.isVideo) return null
         val active = SourceRegistry.activeForPlayback()
         val youtube = active.firstOrNull { it.kind == SourceKind.YOUTUBE } ?: return null
-        val (source, stream) = bestAcross(rankedAbove(youtube.configId, active), target, requestForNow())
+        val requested = requestForNow()
+        val mayUseLossless = PlaybackCodecCapabilities.losslessOutput
+        // On a lossy-only route ask for the best ordinary substitute and keep
+        // racing after FLAC/ALAC answers, so a fast lossy catalogue result can
+        // still stand in for YouTube without spending a lossless-only request.
+        val routeRequest = if (requested is StreamRequest.Lossless && !mayUseLossless) StreamRequest.Best else requested
+        val (source, stream) = bestAcross(
+            rankedAbove(youtube.configId, active), target, routeRequest,
+            allowLossless = mayUseLossless,
+            accept = { _, candidate -> mayUseLossless || candidate.format.isLossless != true },
+        )
             ?: return null
         // Says what was found, not what the caller will do with it. This line used
         // to read "substituted" unconditionally, including for streams the caller
@@ -308,12 +318,16 @@ object SourceResolver {
         val (source, chosen) = bestAcross(
             rankedAbove(youtube.configId, active).filterNot { it.configId == servedBy },
             target,
-            requestForNow(),
+            if (requestForNow() is StreamRequest.Lossless && !PlaybackCodecCapabilities.losslessOutput) {
+                StreamRequest.Best
+            } else requestForNow(),
             waitForAll = true,
             strictLength = true,
             requireSharedArtist = true,
+            allowLossless = PlaybackCodecCapabilities.losslessOutput,
         ) { candidate, stream ->
-            worthSwapping(stream.format, playing).also { worth ->
+            (PlaybackCodecCapabilities.losslessOutput || stream.format.isLossless != true) &&
+                worthSwapping(stream.format, playing).also { worth ->
                 // Named rather than skipped silently. This is the one refusal in the
                 // upgrade path that discards a stream already found, matched and
                 // length-checked, and a silent skip reads in the log exactly like a
@@ -396,7 +410,8 @@ object SourceResolver {
         // setting's answer and what it may spend is the Wi-Fi-only setting's, and a
         // mobile-data rung of Medium has no business deciding that a file saved over
         // Wi-Fi later is a YouTube one.
-        val active = SourceRegistry.active()
+        // An addon that publishes `allowDownloads: 0` is playback-only.
+        val active = SourceRegistry.active().filter { (it as? AddonSource)?.allowsDownloads() != false }
         // YouTube can be switched off, and a download still goes to it when nothing
         // here answers. So an absent YouTube means everything enabled outranks it,
         // which is already what [rankedAbove] says about a config not in the list.
@@ -531,8 +546,11 @@ object SourceResolver {
      */
     fun sameRecordingAs(candidateSec: Int?, playingSec: Int?): Boolean {
         if (candidateSec == null || playingSec == null) return false
-        return abs(candidateSec - playingSec) <= UPGRADE_DRIFT_SEC
+        return abs(candidateSec - playingSec) <= upgradeLengthSlackSeconds()
     }
+
+    private fun upgradeLengthSlackSeconds(): Int =
+        runCatching { AppSettings.upgradeLengthSlackSeconds.value }.getOrDefault(3).coerceIn(0, 10)
 
     /**
      * Whether anything outranks YouTube right now — i.e. whether a YouTube track is
@@ -603,6 +621,7 @@ object SourceResolver {
         waitForAll: Boolean = false,
         strictLength: Boolean = false,
         requireSharedArtist: Boolean = false,
+        allowLossless: Boolean = true,
         accept: (MusicSource, SourceStream) -> Boolean = { _, _ -> true },
     ): Pair<MusicSource, SourceStream>? = coroutineScope {
         val running: MutableList<Deferred<Pair<MusicSource, SourceStream?>>> = sources
@@ -615,6 +634,7 @@ object SourceResolver {
                         waitForAll = waitForAll,
                         strictLength = strictLength,
                         requireSharedArtist = requireSharedArtist,
+                        allowLossless = allowLossless,
                     )
                 }
             }
@@ -664,7 +684,7 @@ object SourceResolver {
      *   of answering from whichever of them are quick — affordable only when nobody
      *   is waiting on the first note.
      * @param strictLength requires a candidate's runtime to agree with [target]'s to
-     *   within [UPGRADE_DRIFT_SEC]. Kept apart from [waitForAll] because it is only
+     *   within the configured upgrade-length slack. Kept apart from [waitForAll] because it is only
      *   meaningful when the target *has* a runtime: asking for it against a target
      *   that never carried a duration is not a strict search but an empty one.
      */
@@ -675,6 +695,7 @@ object SourceResolver {
         waitForAll: Boolean = false,
         strictLength: Boolean = false,
         requireSharedArtist: Boolean = false,
+        allowLossless: Boolean = true,
     ): SourceStream? {
         for (query in TrackMatcher.queries(target)) {
             val candidates = attempt(source) {
@@ -715,16 +736,16 @@ object SourceResolver {
                 matches = listOf(canonical)
             }
             // The extra bar for standing in for one specific recording: the replacement
-            // has to be the same *length*, to the second or so. A title and an artist
+            // has to be the same *length* within the listener's configured slack. A title and an artist
             // can agree across two different edits of a song; a runtime that agrees
             // this closely is one recording, and nothing else is worth cutting a
             // listener's audio for — or filing on their device under the name of the
             // track they asked for.
             if (strictLength) {
-                matches = matches.filter { TrackMatcher.withinSeconds(it, target, UPGRADE_DRIFT_SEC) }
+                matches = matches.filter { TrackMatcher.withinSeconds(it, target, upgradeLengthSlackSeconds()) }
             }
             if (matches.isEmpty()) continue
-            return streamBest(source, matches, target, request)
+            return streamBest(source, matches, target, request, allowLossless)
         }
         return null
     }
@@ -735,7 +756,7 @@ object SourceResolver {
      * Two rules, and the order of them is the point:
      *
      *  1. **Length decides which recording, first.** When any candidate agrees with
-     *     the runtime being asked for to within a couple of seconds, only the
+     *     the runtime being asked for within the configured slack, only the
      *     candidates that agree are eligible at all. A catalogue holding the track
      *     under its right title and artist can still be holding a different *cut* of
      *     it — a DJ edit on a compilation, an extended mix — and the runtime is what
@@ -769,6 +790,7 @@ object SourceResolver {
         matches: List<Song>,
         target: TrackMatcher.Target,
         request: StreamRequest,
+        allowLossless: Boolean,
     ): SourceStream? {
         val wantsLossless = request is StreamRequest.Lossless
         val ordered = preferred(matches, target, wantsLossless)
@@ -785,6 +807,10 @@ object SourceResolver {
             )
             val served = stream.format
             if (rejectUnsupportedNativeStream(source, stream, match.title)) continue
+            if (!allowLossless && served.isLossless == true) {
+                DebugLog.d("${source.displayName} offered lossless for '${match.title}' on a route that cannot carry it; trying another match")
+                continue
+            }
             if (!wantsLossless || served.isLossless == true || served.isDolbyAtmos || served.statesNothingLossy) {
                 DebugLog.d(
                     "${source.displayName} matched '${match.title}' by '${match.artist}' " +
@@ -910,8 +936,6 @@ object SourceResolver {
      * is deciding what to play, this one is deciding whether to cut the audio a
      * listener is in the middle of.
      */
-    private const val UPGRADE_DRIFT_SEC = 2
-
     /**
      * How close two runtimes have to be to be the same cut of a song.
      *

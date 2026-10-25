@@ -395,10 +395,10 @@ class AddonClient(rawBaseUrl: String) {
          */
         fun normalizeBase(raw: String): String {
             val trimmed = raw.trim().trimEnd('/')
-            val lastSegment = trimmed.substringAfterLast('/', "")
-            return if (
-                lastSegment.endsWith(".json", ignoreCase = true) && trimmed.contains("://")
-            ) {
+            // Inspect the path only: a hostname can itself end in `.json`.
+            val path = trimmed.substringAfter("://", "").substringAfter('/', "")
+            val lastSegment = path.substringAfterLast('/')
+            return if (lastSegment.endsWith(".json", ignoreCase = true)) {
                 trimmed.dropLast(lastSegment.length).trimEnd('/')
             } else {
                 trimmed

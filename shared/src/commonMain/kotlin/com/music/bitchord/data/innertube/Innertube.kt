@@ -110,9 +110,15 @@ object Innertube {
         PlaybackTracker.onSessionChanged()
     }
     class SessionUnavailableException : IllegalStateException("Your saved session could not be verified. Try again when connected.")
-    class AuthenticationException : IllegalStateException("Your YouTube Music session has expired. Sign in again.")
+    class AuthenticationException : IllegalStateException(SESSION_EXPIRED_MESSAGE)
     class PlayerAuthenticationException : IllegalStateException("This playback client rejected authentication")
     class SessionChangedException : CancellationException("Account changed during request")
+
+    /**
+     * The one text the store uses for "the session itself is gone", so the host
+     * never keeps a hand-copied version of it — see [AuthBridge.isSessionExpired].
+     */
+    internal const val SESSION_EXPIRED_MESSAGE = "Your YouTube Music session has expired. Sign in again."
 
     internal class RequestSession(
         val generation: Long,
@@ -433,11 +439,36 @@ object Innertube {
             params?.let { put("params", it) }
         }
 
+    /**
+     * The next page of a search result set — the same shape as the first page,
+     * so [InnertubeParser.parseSearchPage] reads it unmodified. Mirrors
+     * [browseContinuation]; upstream `Innertube.kt:626` `searchContinuation`.
+     */
+    suspend fun searchContinuation(token: String): JsonObject = postMusic(
+        endpoint = "search",
+        query = mapOf("ctoken" to token, "continuation" to token, "type" to "next"),
+    ) {
+        put("continuation", token)
+    }
+
     /** Typeahead queries for a half-typed input — queries, not results. */
     suspend fun searchSuggestions(input: String): JsonObject =
         postMusic("music/get_search_suggestions") {
             put("input", input)
         }
+
+    /**
+     * Live media results for the typeahead phase — the same shape as [search]
+     * but deliberately unauthenticated, so YouTube Music does not log each
+     * debounced keystroke to the account's server-side search history. Upstream
+     * `Innertube.kt:658` `searchTypeahead`.
+     */
+    suspend fun searchTypeahead(query: String): JsonObject = postMusic(
+        endpoint = "search",
+        anonymous = true,
+    ) {
+        put("query", query)
+    }
 
     /**
      * A browse page — Home (`FEmusic_home`), Explore (`FEmusic_explore`),
@@ -989,6 +1020,7 @@ object Innertube {
         query: Map<String, String> = emptyMap(),
         refreshAllowed: Boolean = true,
         requireIdentity: Boolean = false,
+        anonymous: Boolean = false,
         bodyExtras: JsonObjectBuilder.() -> Unit,
     ): JsonObject {
         val generation = sessionGeneration
@@ -1009,7 +1041,11 @@ object Innertube {
                 }
                 putJsonObject("user") {
                     put("lockedSafetyMode", false)
-                    session.dataSyncId?.let { put("onBehalfOfUser", it) }
+                    // No account context on an anonymous read: sending a
+                    // session's dataSyncId without the cookie that goes with it
+                    // is a malformed signed-in request, and the server answers
+                    // it with nothing. Upstream's postMusicAnonymous omits it too.
+                    if (!anonymous) session.dataSyncId?.let { put("onBehalfOfUser", it) }
                 }
                 putJsonObject("request") { put("useSsl", true) }
             }
@@ -1023,7 +1059,7 @@ object Innertube {
             put("X-YouTube-Client-Name", WEB_REMIX_CLIENT_ID)
             put("X-YouTube-Client-Version", clientVersion)
             session.visitor?.let { put("X-Goog-Visitor-Id", it) }
-            putAll(authHeaders(session, MUSIC_ORIGIN))
+            if (!anonymous) putAll(authHeaders(session, MUSIC_ORIGIN))
         }
         val text = try { withRetry("postMusic/$endpoint", attempts = if (safeRead) 3 else 1) {
             checkSession(generation)
@@ -1036,7 +1072,7 @@ object Innertube {
                 if (safeRead && refreshAllowed) {
                     checkSession(generation)
                     updateSession { if (it.generation == generation) it.copy(scope = null) else it }
-                    return postMusic(endpoint, query, refreshAllowed = false, requireIdentity = requireIdentity, bodyExtras = bodyExtras)
+                    return postMusic(endpoint, query, refreshAllowed = false, requireIdentity = requireIdentity, anonymous = anonymous, bodyExtras = bodyExtras)
                 }
                 throw AuthenticationException()
             }

@@ -34,9 +34,9 @@ from urllib.parse import quote, unquote
 
 USER, PASSWORD = "listener", "correct-horse"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8081
-ROOT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/bitchord-webdav"
+ROOT = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("WEBDAV_FIXTURE_ROOT", "/tmp/bitchord-webdav")
 
-REQUEST_LOG = "/tmp/bitchord-webdav-requests.log"
+REQUEST_LOG = os.environ.get("WEBDAV_REQUEST_LOG", "/tmp/bitchord-webdav-requests.log")
 _lock = threading.Lock()
 
 JPEG = bytes([0xFF, 0xD8, 0xFF, 0xE0]) + b"filed-cover" + bytes(200)
@@ -163,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
             # credential rule is concerned, which makes this the one case where the
             # rule can be observed rather than argued about: the server below demands
             # a password, so a fetch that arrives without one is a refused fetch.
-            href = "http://127.0.0.1:8081" + href
+            href = f"http://127.0.0.1:{PORT}" + href
         resourcetype = "<d:collection/>" if collection else ""
         content_type = "" if collection else "<d:getcontenttype>application/octet-stream</d:getcontenttype>"
         return (
@@ -198,6 +198,41 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_response(200)
         self.send_header("Content-Length", str(os.path.getsize(path)))
+        self.end_headers()
+
+    def do_PUT(self):  # noqa: N802
+        if not self.authorized():
+            self.record("401")
+            return self.deny()
+        path = os.path.abspath(self.translate())
+        if os.path.commonpath([os.path.abspath(ROOT), path]) != os.path.abspath(ROOT):
+            return self.refuse("outside-root")
+        if self.headers.get("If-None-Match") == "*" and os.path.exists(path):
+            self.record("412")
+            self.send_response(412)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        parent = os.path.dirname(path)
+        if not os.path.isdir(parent):
+            self.record("409")
+            self.send_response(409)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        if len(body) != length:
+            self.record("short-put")
+            self.send_response(400)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        with open(path, "wb") as output:
+            output.write(body)
+        self.record("uploaded")
+        self.send_response(201)
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self):  # noqa: N802

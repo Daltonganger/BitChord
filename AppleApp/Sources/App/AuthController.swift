@@ -1,6 +1,9 @@
 import Foundation
 import Observation
 import BitChordShared
+#if os(iOS)
+import UIKit
+#endif
 
 /// In-memory sign-in state. The cookie lives in [AuthStore] (Keychain) and
 /// is copied into Innertube only through [AuthBridge.applyCookie], which
@@ -12,9 +15,15 @@ final class AuthController {
     var accountEmail: String?
     var accountPhotoUrl: String?
     var loginPresented = false
+    private(set) var sharedSessionOffer: SharedSessionCredential?
     /// Home/Explore observe this and reload after sign-in / sign-out.
     var sessionEpoch = 0 {
         didSet { PageSession.reset(); LikeStore.shared.clear() }
+    }
+
+    private var sessionExpiredObserver: NSObjectProtocol?
+    private var sharedSessionPublishingEnabled: Bool {
+        !UserDefaults.standard.bool(forKey: "shared_session_sync_suppressed")
     }
 
     init() {
@@ -24,6 +33,13 @@ final class AuthController {
         // Apply the Keychain cookie before the first Home `.task` so the
         // signed-in browse is not raced by a guest fetch.
         restore()
+        // A screen whose request came back refused tells us through this
+        // notification; the store has already tried its own scope refresh.
+        sessionExpiredObserver = NotificationCenter.default.addObserver(
+            forName: .sessionExpired, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.noteSessionExpired() }
+        }
     }
 
     /// Why the session could not be read even though one is stored, if so.
@@ -43,6 +59,11 @@ final class AuthController {
             if AuthStore.isLocked {
                 sessionUnavailableReason =
                     "Your session is saved but this device has not been unlocked yet."
+            } else if let offer = AuthStore.sharedSession {
+                sharedSessionOffer = offer
+                // RootView already presents the sign-in sheet from this state;
+                // YtMusicLoginView presents the explicit adoption choice first.
+                loginPresented = true
             }
             return
         }
@@ -181,6 +202,7 @@ final class AuthController {
                     // validated account store is the source of truth on launch.
                     _ = AuthStore.save(session.cookie)
                     self.sessionUnavailableReason = nil
+                    UserDefaults.standard.removeObject(forKey: "shared_session_sync_suppressed")
                     self.signedIn = true
                     self.sessionEpoch += 1
                     self.accountName = info.name
@@ -194,6 +216,26 @@ final class AuthController {
         })
     }
 
+    /// Adopts the offered session through the same account/profile validation
+    /// as a newly captured sign-in. It is never applied silently at restore.
+    func adoptSharedSessionOffer(onComplete: @escaping (Bool) -> Void) {
+        guard let offer = sharedSessionOffer, offer.isAdoptable else {
+            onComplete(false)
+            return
+        }
+        accept(offer.signInCapture) { [weak self] accepted in
+            guard let self else { onComplete(false); return }
+            if accepted { self.sharedSessionOffer = nil }
+            onComplete(accepted)
+        }
+    }
+
+    /// Choosing ordinary sign-in dismisses this offer but leaves the remote
+    /// item available for a later explicit attempt.
+    func dismissSharedSessionOffer() {
+        sharedSessionOffer = nil
+    }
+
     private func restorePreviousSession(cookie: String?) {
         if AccountStore.shared.activeAccount() != nil {
             AccountStore.shared.restore()
@@ -203,11 +245,47 @@ final class AuthController {
         }
     }
 
+    /// Whether a bridge's failure message is the store's "session is gone"
+    /// refusal (`Innertube.AuthenticationException`). Asked of the shared
+    /// matcher so the text lives in one place.
+    static func isSessionExpired(_ message: String?) -> Bool {
+        AuthBridge.shared.isSessionExpired(message: message)
+    }
+
+    /// Posts `.sessionExpired` when [error] is the store's session-gone refusal,
+    /// so a screen only has to say "this failed" and the auth state follows.
+    @discardableResult
+    static func reportIfSessionExpired(_ error: Error, message: String? = nil) -> Bool {
+        let text = message ?? error.localizedDescription
+        guard isSessionExpired(text) else { return false }
+        NotificationCenter.default.post(name: .sessionExpired, object: nil)
+        return true
+    }
+
+    /// A signed-in request was refused because the session itself is over.
+    ///
+    /// The store has already tried to refresh its scope once on the 401 (see
+    /// `Innertube.postMusic`), so this is the terminal answer: report it and go
+    /// signed-out, which makes every screen offer a sign-in instead of an error
+    /// a retry cannot fix. The stored cookie is kept — it is the only evidence
+    /// that the account was ever signed in, and the next launch retries it.
+    func noteSessionExpired() {
+        guard signedIn else { return }
+        _ = AuthBridge.shared.applyCookie(cookieHeader: nil)
+        signedIn = false
+        sessionUnavailableReason = "Your session has expired. Sign in again to continue."
+        sessionEpoch += 1
+    }
+
     func signOut() {
         // Upstream's sign-out removes the *account*, not just the session: the
         // credential is what the account is, so forgetting one is the same act.
         // Leaving a stored account behind after "sign out" would let a later
         // sign-in silently resume the old identity.
+        guard AuthStore.clearSharedSession() else {
+            sessionUnavailableReason = "The shared session could not be removed from iCloud Keychain. Try again after unlocking this device."
+            return
+        }
         guard AuthStore.clear() else {
             sessionUnavailableReason = "The session could not be removed from Keychain. Try again after unlocking this device."
             return
@@ -216,6 +294,7 @@ final class AuthController {
             sessionUnavailableReason = "The account could not be removed from Keychain. Try again after unlocking this device."
             return
         }
+        UserDefaults.standard.set(true, forKey: "shared_session_sync_suppressed")
         Task { await PageRequestCoordinator.shared.invalidate() }
         if let remaining = AccountStore.shared.activeAccount() {
             AccountStore.shared.restore()
@@ -351,6 +430,7 @@ final class AuthController {
                             self.accountPhotoUrl = info.photoUrl
                             self.sessionUnavailableReason = nil
                             self.publishAccount()
+                            self.publishSharedSession(info: info)
                         } else if self.signedIn, self.sessionEpoch == epoch {
                             self.sessionUnavailableReason = message ?? "Your saved session could not be verified."
                         }
@@ -359,6 +439,38 @@ final class AuthController {
                 })
             })
         }
+    }
+
+    /// Called only after `ensureSession` and the account request both validate
+    /// the current epoch. A stale or refused cookie cannot overwrite the item.
+    private func publishSharedSession(info: AccountInfo) {
+        guard sharedSessionPublishingEnabled,
+              let account = AccountStore.shared.activeAccount(),
+              !account.cookie.isEmpty
+        else { return }
+        let profile = listeningAs?.activeProfile
+        let credential = SharedSessionCredential(
+            schemaVersion: SharedSessionCredential.currentSchemaVersion,
+            cookie: account.cookie,
+            accountName: info.name,
+            email: info.email,
+            avatarURL: info.photoUrl,
+            pageId: profile?.pageId,
+            dataSyncId: profile?.dataSyncId,
+            authUser: profile?.authUser,
+            deviceName: Self.localDeviceName,
+            createdAt: Date()
+        )
+        _ = AuthStore.saveSharedSession(credential)
+    }
+
+    private static var localDeviceName: String {
+        #if os(iOS)
+        let name = UIDevice.current.name
+        #else
+        let name = ProcessInfo.processInfo.hostName
+        #endif
+        return name.isEmpty ? "This device" : name
     }
 }
 

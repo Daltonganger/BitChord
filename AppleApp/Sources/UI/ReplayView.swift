@@ -196,8 +196,9 @@ struct ReplayView: View {
         .environment(\.colorScheme, .dark)
     }
 
-    private var emptyCopy: String {
+    private var emptyCopy: LocalizedStringKey {
         switch period {
+        case .thisWeek: "Nothing from this week yet. Play a few songs and it will fill in."
         case .thisMonth: "There isn't much from this month yet. Play a few songs and it will fill in."
         case .thisYear: "Play a few songs this year and this page will fill in with minutes, top tracks and artists."
         case .allTime: "Play a few songs and this page will fill in with minutes, top tracks and artists."
@@ -311,7 +312,7 @@ struct ReplayView: View {
 
     private var periodPicker: some View {
         HStack(spacing: 2) {
-            ForEach([ListeningPeriod.thisYear, .allTime, .thisMonth]) { item in
+            ForEach([ListeningPeriod.thisWeek, .thisMonth, .thisYear, .allTime]) { item in
                 Button {
                     Haptics.play(.select)
                     period = item
@@ -717,6 +718,7 @@ private struct ReplayStoriesView: View {
                         .foregroundStyle(.white)
                         .padding(12)
                 }
+                .accessibilityLabel("Close")
                 .padding(.top, 22)
                 .padding(.trailing, 8)
             }
@@ -796,26 +798,32 @@ private struct ReplayStoriesView: View {
         }
     }
 
+    /// One markdown sentence per card, not a `+` chain of fragments.
+    ///
+    /// Concatenating `Text` views splits each sentence into several catalog keys,
+    /// and a translator then cannot reorder the words or the bold emphasis. A
+    /// single key with `**…**` markers keeps the sentence whole and still renders
+    /// the emphasised run in bold.
     @ViewBuilder
     private var headline: some View {
         let s = model.summary
         switch current {
         case .intro:
-            Text("This is your ") + Text("Replay").bold() + Text(" — the year in music you actually played.")
+            Text("This is your **Replay** — the year in music you actually played.")
         case .minutes:
-            Text("You listened to ") + Text("\(ReplayModel.grouped(s.minutes)) minutes").bold() + Text(" of music.")
+            Text("You listened to **\(ReplayModel.grouped(s.minutes)) minutes** of music.")
         case .songs:
-            Text("You played ") + Text("\(s.totalPlays) songs").bold() + Text(", one was your anthem.")
+            Text("You played **\(s.totalPlays) songs**, one was your anthem.")
         case .artists:
-            Text("There was one ") + Text("artist").bold() + Text(" you never got tired of.")
+            Text("There was one **artist** you never got tired of.")
         case .albums:
-            Text("One ") + Text("album").bold() + Text(" you kept coming back to.")
+            Text("One **album** you kept coming back to.")
         case .genres:
-            Text("There was one ") + Text("genre").bold() + Text(" you came back to again and again.")
+            Text("There was one **genre** you came back to again and again.")
         case .habits:
-            Text("You got through ") + Text("\(s.distinctSongs) songs").bold() + Text(" by ") + Text("\(s.distinctArtists) artists").bold() + Text(".")
+            Text("You got through **\(s.distinctSongs) songs** by **\(s.distinctArtists) artists**.")
         case .summary:
-            Text("That was ") + Text(s.label).bold() + Text(".")
+            Text("That was **\(s.label)**.")
         }
     }
 
@@ -1003,26 +1011,26 @@ private struct ReplayPosterView: View {
                 // artefact, like a chart's axis labels, not interface text.
                 VStack(alignment: .leading, spacing: 16 * k) {
                     Text("BITCHORD REPLAY")
-                        .font(.system(size: 30 * k, weight: .bold))
+                        .scaledFont(size: 30 * k, weight: .bold)
                         .tracking(2 * k)
                         .foregroundStyle(.white.opacity(0.7))
                     Text(model.holder)
-                        .font(.system(size: 68 * k, weight: .bold))
+                        .scaledFont(size: 68 * k, weight: .bold)
                         .foregroundStyle(.white)
                     Text(model.summary.label)
-                        .font(.system(size: 40 * k))
+                        .scaledFont(size: 40 * k)
                         .foregroundStyle(.white.opacity(0.7))
                     Text("\(ReplayModel.grouped(model.summary.minutes)) minutes")
-                        .font(.system(size: 128 * k, weight: .heavy))
+                        .scaledFont(size: 128 * k, weight: .heavy)
                         .foregroundStyle(.white)
                     VStack(alignment: .leading, spacing: 8 * k) {
                         ForEach(Array(model.summary.songs.prefix(5).enumerated()), id: \.element.id) { index, song in
                             HStack(spacing: 24 * k) {
                                 Text("\(index + 1).")
-                                    .font(.system(size: 44 * k))
+                                    .scaledFont(size: 44 * k)
                                     .foregroundStyle(.white.opacity(0.5))
                                 Text(song.title)
-                                    .font(.system(size: 44 * k))
+                                    .scaledFont(size: 44 * k)
                                     .foregroundStyle(.white)
                                     .lineLimit(1)
                             }

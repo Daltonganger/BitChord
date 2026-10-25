@@ -9,6 +9,7 @@ caps/joins — the family's signature. Run from the repo root.
 
 import os
 import json
+import shutil
 
 STROKE = 2.2
 
@@ -106,6 +107,23 @@ ICONS = [
      "M 4 6.2 L 20 6.2 M 4 12 L 20 12 M 4 17.8 L 20 17.8"),
 ]
 
+# Glyphs whose shipped asset was curated after export (upstream's LyricsQuote
+# geometry, drawn with its own 2.0 pen) and must survive a re-export byte for
+# byte. Everything here bypasses `svg_for`.
+RAW_SVG = {
+    "bch-lyrics": """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <path d="M 6 3.5 H 18 Q 21 3.5 21 6.5 V 15 Q 21 18 18 18 H 10 L 6 21 V 18 Q 3 18 3 15 V 6.5 Q 3 3.5 6 3.5 Z" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 7.6 8 H 10.6 V 11.1 Q 10.6 13.2 8.1 13.7 V 12.3 Q 9.3 12 9.3 11 H 7.6 Z M 12.8 8 H 15.8 V 11.1 Q 15.8 13.2 13.3 13.7 V 12.3 Q 14.5 12 14.5 11 H 12.8 Z" fill="black"/>
+</svg>
+""",
+}
+
+# Glyphs deliberately retired from the family. The export deletes only names
+# listed here: every other bch-* set was made by hand or by an earlier export
+# with different data, and removing "whatever is not in ICONS" once wiped the
+# transport glyphs, the logo and the settings family on a routine re-run.
+REMOVED: set = set()
+
 SVG_TEMPLATE = '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
 {paths}
 </svg>
@@ -126,20 +144,22 @@ def svg_for(fill_d, stroke_d) -> str:
 
 def main() -> None:
     root = os.path.join(os.path.dirname(__file__), "..", "AppleApp", "Assets.xcassets")
-    # Regenerate from scratch so removed glyphs don't linger.
-    for entry in os.listdir(root):
-        if entry.startswith("bch-") and entry.endswith(".imageset"):
-            os.rmdir(os.path.join(root, entry)) if False else None
-    import shutil
-    for entry in os.listdir(root):
-        if entry.startswith("bch-") and entry.endswith(".imageset"):
-            shutil.rmtree(os.path.join(root, entry))
+    # Remove only glyphs deliberately retired (see REMOVED). Everything else
+    # that starts with bch- was made elsewhere and stays.
+    for name in sorted(REMOVED):
+        imageset = os.path.join(root, f"{name}.imageset")
+        if os.path.isdir(imageset):
+            shutil.rmtree(imageset)
 
     for name, fill_d, stroke_d in ICONS:
         imageset = os.path.join(root, f"{name}.imageset")
         os.makedirs(imageset, exist_ok=True)
-        with open(os.path.join(imageset, f"{name}.svg"), "w") as f:
-            f.write(svg_for(fill_d, stroke_d))
+        if name in RAW_SVG:
+            with open(os.path.join(imageset, f"{name}.svg"), "w") as f:
+                f.write(RAW_SVG[name])
+        else:
+            with open(os.path.join(imageset, f"{name}.svg"), "w") as f:
+                f.write(svg_for(fill_d, stroke_d))
         contents = {
             "images": [{"filename": f"{name}.svg", "idiom": "universal"}],
             "info": {"author": "xcode", "version": 1},

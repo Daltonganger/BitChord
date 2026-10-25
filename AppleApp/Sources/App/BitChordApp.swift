@@ -4,9 +4,15 @@ import BitChordShared
 
 @main
 struct BitChordApp: App {
-    @State private var controller = PlaybackController()
-    @State private var appModel = AppModel()
-    @State private var auth = AuthController()
+    // The player, the navigation model and the session come from `AppServices`
+    // rather than being built here: App Intents (Siri, Shortcuts, Spotlight) run
+    // in this process with no scene to read an environment from, and they have to
+    // reach these same instances. A second controller would open a second output
+    // stream and fight this one for the system's media slot (see the `partySync`
+    // note below), so the holder is the only place they are made.
+    @State private var controller = AppServices.shared.controller
+    @State private var appModel = AppServices.shared.appModel
+    @State private var auth = AppServices.shared.auth
     @State private var toast = ToastCenter()
     @State private var party = PartyStore.shared
     /// The one binding between a party and this device's player.
@@ -22,10 +28,27 @@ struct BitChordApp: App {
     /// screen being somewhere else.
     @State private var partySync: PartySync?
     @Environment(\.scenePhase) private var scenePhase
+    #if os(macOS)
+    @NSApplicationDelegateAdaptor(MacAppDelegate.self) private var appDelegate
+    @AppStorage("menu_bar_player") private var menuBarPlayer = true
+    #endif
+
+    init() {
+        // Music videos are a per-session choice: the owner wants every session
+        // to start with the artwork, and the pill's toggle to turn the picture
+        // on for this session only.
+        UserDefaults.standard.set(false, forKey: "show_music_videos")
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
+                #if os(macOS)
+                // Inside the environment calls below: the toolbar's button and
+                // sheet read the controller, auth and toast models.
+                .background(SettingsDeepLinkOpener())
+                .modifier(MacWindowAccountToolbar())
+                #endif
                 .environment(controller)
                 .environment(appModel)
                 .environment(auth)
@@ -72,6 +95,9 @@ struct BitChordApp: App {
                         return
                     }
                     #endif
+                    #if os(macOS)
+                    MacAppDelegate.controller = controller
+                    #endif
                     CipherUnlockWiring.install()
                     ApplePoTokenWiring.install()
                     PlaybackCodecCapabilities.shared.setAppleDolbyAvailable(value: AppleDolbyRenderer.available)
@@ -101,6 +127,13 @@ struct BitChordApp: App {
                     controller.onLocalIntent = { [weak binding] in
                         binding?.onLocalIntent()
                     }
+                    // Offer what is playing to the listener's other devices. The
+                    // offer is (re)published when the answer can change — a new
+                    // track, a play/pause, leaving the app; the playhead itself is
+                    // written by the activity's own save hook, immediately before
+                    // the system sends it to the other device.
+                    PlaybackHandoff.shared.refresh(controller: controller)
+                    AppShortcutRefresh.schedule()
                     // What is on disk decides what the analyzer gets. Refreshed first
                     // so a resumed or already-downloaded graph is visible, and loaded
                     // in the background: 123 MB of ONNX is seconds of work and the
@@ -143,7 +176,19 @@ struct BitChordApp: App {
                         // and serves Automix from its disk cache instead.
                         MusicUnderstandingAnalyzer.noteBackground()
                         controller.persistSession()
+                        // Keep the offer current as the app goes away. The
+                        // playhead is written at save time, so this is about the
+                        // track and the paused/running state.
+                        PlaybackHandoff.shared.refresh(controller: controller)
                         if PlatformSettings.shared.getBoolean(key: "stop_when_backgrounded", default: false) {
+                            #if os(macOS)
+                            // macOS can report the last-window close as a scene
+                            // background transition while the app is kept resident.
+                            // Let the separate Stop Music on Close setting own that
+                            // action; this setting remains for app deactivation/hide.
+                            let hasVisibleWindow = NSApp.windows.contains { $0.isVisible }
+                            guard NSApp.isHidden || (!NSApp.isActive && hasVisibleWindow) else { return }
+                            #endif
                             controller.pauseForBackground()
                         }
                     } else if phase == .active {
@@ -151,7 +196,18 @@ struct BitChordApp: App {
                         controller.reactivateAudioSessionAfterForeground()
                     }
                 }
+                #if os(macOS)
+                // Bare Space / ← / → live here rather than in the menu: see
+                // `MacTransportKeys`.
+                .modifier(MacTransportKeys(controller: controller))
+                #endif
                 .onOpenURL { url in
+                    if SettingsDeepLink.handle(url) {
+                        #if os(iOS)
+                        appModel.settingsPresented = true
+                        #endif
+                        return
+                    }
                     // Handling lives here, on the scene, rather than on `RootView`.
                     // It was installed in both places, so whichever ran second
                     // consumed the link and the other was dead — a `bitchord://`
@@ -179,6 +235,23 @@ struct BitChordApp: App {
                     _ = MusicLink.shared.submitUrl(url: url.absoluteString)
                     consumeMusicLink(appModel: appModel, controller: controller)
                 }
+                // Handoff: the receiving half, plus the two changes that keep the
+                // offer current. At the scene for the same reason the URL intake
+                // is — a track can start, or an activity can arrive, before the
+                // view hierarchy is complete.
+                .onChange(of: controller.current?.id) { _, _ in
+                    PlaybackHandoff.shared.refresh(controller: controller)
+                    // What Siri may match a song title against has changed with
+                    // the queue. Throttled inside.
+                    AppShortcutRefresh.schedule()
+                }
+                .onChange(of: controller.isPlaying) { _, _ in
+                    PlaybackHandoff.shared.refresh(controller: controller)
+                }
+                .onContinueUserActivity(PlaybackHandoffPayload.activityType) { activity in
+                    guard let payload = PlaybackHandoffPayload(userInfo: activity.userInfo) else { return }
+                    PlaybackHandoff.shared.continuePlayback(payload: payload, controller: controller)
+                }
         }
 #if os(macOS)
         .defaultSize(width: 1280, height: 820)
@@ -186,8 +259,41 @@ struct BitChordApp: App {
         .windowStyle(.automatic)
         .commands {
             SidebarCommands()
-            PlaybackCommands(controller: controller, appModel: appModel)
+            PlaybackCommands(controller: controller, appModel: appModel, auth: auth, toast: toast)
+            MiniPlayerCommands()
         }
+#endif
+#if os(macOS)
+        WindowGroup(id: MacBrowseWindow.sceneID, for: MacBrowseWindowRoute.self) { $route in
+            MacBrowseWindowView(route: route)
+                .environment(controller)
+                .environment(appModel)
+                .environment(auth)
+                .environment(toast)
+                .environment(party)
+                .preferredColorScheme(appModel.preferredScheme)
+        }
+        .defaultSize(width: 1000, height: 760)
+        Window("Mini Player", id: MiniPlayerWindow.id) {
+            MiniPlayerView()
+                .environment(controller)
+                .environment(appModel)
+                .preferredColorScheme(appModel.preferredScheme)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultPosition(.bottomTrailing)
+        .windowLevel(.floating)
+
+        MenuBarExtra(isInserted: $menuBarPlayer) {
+            MiniPlayerView(compact: true)
+                .environment(controller)
+                .environment(appModel)
+        } label: {
+            Image(systemName: "music.note")
+                .symbolEffect(.pulse, isActive: controller.isPlaying)
+        }
+        .menuBarExtraStyle(.window)
 #endif
 #if os(macOS)
         Settings {
@@ -198,6 +304,10 @@ struct BitChordApp: App {
                 .preferredColorScheme(appModel.preferredScheme)
                 .environment(\.locale, appModel.appLanguage.isEmpty ? .autoupdatingCurrent : Locale(identifier: appModel.appLanguage))
         }
+        // One unified titlebar row, as System Settings has: the traffic
+        // lights, back and forward, the title and the search field together,
+        // rather than a title strip over a second toolbar row.
+        .windowToolbarStyle(.unified(showsTitle: true))
         #endif
     }
 }
@@ -245,6 +355,10 @@ final class AppModel {
     var playlistPicker: PlaylistPickerRequest?
     var downloadManagerPresented = false
     var replayPresented = false
+    /// The two import flows, reachable from the Mac's File menu from any page:
+    /// the command switches to Playlists and asks the page to open its sheet.
+    var spotifyImportPresented = false
+    var playlistFileImportPresented = false
     /// Which Replay story to open when the sheet arrives. Set alongside
     /// `replayPresented` by library heroes — a tapped card opens Replay at
     /// its chart, the empty-state banner at the intro — and consumed by
@@ -345,6 +459,9 @@ final class AppModel {
         case libraryYouTube, librarySongs, libraryAlbums
         case libraryArtists, libraryDownloads, libraryHistory, libraryWebDav
         case libraryPlaylists, librarySubscriptions, libraryPodcasts, libraryOnDevice
+        /// One of the listener's own playlists, opened from the iPad sidebar.
+        /// Which one is the sidebar's state; the tab only gives it a page.
+        case sidebarPlaylist
     }
 }
 

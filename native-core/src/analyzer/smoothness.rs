@@ -32,6 +32,12 @@ pub fn score_plan(plan: &TransitionPlan) -> SmoothnessReport {
         TransitionStyle::DjFilter => 0.10,
         TransitionStyle::Gapless => 0.15,
         TransitionStyle::EqualPower => 0.0,
+        TransitionStyle::EchoOut
+        | TransitionStyle::LoopRoll
+        | TransitionStyle::ReverbWash
+        | TransitionStyle::DropCut
+        | TransitionStyle::Texture
+        | TransitionStyle::Brake => 0.12,
     };
     let vocal_penalty = (plan.vocal_overlap * 0.2).clamp(0.0, 0.2);
     let raw = (1.0 - stretch_cost) * 0.7 + style_bonus - vocal_penalty;

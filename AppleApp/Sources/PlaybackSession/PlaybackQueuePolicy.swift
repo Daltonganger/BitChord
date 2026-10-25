@@ -6,6 +6,12 @@ enum PlaybackQueuePolicy {
     enum HeroState { case inactive, playing, paused }
 
     static let autoplayRefillThreshold = 3
+    /// How many recommendations the tail is topped up to.
+    static let autoplayTarget = 8
+    /// Upcoming rows nothing automatic may move: the listener can see them.
+    static let committedRows = 2
+    /// Rows after the committed queue that can be reconsidered by AutoMix.
+    static let sequencingWindowRows = 10
 
     static func shouldRefillAutoplay(upcomingCount: Int) -> Bool {
         upcomingCount < autoplayRefillThreshold
@@ -20,6 +26,14 @@ enum PlaybackQueuePolicy {
 
     static func listIndices(_ queue: [QueueEntry], after index: Int) -> [Int] {
         queue.indices.filter { $0 > index && queue[$0].contextOrder != nil && !queue[$0].fromAutoplay }
+    }
+
+    /// The visible lead-in is fixed; only a bounded list window after it rolls.
+    static func rollingListWindow(_ queue: [QueueEntry], after index: Int) -> [Int] {
+        listIndices(queue, after: index)
+            .filter { $0 > index + committedRows }
+            .prefix(sequencingWindowRows)
+            .map { $0 }
     }
 
     static func autoplayIndices(_ queue: [QueueEntry], after index: Int) -> [Int] {
@@ -62,8 +76,16 @@ enum PlaybackQueuePolicy {
         return result
     }
 
-    static func withoutUpcomingAutoplay(_ queue: [QueueEntry], after index: Int) -> [QueueEntry] {
-        queue.enumerated().filter { $0.offset <= index || !$0.element.fromAutoplay }.map(\.element)
+    /// Room left in the recommendation tail before it reaches [autoplayTarget].
+    static func fillRoom(_ queue: [QueueEntry], after index: Int) -> Int {
+        autoplayTarget - autoplayIndices(queue, after: index).count
+    }
+
+    /// A fill's only effect on the queue: new entries appended. Nothing already
+    /// queued is removed, moved or replaced, and nothing is queued twice.
+    static func appendingFill(_ queue: [QueueEntry], extras: [QueueEntry]) -> [QueueEntry] {
+        var known = Set(queue.map(\.id))
+        return queue + extras.filter { known.insert($0.id).inserted }
     }
 
     static func score(transitionFit: Double?, affinity: Double, playedAt: Double?, now: Double) -> Double {
@@ -102,8 +124,28 @@ struct AutoplayRefreshState {
         latest == request && request.context == current
     }
 
+    /// A reply that landed while the context moved — usually the first song of a
+    /// session, whose load is still settling when the recommendations arrive —
+    /// is asked for again, but only while it is still the newest request and at
+    /// most `maxRetries` times. Without this, a session started from one song
+    /// never filled: nothing else asks until the queue is already empty.
+    static let maxRetries = 3
+    private var retries = 0
+
+    mutating func shouldRetry(_ request: Request) -> Bool {
+        guard latest == request, retries < Self.maxRetries else { return false }
+        retries += 1
+        return true
+    }
+
+    /// A fill landed, so the next miss starts a fresh retry budget.
+    mutating func noteFilled() {
+        retries = 0
+    }
+
     mutating func invalidate() {
         serial &+= 1
         latest = nil
+        retries = 0
     }
 }

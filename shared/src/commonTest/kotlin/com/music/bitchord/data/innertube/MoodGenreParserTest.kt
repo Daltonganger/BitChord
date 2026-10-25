@@ -222,12 +222,55 @@ class MoodGenreParserTest {
     fun sections_keep_the_order_the_server_sent_them_in() {
         val parsed = InnertubeParser.parseMoodAndGenres(
             response(
-                grid("Moods & moments", button("Chill")),
-                grid("Genres", button("Blues"), button("Jazz")),
+                grid(
+                    "Moods & moments",
+                    button("Chill", browseId = "MUSIC_MOOD_CHILL"),
+                    button("Focus", browseId = "MUSIC_MOOD_FOCUS"),
+                ),
+                grid(
+                    "Genres",
+                    button("Blues", browseId = "MUSIC_GENRE_BLUES"),
+                    button("Jazz", browseId = "MUSIC_GENRE_JAZZ"),
+                ),
             )
         )
         assertEquals(listOf("Moods & moments", "Genres"), parsed.map { it.title })
         assertEquals(2, parsed[1].items.size)
+    }
+
+    @Test
+    fun a_shortcut_section_repeating_later_buttons_is_dropped() {
+        // The signed-in page leads with a "For you" grid of shortcuts to
+        // buttons the Moods and Genres grids already hold; Explore shows the
+        // full set once, not a second copy of a few.
+        val parsed = InnertubeParser.parseMoodAndGenres(
+            response(
+                grid("For you", button("Chill")),
+                grid(
+                    "Moods & moments",
+                    button("Chill", browseId = "MUSIC_MOOD_CHILL"),
+                    button("Focus", browseId = "MUSIC_MOOD_FOCUS"),
+                ),
+            )
+        )
+        assertEquals(listOf("Moods & moments"), parsed.map { it.title })
+    }
+
+    @Test
+    fun the_buttons_stripe_colour_is_kept() {
+        // The tile paints the server's own stripe rather than a hash of the
+        // title; a button without one stays null so the caller can fall back.
+        val striped = buildJsonObject {
+            put("musicNavigationButtonRenderer", buildJsonObject {
+                put("buttonText", runs("Blues"))
+                put("solid", buildJsonObject { put("leftStripeColor", JsonPrimitive(4283215808L)) })
+                put("clickCommand", buildJsonObject {
+                    put("browseEndpoint", buildJsonObject { put("browseId", JsonPrimitive("MUSIC_GENRE_BLUES")) })
+                })
+            })
+        }
+        val parsed = InnertubeParser.parseMoodAndGenres(response(grid("Genres", striped)))
+        assertEquals(4283215808L, parsed[0].items.first().stripeColor)
     }
 
     @Test

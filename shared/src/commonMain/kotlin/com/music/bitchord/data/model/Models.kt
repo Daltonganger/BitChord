@@ -188,6 +188,8 @@ data class MoodGenre(
     val browseId: String,
     val params: String? = null,
     val thumbnailUrl: String? = null,
+    /** YouTube Music's own stripe colour for the button, as ARGB; null when the button carries none. */
+    val stripeColor: Long? = null,
 )
 
 /** A browsed album / artist / playlist page. */
@@ -300,6 +302,8 @@ data class SearchHit(
     val albumId: String? = null,
     val isVideo: Boolean = false,
     val setVideoId: String? = null,
+    /** The tier the source offered, for the search quality badge (upstream `sourceQualityBadge`). */
+    val sourceQuality: String? = null,
 )
 
 sealed interface UiState<out T> {

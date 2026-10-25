@@ -1,5 +1,7 @@
 //! AAC AudioSpecificConfig stays intact: no forced LC, channel or rate rewrite.
-use super::{aac_audio_object_type, DecodeError};
+use super::codec::aac_audio_object_type;
+use super::codec::is_he_aac;
+use super::DecodeError;
 use std::ffi::c_void;
 use symphonia::core::audio::{
     AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef,
@@ -57,7 +59,7 @@ impl AppleAacDecoder {
             .unwrap_or(0);
         let mut error = 0;
         let mut mask = 0u64;
-        let he = super::is_he_aac(params);
+        let he = is_he_aac(params);
         let ps = aac_audio_object_type(asc) == Some(29);
         let handle = unsafe {
             bch_aac_create(

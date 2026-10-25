@@ -1,17 +1,19 @@
 #!/bin/bash
 # The Automix model download, against a fixture server.
 #
-# The app fetches two ONNX graphs at runtime, and the parts of that which can fail
+# The app fetches the beat graph at runtime; the vocals graph is bundled (open-unmix
+# umxhq, MIT) and is not a download. The parts of the beat download that can fail
 # quietly are the parts a real download almost never shows you: a resumed transfer
 # that starts over, a checksum that lets a truncated graph through, a metered
 # connection that gets used after the listener said no. So this drives all of them
 # through the real store — real URLSession, real SHA-256, real files — against
 # scripts/models-verify/fixture.py, which can be made to lie in the exact ways the
-# code claims to defend against.
+# code claims to defend against. It also pins the migration: the old 113 MB vocal
+# download is removed on the first launch after the bundled graph lands.
 #
 # Set MODELS_LIVE=1 to also download the real pinned Beat This! graph and check it
 # against the digest in AutomixModelStore.swift, which is the only thing that
-# catches the manifest drifting away from Hugging Face.
+# catches the manifest drifting away from the release asset.
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"

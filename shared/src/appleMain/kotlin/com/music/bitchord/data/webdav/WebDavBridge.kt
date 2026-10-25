@@ -181,6 +181,20 @@ object WebDavBridge {
     /** Whether a row's id is one of ours, for a queue that mixes libraries. */
     fun isRemoteId(videoId: String): Boolean = WebDavConfig.isWebDavId(videoId)
 
+    /** Whether the extension names a format this share indexes as audio. */
+    fun supportsUploadExtension(fileExtension: String): Boolean =
+        fileExtension.lowercase().trimStart('.') in WebDavConfig.audioExtensions
+
+    /** A server-safe upload name, following the shared WebDAV naming rules. */
+    fun uploadFileName(title: String, artist: String, fileExtension: String): String =
+        WebDavConfig.uploadFileName(title, artist, fileExtension)
+
+    /** The encoded address for a child of the configured share. */
+    fun uploadFileUrl(fileName: String): String = WebDavConfig.joinUrl(url(), fileName)
+
+    /** The credential for an upload target, or nil when the share is open. */
+    fun uploadAuthorizationHeader(fileUrl: String): String? = WebDavAuth.headerFor(fileUrl)
+
     /** The address a track id plays from, or nil when the id is not one of ours. */
     fun fileUrlOf(videoId: String): String? = WebDavConfig.fileUrlOf(videoId)
 

@@ -18,6 +18,7 @@ struct CreatePartySheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(ToastCenter.self) private var toast
     @Environment(PartyStore.self) private var party
+    @Environment(AuthController.self) private var auth
 
     /// Told once the party exists, so the page behind can put its invite up over a
     /// page that has visibly become something else.
@@ -90,7 +91,10 @@ struct CreatePartySheet: View {
                     Button(party.busy ? "Creating…" : "Create") {
                         Task { await create() }
                     }
-                    .disabled(party.busy || !party.hasServer)
+                    // Upstream's sheet gate: hosting rides the host's account,
+                    // so a signed-out create is refused at the button
+                    // (ListenTogetherScreen.kt:369).
+                    .disabled(party.busy || !party.hasServer || !auth.signedIn)
                 }
             }
             .onAppear {
@@ -125,6 +129,7 @@ struct CreatePartySheet: View {
 struct JoinPartySheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(PartyStore.self) private var party
+    @Environment(AuthController.self) private var auth
 
     @State private var code: String
     @State private var looked = false
@@ -160,7 +165,9 @@ struct JoinPartySheet: View {
                     Button(party.busy ? "Looking up…" : "Join") {
                         Task { await lookUp() }
                     }
-                    .disabled(party.busy || code.count < 6)
+                    // Same gate as the create sheet: an invite link can open
+                    // this signed out, and the lookup has nowhere to go.
+                    .disabled(party.busy || code.count < 6 || !auth.signedIn || !party.hasServer)
                     .frame(maxWidth: .infinity)
                 }
             }
@@ -197,6 +204,7 @@ struct JoinPartySheet: View {
 struct JoinConfirmSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(PartyStore.self) private var party
+    @Environment(AuthController.self) private var auth
 
     let preview: PartyPreview?
     let server: String?
@@ -267,7 +275,7 @@ struct JoinConfirmSheet: View {
                     Button(party.busy ? "Joining…" : "Join") {
                         Task { await join() }
                     }
-                    .disabled(party.busy || preview?.isFull == true || !party.hasServer)
+                    .disabled(party.busy || preview?.isFull == true || !party.hasServer || !auth.signedIn)
                     .frame(maxWidth: .infinity)
 
                     Button("Not now", role: .cancel) { dismiss() }
@@ -555,7 +563,7 @@ struct PartyLanding: View {
             GlowingPartyAvatar(url: avatarUrl, size: 104)
             Spacer().frame(height: 20)
             Text(PartyCopy.landingTitle)
-                .font(.system(size: 30, weight: .bold))
+                .scaledFont(size: 30, weight: .bold)
                 .multilineTextAlignment(.center)
             Spacer().frame(height: 8)
             Text(PartyCopy.landingSubtitle)
@@ -779,7 +787,7 @@ struct MemberAvatarStack: View {
                 ZStack {
                     Circle().fill(Color.accentColor)
                     Text("+\(extra)")
-                        .font(.system(size: faceSize * 0.34, weight: .semibold))
+                        .scaledFont(size: faceSize * 0.34, weight: .semibold)
                         .foregroundStyle(.white)
                 }
                 .frame(width: faceSize, height: faceSize)

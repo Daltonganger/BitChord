@@ -264,7 +264,11 @@ actual object Http {
             setBody(body)
         }
         val bytes = runCatching { response.bodyAsBytes() }.getOrNull()
-        return RawHttpBytes(status = response.status.value, body = bytes)
+        return RawHttpBytes(
+            status = response.status.value,
+            body = bytes,
+            contentType = response.headers[io.ktor.http.HttpHeaders.ContentType],
+        )
     }
 
     @Throws(Exception::class)
@@ -322,7 +326,11 @@ actual object Http {
             setBody(body)
         }
         val bytes = runCatching { response.bodyAsBytes() }.getOrNull()
-        return RawHttpBytes(status = response.status.value, body = bytes)
+        return RawHttpBytes(
+            status = response.status.value,
+            body = bytes,
+            contentType = response.headers[io.ktor.http.HttpHeaders.ContentType],
+        )
     }
 
     @Throws(Exception::class)
@@ -355,7 +363,11 @@ actual object Http {
                 null
             }
         }
-        return RawHttpBytes(status = response.status.value, body = bytes)
+        return RawHttpBytes(
+            status = response.status.value,
+            body = bytes,
+            contentType = response.headers[io.ktor.http.HttpHeaders.ContentType],
+        )
     }
 
     actual fun setHostCookies(originUrl: String, cookies: Map<String, String>) {

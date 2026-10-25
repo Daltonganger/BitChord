@@ -1,0 +1,259 @@
+#if os(macOS)
+import SwiftUI
+import AppKit
+import BitChordShared
+
+/// The Mac's small players: a floating Mini Player window (⌥⌘M, as in Music)
+/// and the same controls in a menu bar extra. Both are the ordinary transport
+/// on the shared controller, so they stay in step with the main window, the
+/// Now Playing widget and the media keys without any state of their own.
+struct MiniPlayerView: View {
+    /// The menu bar version is narrower and has no window chrome to sit in.
+    var compact = false
+    @AppStorage("mac.closeToTray") private var closeToTray = true
+    @Environment(PlaybackController.self) private var controller
+    @Environment(AppModel.self) private var appModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                artwork
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(controller.current?.title ?? "Not Playing")
+                        .font(.headline)
+                        .lineLimit(1)
+                    Text(controller.current?.artist ?? "Pick something to play")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if controller.current != nil {
+                    Button { controller.toggleLike() } label: {
+                        Image(systemName: controller.isLiked ? "heart.fill" : "heart")
+                            .foregroundStyle(controller.isLiked ? Color.accentColor : .secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(controller.isLiked ? "Remove from Liked" : "Like")
+                    .accessibilityLabel(controller.isLiked ? "Remove from Liked" : "Like")
+                }
+            }
+            if compact {
+                // N2: the line being sung, under the title. The menu bar is where
+                // somebody glances at the app rather than opening it, and a title
+                // without the words is the one thing they came to the menu bar for
+                // and did not get. On the lyrics pane's clock, so the offset moves
+                // this line with everything else.
+                TimelineView(.animation(minimumInterval: 0.25, paused: !controller.isPlaying)) { timeline in
+                    if let line = CurrentLyricLine.line(
+                        in: controller.displayedLyrics,
+                        at: controller.livePosition(at: timeline.date),
+                        offsetMs: LyricsOffsetBridge.offsetMs()
+                    ) {
+                        Text(line)
+                            .font(.subheadline)
+                            .italic()
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityLabel("Now singing: \(line)")
+                    }
+                }
+            }
+            progress
+            HStack(spacing: 28) {
+                transportButton("backward.fill", help: "Previous") { controller.previous() }
+                transportButton(controller.isPlaying || controller.isBuffering ? "pause.fill" : "play.fill",
+                                help: controller.isPlaying ? "Pause" : "Play", size: 24) {
+                    controller.togglePlayPause()
+                }
+                transportButton("forward.fill", help: "Next") { controller.next() }
+            }
+            .frame(maxWidth: .infinity)
+            if compact {
+                Divider()
+                HStack {
+                    Button("Open BitChord") {
+                        NSApp.activate()
+                        NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
+                    }
+                    Spacer()
+                    Button("Mini Player") { openWindow(id: MiniPlayerWindow.id) }
+                }
+                .buttonStyle(.borderless)
+                .font(.callout)
+                Menu {
+                    Toggle("Keep BitChord open when windows close", isOn: $closeToTray)
+                } label: {
+                    Label("Window Behavior", systemImage: "macwindow")
+                }
+                .menuStyle(.borderlessButton)
+            }
+        }
+        .padding(16)
+        .frame(width: compact ? 300 : 340)
+    }
+
+    private var artwork: some View {
+        Group {
+            if controller.current != nil {
+                VideoSurface(cornerRadius: 8) {
+                    ArtworkView(entry: controller.current, side: 56)
+                }
+                .id(controller.current?.id)
+            } else {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(.quaternary)
+                    .overlay { Image(systemName: "music.note").foregroundStyle(.secondary) }
+            }
+        }
+        .frame(width: 56, height: 56)
+        .clipShape(.rect(cornerRadius: 8, style: .continuous))
+        .onTapGesture {
+            guard controller.current != nil else { return }
+            NSApp.activate()
+            appModel.nowPlayingPresented = true
+        }
+    }
+
+    private var progress: some View {
+        TimelineView(.animation(minimumInterval: 0.5, paused: !controller.isPlaying)) { _ in
+            let duration = max(controller.duration, 0)
+            VStack(spacing: 2) {
+                Slider(
+                    value: Binding(
+                        get: { min(controller.position, duration) },
+                        set: { controller.seek(to: $0) }
+                    ),
+                    in: 0...max(duration, 1)
+                )
+                .controlSize(.mini)
+                .disabled(duration <= 0)
+                HStack {
+                    Text(Self.clock(controller.position))
+                    Spacer()
+                    Text("-" + Self.clock(max(0, duration - controller.position)))
+                }
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func transportButton(_ symbol: String, help: String, size: CGFloat = 17, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .scaledFont(size: size, weight: .semibold)
+                .frame(width: 36, height: 30)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .disabled(controller.current == nil && controller.queue.isEmpty)
+        .help(help)
+    }
+
+    private static func clock(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds)
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+enum MiniPlayerWindow {
+    static let id = "mini-player"
+}
+
+/// Window ▸ Mini Player, ⌥⌘M — Music's binding for the same thing.
+struct MiniPlayerCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(after: .windowArrangement) {
+            Button("Mini Player") { openWindow(id: MiniPlayerWindow.id) }
+                .keyboardShortcut("m", modifiers: [.command, .option])
+        }
+    }
+}
+
+/// The Dock icon's menu: transport, as every Mac player has it.
+final class MacAppDelegate: NSObject, NSApplicationDelegate {
+    @MainActor static weak var controller: PlaybackController?
+
+    /// Closing the last document-style window leaves the app resident when
+    /// close-to-tray is enabled, and honors the separate stop-music preference.
+    @MainActor
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return !(UserDefaults.standard.object(forKey: "mac.closeToTray") as? Bool ?? true)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(mainWindowWillClose(_:)),
+            name: NSWindow.willCloseNotification,
+            object: nil
+        )
+    }
+
+    @MainActor @objc private func mainWindowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window.canBecomeMain,
+              !(window.identifier?.rawValue.contains(MiniPlayerWindow.id) ?? false),
+              !window.title.localizedCaseInsensitiveContains("Settings"),
+              PlatformSettings.shared.getBoolean(key: "stop_music_on_close", default: false),
+              let controller = Self.controller,
+              controller.isPlaying || controller.isBuffering else { return }
+        controller.pausePlayback(releaseAudioSession: true)
+    }
+
+    /// A Dock click restores a main window, including when only the mini-player
+    /// or a status-item window is visible.
+    @MainActor
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        guard let window = sender.windows.first(where: {
+            $0.canBecomeMain
+                && !($0.identifier?.rawValue.contains(MiniPlayerWindow.id) ?? false)
+                && !$0.title.localizedCaseInsensitiveContains("Settings")
+        }) else { return true }
+        sender.activate(ignoringOtherApps: true)
+        window.deminiaturize(nil)
+        window.makeKeyAndOrderFront(nil)
+        return false
+    }
+
+    @MainActor
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        guard let controller = Self.controller else { return nil }
+        let menu = NSMenu()
+        if let current = controller.current {
+            let title = NSMenuItem(title: "\(current.title) — \(current.artist)", action: nil, keyEquivalent: "")
+            title.isEnabled = false
+            menu.addItem(title)
+            menu.addItem(.separator())
+        }
+        menu.addItem(DockAction(controller.isPlaying ? "Pause" : "Play") { controller.togglePlayPause() })
+        menu.addItem(DockAction("Next") { controller.next() })
+        menu.addItem(DockAction("Previous") { controller.previous() })
+        return menu
+    }
+}
+
+/// A menu item that runs a closure, so the Dock menu needs no selector plumbing.
+private final class DockAction: NSMenuItem {
+    private let run: @MainActor () -> Void
+
+    init(_ title: String, run: @escaping @MainActor () -> Void) {
+        self.run = run
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError("unused") }
+
+    @objc private func fire() {
+        MainActor.assumeIsolated { run() }
+    }
+}
+#endif

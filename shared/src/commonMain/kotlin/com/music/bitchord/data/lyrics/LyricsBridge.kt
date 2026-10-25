@@ -5,6 +5,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 
 /**
@@ -24,6 +26,75 @@ object LyricsBridge {
     /** Swift: show "Lyrics by {sourceLabel}". Empty [source] means embedded file lyrics. */
     fun interface AttributedLyricsCallback {
         fun onResult(source: String, sourceLabel: String, lines: List<LyricLineDto>)
+    }
+
+    /**
+     * What the per-source picker knows about one provider for the current
+     * track — upstream's `LyricsProviderState`.
+     */
+    enum class LyricsProviderState { NOT_FETCHED, FETCHING, FOUND, NOT_FOUND, BLOCKED }
+
+    /** Swift: one provider's state changed. [lines] is non-empty only for FOUND. */
+    fun interface SourceStateCallback {
+        fun onSourceState(source: String, sourceLabel: String, state: LyricsProviderState, lines: List<LyricLineDto>)
+    }
+
+    /**
+     * [fetchAttributed] plus the provider picker's feed: every enabled source
+     * is announced FETCHING when its attempt starts, then FOUND (with its
+     * lines, so a tap can apply them from memory), NOT_FOUND, or BLOCKED when
+     * the provider refuses third-party access
+     * settles, and a cancelled race loser returns to NOT_FETCHED. The winner
+     * also arrives through [callback], so the lyrics pane and the picker
+     * cannot disagree about who won. Both passes of a romanised retry report
+     * into the same stream, each source once per state.
+     *
+     * [onSourceState] fires from the repository's provider jobs — background,
+     * concurrently — so the host must hop to its main actor before touching
+     * UI state. (The events of one source arrive in order; sources overlap.)
+     */
+    fun fetchWithSourceStates(
+        title: String,
+        artist: String,
+        durationMs: Long,
+        album: String?,
+        videoId: String?,
+        localPath: String?,
+        callback: AttributedLyricsCallback,
+        onSourceState: SourceStateCallback,
+    ) {
+        scope.launch {
+            // The repository fires started and result from the provider job
+            // itself — concurrently, on Dispatchers.Default — so the dedupe
+            // books sit behind a mutex; each source is reported once per
+            // state, first answer wins.
+            val lock = Mutex()
+            val started = mutableSetOf<String>()
+            val settled = mutableSetOf<String>()
+            suspend fun report(source: LyricsSource, state: LyricsProviderState, lines: List<LyricLineDto> = emptyList()) {
+                val fresh = lock.withLock {
+                    when (state) {
+                        LyricsProviderState.FETCHING -> started.add(source.name)
+                        LyricsProviderState.FOUND, LyricsProviderState.NOT_FOUND, LyricsProviderState.BLOCKED -> settled.add(source.name)
+                        LyricsProviderState.NOT_FETCHED -> false
+                    }
+                }
+                if (fresh) onSourceState.onSourceState(source.name, source.label, state, lines)
+            }
+            val (source, lines) = runCatching {
+                lookup(
+                    title, artist, durationMs, album, videoId, localPath,
+                    onSourceStarted = { report(it, LyricsProviderState.FETCHING) },
+                    onSourceResult = { source, result ->
+                        if (result != null) report(source, LyricsProviderState.FOUND, result.lines)
+                        else report(source, LyricsProviderState.NOT_FOUND)
+                    },
+                    onSourceCancelled = { report(it, LyricsProviderState.NOT_FETCHED) },
+                    onSourceBlocked = { report(it, LyricsProviderState.BLOCKED) },
+                )
+            }.getOrElse { null to emptyList() }
+            callback.onResult(source?.name.orEmpty(), source?.label.orEmpty(), lines)
+        }
     }
 
     fun fetch(title: String, artist: String, durationMs: Long, callback: LyricsCallback) {
@@ -93,6 +164,10 @@ object LyricsBridge {
         album: String?,
         videoId: String?,
         localPath: String?,
+        onSourceStarted: (suspend (LyricsSource) -> Unit)? = null,
+        onSourceResult: (suspend (LyricsSource, LyricsRepository.Result?) -> Unit)? = null,
+        onSourceCancelled: (suspend (LyricsSource) -> Unit)? = null,
+        onSourceBlocked: (suspend (LyricsSource) -> Unit)? = null,
     ): Pair<LyricsSource?, List<LyricLineDto>> {
         if (!localPath.isNullOrBlank()) {
             EmbeddedLyrics.forPath(localPath)?.let { return null to it }
@@ -114,6 +189,10 @@ object LyricsBridge {
             sources = sources,
             order = AppSettings.lyricsSourceOrderList(),
             prioritizeSyllableSync = AppSettings.prioritizeSyllableSync.value,
+            onSourceStarted = onSourceStarted,
+            onSourceResult = onSourceResult,
+            onSourceCancelled = onSourceCancelled,
+            onSourceBlocked = onSourceBlocked,
         )
         if (found != null && found.lines.isNotEmpty()) {
             return found.source to found.lines

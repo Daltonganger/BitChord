@@ -47,6 +47,10 @@ pub fn rank_candidates(
             0.0,
             skip_vocals,
             "sequencer",
+            // Ranking is a cost comparison, not a session: it asks what each
+            // candidate *would* plan, so the pacing window must not hide the
+            // technique a candidate would earn.
+            true,
             decode,
             duration_of,
         );
@@ -63,6 +67,14 @@ pub fn rank_candidates(
             TransitionStyle::DjFilter => cost += 0.15,
             TransitionStyle::EqualPower => cost += 0.4,
             TransitionStyle::Gapless => cost += 0.05,
+            // A technique is chosen because the pair cannot blend; it costs
+            // less than a fade and more than a blend that works.
+            TransitionStyle::EchoOut
+            | TransitionStyle::LoopRoll
+            | TransitionStyle::ReverbWash
+            | TransitionStyle::DropCut
+            | TransitionStyle::Texture
+            | TransitionStyle::Brake => cost += 0.1,
         }
         // Prefer candidates the planner already trusts enough to blend.
         if matches!(plan.style, TransitionStyle::DjBlend) && stretch <= 0.04 {

@@ -1058,6 +1058,7 @@ dependencies = [
  "rten",
  "rten-tensor",
  "rtrb",
+ "serde",
  "serde_json",
  "sha2",
  "symphonia",

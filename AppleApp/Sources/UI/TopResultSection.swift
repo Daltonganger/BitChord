@@ -40,12 +40,14 @@ struct TopResultSection: View {
                     menu
                 } label: {
                     Image(systemName: "ellipsis")
-                        .font(.system(size: 16, weight: .semibold))
+                        .scaledFont(size: 16, weight: .semibold)
                         .foregroundStyle(.secondary)
                         .frame(width: 36, height: 36)
                         .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
+                .help("More")
+                .accessibilityLabel("More")
             }
             actionsRow
         }
@@ -57,7 +59,14 @@ struct TopResultSection: View {
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: play)
-        .contextMenu { menu }
+        .liftPreview {
+            menu
+        } preview: {
+            ContextMenuPreview(
+                artworkUrl: hit.thumbnailUrl, title: hit.title, subtitle: hit.subtitle,
+                roundArtwork: hit.browseType?.uppercased() == "ARTIST"
+            )
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(hit.title), \(hit.subtitle ?? "")")
         .accessibilityHint("Plays the top result")
