@@ -28,6 +28,7 @@ xcrun swiftc -O -module-cache-path /tmp/bitchord-swift-module-cache -o "$bin" \
   "$repo/AppleApp/Sources/App/YouTubePlayerJs.swift" \
   "$repo/AppleApp/Sources/App/ApplePoTokenProvider.swift" \
   "$repo/AppleApp/Sources/App/InnertubeStreamResolver.swift" \
+  "$repo/AppleApp/Sources/App/ResolvedVideoSide.swift" \
   "$repo/AppleApp/Generated/NativeCore.swift" \
   "$repo/AppleApp/Sources/PlaybackSession/PlaybackDebugLog.swift" \
   "$repo/AppleApp/Sources/PlaybackSession/VideoVersionAlignment.swift" \

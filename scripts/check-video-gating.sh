@@ -14,6 +14,7 @@ repo="$(cd "$here/.." && pwd)"
 
 bin="$(mktemp -d)/video-gating-verify"
 xcrun swiftc -O -module-cache-path /tmp/bitchord-swift-module-cache -o "$bin" \
+  "$repo/AppleApp/Sources/App/ResolvedVideoSide.swift" \
   "$repo/AppleApp/Sources/UI/VideoSurfaceState.swift" \
   "$here/video-gating-verify/main.swift" || exit 2
 

@@ -24,6 +24,7 @@ xcrun swiftc -O -module-cache-path /tmp/bitchord-swift-module-cache -o "$bin" \
   "$repo/AppleApp/Sources/App/YouTubePlayerJs.swift" \
   "$repo/AppleApp/Sources/App/ApplePoTokenProvider.swift" \
   "$repo/AppleApp/Sources/App/InnertubeStreamResolver.swift" \
+  "$repo/AppleApp/Sources/App/ResolvedVideoSide.swift" \
   "$here/video-spike-verify/main.swift" || exit 2
 
 exec "$bin" "$repo/AppleApp/Resources/YouTubeSolver"

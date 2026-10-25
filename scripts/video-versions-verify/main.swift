@@ -35,6 +35,22 @@ private final class VideoAdapter: VideoVersionBridgeVideoVersionCallback {
     func onResult(json: String?, message: String?) { finish(json, message) }
 }
 
+private func titleCore(_ raw: String) -> String {
+    let withoutBrackets = raw.replacingOccurrences(
+        of: #"\s*[\(\[].*?[\)\]]"#,
+        with: " ",
+        options: .regularExpression
+    )
+    let withoutTrailingAside = withoutBrackets.replacingOccurrences(
+        of: #"\s+[-–—|]\s+.*$"#,
+        with: " ",
+        options: .regularExpression
+    )
+    let folded = withoutTrailingAside.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    return folded.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
+        .map { String($0) }.joined()
+}
+
 private func searchSong(_ item: ProbeSong) async throws -> SearchHit {
     try await withCheckedThrowingContinuation { continuation in
         SearchBridge.shared.search(
@@ -43,10 +59,12 @@ private func searchSong(_ item: ProbeSong) async throws -> SearchHit {
             callback: SearchAdapter { json, message in
                 guard let json,
                       let hits = try? JSONDecoder().decode([SearchHit].self, from: Data(json.utf8)),
-                      let hit = hits.first(where: { $0.kind == "track" && $0.videoId != nil }) else {
+                      let hit = hits.first(where: {
+                          $0.kind == "track" && $0.videoId != nil && titleCore($0.title) == titleCore(item.title)
+                      }) else {
                     continuation.resume(throwing: NSError(
                         domain: "VideoVersionsVerify", code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: message ?? "No song row returned"]
+                        userInfo: [NSLocalizedDescriptionKey: message ?? "song row not found"]
                     ))
                     return
                 }
@@ -146,7 +164,7 @@ for item in songs {
             }
             let qualifies = candidate.source == "counterpart"
                 ? side.qualifiesAsCounterpartVideo()
-                : side.qualifiesAsSearchVideo()
+                : side.qualifiesAsSearchVideo(isOfficialMusicVideo: candidate.type == "MUSIC_VIDEO_TYPE_OMV")
             guard qualifies else { continue }
 
             if chosen == nil {
@@ -177,7 +195,7 @@ for item in songs {
             candidateText = "none type=- source=none title=-"
         }
         let selectionStatus = chosen == nil ? "no candidate" : !chosenIsQualified ? "unqualified" : aligned ? "aligned" : "own audio"
-        print("\(item.title) — \(item.artist) → \(candidateText) · \(selectionStatus) · \(alignment)")
+        print("\(item.title) — \(item.artist) [song=\(song.title), duration=\(song.durationText ?? "?")] → \(candidateText) · \(selectionStatus) · \(alignment)")
 
         switch item.expectation {
         case .officialVideo:
