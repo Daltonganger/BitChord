@@ -279,10 +279,16 @@ pub(super) fn render_available(state: &mut MixerState, ring: &mut Producer<f32>)
         }
 
         let draining_pipeline = produced == 0 && state.pipeline_tail_frames > 0;
-        if produced > 0 && state.sound_mode == SoundMode::Enhanced {
+        if produced > 0 {
+            // The limiter's look-ahead holds audio in both modes; Enhanced also
+            // rings out its spatial and clarity stages.
             state.pipeline_tail_frames = state.protector.delay_frames()
                 + state.clarity.delay_frames() as usize
-                + state.device_rate as usize * 3;
+                + if state.sound_mode == SoundMode::Enhanced {
+                    state.device_rate as usize * 3
+                } else {
+                    0
+                };
         } else if produced == 0 && state.pipeline_tail_frames > 0 {
             let frames = state.pipeline_tail_frames.min(CHUNK_FRAMES);
             produced = frames * 2;

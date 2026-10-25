@@ -351,22 +351,25 @@ fn cold_resume_seek_at_180_seconds_outputs_pcm_from_that_position() {
         .unwrap()
         .unwrap();
 
+    // Past the limiter's look-ahead, which opens every load with a few
+    // milliseconds of the delay line rather than the track.
+    let wanted = 256 + 2 * crate::sound::Protector::new(48_000).delay_frames();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     let mut first_samples = Vec::new();
-    while std::time::Instant::now() < deadline && first_samples.len() < 256 {
-        while first_samples.len() < 256 {
+    while std::time::Instant::now() < deadline && first_samples.len() < wanted {
+        while first_samples.len() < wanted {
             match consumer.pop() {
                 Ok(sample) => first_samples.push(sample),
                 Err(_) => break,
             }
         }
-        if first_samples.len() < 256 {
+        if first_samples.len() < wanted {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
     assert_eq!(
         first_samples.len(),
-        256,
+        wanted,
         "mixer did not fill the output ring"
     );
     let peak = first_samples

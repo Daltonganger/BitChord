@@ -29,7 +29,7 @@ mod tests;
 
 pub(crate) use curves::MAX_DUCK_DEPTH;
 pub use deck::{
-    loudness_gain, DeckLoudness, MAX_LOUDNESS_GAIN_DB, MAX_TRANSITION_MATCH_DB,
+    loudness_gain, DeckLoudness, MAX_LOUDNESS_GAIN_DB, MAX_TRANSITION_BOOST_DB, MAX_TRANSITION_MATCH_DB,
     MIN_LOUDNESS_GAIN_DB,
 };
 pub use state::NerdSnapshot;

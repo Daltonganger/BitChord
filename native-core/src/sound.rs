@@ -436,6 +436,16 @@ impl Protector {
     pub fn reset(&mut self) {
         *self = Self::new(self.rate);
     }
+    /// Both modes are limited the same way; only the ceiling differs.
+    ///
+    /// Transparent used to hard-clamp anything over full scale, on the view that
+    /// a transparent path should not touch the signal. But a loud master decoded
+    /// from Opus or AAC routinely peaks above 0 dBFS — a cached stream measured
+    /// +1.8 dBFS, with overs in a third of its 10 ms blocks — and a clamp turns
+    /// every kick and bass note in such a track into the crackle a listener
+    /// hears as hiss. The look-ahead limiter leaves every sample below the
+    /// ceiling exactly as it was (only delayed), and turns the overs down
+    /// smoothly instead of cutting them off.
     pub fn process(&mut self, samples: &mut [f32], enhanced: bool) {
         let ceiling = if enhanced {
             10f64.powf(-0.5 / 20.0)
@@ -448,16 +458,6 @@ impl Protector {
                     *s = 0.0;
                     self.interventions += 1;
                 }
-            }
-            if !enhanced {
-                self.reduction_db = 0.0;
-                for s in f.iter_mut() {
-                    if s.abs() > 1.0 {
-                        self.interventions += 1;
-                        *s = s.clamp(-1.0, 1.0);
-                    }
-                }
-                continue;
             }
             self.queue.push_back(QueuedFrame {
                 samples: [f[0], f[1]],
@@ -529,16 +529,39 @@ mod tests {
         }
     }
     #[test]
-    fn transparent_exact_and_headroom_reported() {
+    fn transparent_exact_below_full_scale() {
         let mut c = Clarity::new(48000);
         let mut p = Protector::new(48000);
         let input = vec![0.1, -0.9, 0.999, -0.0];
         let mut x = input.clone();
         c.process(&mut x);
         p.process(&mut x, false);
-        assert_eq!(x, input);
-        p.process(&mut [1.5, -1.5, f32::NAN, 0.0], false);
-        assert_eq!(p.interventions, 3);
+        let mut tail = vec![0.0; p.delay_frames() * 2];
+        p.process(&mut tail, false);
+        x.extend(tail);
+        // Delayed by the look-ahead, otherwise sample-exact.
+        assert_eq!(&x[x.len() - input.len()..], &input[..]);
+        assert_eq!(p.interventions, 0);
+    }
+    #[test]
+    fn transparent_limits_overs_instead_of_clipping() {
+        // A loud master's decoded overshoot: a low tone peaking at +1.8 dBFS.
+        let src: Vec<f32> = (0..48000)
+            .flat_map(|i| {
+                let s = (i as f32 * 2.0 * std::f32::consts::PI * 60.0 / 48000.0).sin() * 1.23;
+                [s, s]
+            })
+            .collect();
+        let mut p = Protector::new(48000);
+        let mut x = src.clone();
+        p.process(&mut x, false);
+        assert!(x.iter().all(|v| v.abs() <= 1.0));
+        // Limited, not clipped: no run of samples pinned at full scale.
+        let pinned = x.windows(6).filter(|w| w.iter().all(|v| v.abs() >= 0.9999)).count();
+        assert_eq!(pinned, 0);
+        let mut nan = [f32::NAN, 0.0];
+        p.process(&mut nan, false);
+        assert!(p.interventions > 0);
     }
     #[test]
     fn protection_independent_of_partition() {

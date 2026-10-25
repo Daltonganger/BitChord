@@ -331,6 +331,9 @@ impl MixerState {
     pub(super) fn promote_incoming(&mut self) {
         if let Some(mut incoming) = self.incoming.take() {
             incoming.gain = 1.0;
+            // Nor does the blend's level match: a skip in the middle of a blend
+            // used to leave the incoming boosted for the rest of the track.
+            incoming.release_transition_match();
             incoming.filter.open();
             // It is the session voice now; a beatmatched handoff's stretch does
             // not outlive the blend it was for.
@@ -569,7 +572,7 @@ impl MixerState {
                 - buffered_s * voice.effective_speed as f64 * voice.plan_rate as f64)
                 .max(0.0)
         };
-        let processing_delay = if self.sound_mode == SoundMode::Enhanced && !self.bit_perfect {
+        let processing_delay = if !self.bit_perfect {
             (self.clarity.delay_frames() as usize + self.protector.delay_frames()) as f64
                 / self.device_rate.max(1) as f64
                 * voice.effective_speed as f64

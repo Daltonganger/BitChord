@@ -46,6 +46,8 @@ pub struct DeckLoudness {
     /// in dB (`None` when it is off or has no figure). The match is measured
     /// *after* this, so the same difference is never corrected twice.
     pub applied_normalization_db: Option<f64>,
+    /// The deck's measured true peak in dBTP, when it has been measured.
+    pub true_peak_dbtp: Option<f64>,
 }
 
 impl DeckLoudness {
@@ -88,18 +90,36 @@ impl DeckLoudness {
     /// re-master: a figure that asks for more than 6 dB is more likely to be a
     /// bad measurement — a spoken intro, a silent tail — than a track that far
     /// off, and a wrong correction that large is worse than none.
+    ///
+    /// A boost is held much lower, to [MAX_TRANSITION_BOOST_DB] and to the
+    /// incoming deck's measured headroom when there is one. Streamed masters
+    /// already peak at or above full scale once decoded, so turning one up is
+    /// turning it into the limiter — a +6 dB match put 81% of one track's
+    /// 10 ms blocks over full scale. Cutting a louder track costs nothing.
     pub fn match_gain_db(incoming: DeckLoudness, outgoing: DeckLoudness) -> Option<f64> {
         let (a, b) = DeckLoudness::shared_level(incoming, outgoing)?;
         let delta = b - a;
         if !delta.is_finite() {
             return None;
         }
-        Some(delta.clamp(-MAX_TRANSITION_MATCH_DB, MAX_TRANSITION_MATCH_DB))
+        let headroom = incoming
+            .true_peak_dbtp
+            .filter(|p| p.is_finite())
+            .map(|peak| (TRANSITION_PEAK_CEILING_DBTP - peak - incoming.applied()).max(0.0))
+            .unwrap_or(MAX_TRANSITION_BOOST_DB);
+        Some(delta.clamp(
+            -MAX_TRANSITION_MATCH_DB,
+            MAX_TRANSITION_BOOST_DB.min(headroom),
+        ))
     }
 }
 
-/// The loudest correction a transition may apply, either way.
+/// The loudest cut a transition may apply.
 pub const MAX_TRANSITION_MATCH_DB: f64 = 6.0;
+/// The loudest boost a transition may apply, before the deck's own headroom.
+pub const MAX_TRANSITION_BOOST_DB: f64 = 2.0;
+/// Where a boosted deck's true peak may reach.
+const TRANSITION_PEAK_CEILING_DBTP: f64 = -1.0;
 
 /// The loudness correction for one voice: linear gain plus the applied dB for
 /// the readout. `(1.0, None)` whenever there is nothing to correct with — the

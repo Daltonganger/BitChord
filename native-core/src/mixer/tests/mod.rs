@@ -53,6 +53,7 @@ fn deck(lufs: Option<f64>, relative: Option<f64>, applied: Option<f64>) -> DeckL
         lufs,
         relative_db: relative,
         applied_normalization_db: applied,
+        true_peak_dbtp: None,
     }
 }
 
