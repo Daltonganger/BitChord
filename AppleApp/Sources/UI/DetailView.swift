@@ -68,6 +68,7 @@ struct DetailView: View {
     /// `onActiveShelfChange`). The pushed grid keeps its own scroll state, and
     /// popping back restores this page's shelf run underneath it.
     @State private var showAllGrid: ShowAllGrid?
+    @State private var artistSignature: ArtistSignature?
 
     /// Whether the window is wide enough for the roomier header controls.
     ///
@@ -132,6 +133,9 @@ struct DetailView: View {
             pinned = PlaylistPinning.pinnedIds().contains(browseId)
             await load()
         }
+        .task(id: signatureLookupKey) {
+            await loadArtistSignature()
+        }
         // The shelf's "Show all" grid is a normal push, so the grid keeps its
         // own scroll state and popping back restores this page's carousels
         // underneath it (upstream's `parentShelf` restore).
@@ -146,6 +150,35 @@ struct DetailView: View {
         if browseId.hasPrefix("MPREb") || browseId.hasPrefix("OLAK") { return .album }
         if browseId.hasPrefix("VL") || browseId.hasPrefix("PL") { return .playlist }
         return .other
+    }
+
+    private var signatureLookupKey: String {
+        let enabled = PlatformSettings.shared.getBoolean(key: "artist_signatures_enabled", default: true)
+        let endpoint = PlatformSettings.shared.getString(key: "artist_signatures_wikimedia_url", default: "")
+        return "\(browseId)|\(page?.title ?? initialTitle)|\(enabled)|\(endpoint)"
+    }
+
+    private func loadArtistSignature() async {
+        artistSignature = nil
+        guard PlatformSettings.shared.getBoolean(key: "artist_signatures_enabled", default: true),
+              let page, kind(of: page) == .artist else { return }
+        let endpoint = PlatformSettings.shared.getString(key: "artist_signatures_wikimedia_url", default: "")
+        let title = page.title.isEmpty ? initialTitle : page.title
+        for delaySeconds in [0, 5, 15, 30] {
+            if delaySeconds > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            switch await ArtistSignatureRepository.shared.signature(for: title, endpointOverride: endpoint) {
+            case .found(let found):
+                artistSignature = found
+                return
+            case .notFound:
+                return
+            case .failed:
+                continue
+            }
+        }
     }
 
     private func loadedPage(_ page: DetailPageModel) -> some View {
@@ -242,6 +275,29 @@ struct DetailView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 28)
                             .padding(.top, 28)
+                        }
+
+                        if isArtist, let signature = artistSignature {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Artist signature")
+                                    .font(.headline)
+                                AsyncImage(url: signature.imageURL) { image in
+                                    image.resizable()
+                                        .renderingMode(.template)
+                                        .scaledToFit()
+                                        .foregroundStyle(.primary)
+                                } placeholder: {
+                                    ProgressView()
+                                }
+                                .frame(maxWidth: 260, maxHeight: 100, alignment: .leading)
+                                .accessibilityLabel("Artist signature for \(signature.artistName)")
+                                Text("Signed by \(signature.artistName)")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 28)
+                            .padding(.top, 24)
                         }
 
                         ForEach(page.sections) { shelf in
@@ -398,12 +454,32 @@ struct DetailView: View {
             }
 
             VStack(spacing: 6) {
-                Text(title)
-                    .font(.largeTitle.bold())
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.8)
+                if let signature = artistSignature, signature.artistName == title {
+                    VStack(spacing: 3) {
+                        AsyncImage(url: signature.imageURL) { image in
+                            image.resizable()
+                                .renderingMode(.template)
+                                .scaledToFit()
+                                .foregroundStyle(.white)
+                        } placeholder: {
+                            Text(title).font(.largeTitle.bold())
+                        }
+                        .frame(maxWidth: 320, maxHeight: 84)
+                        .accessibilityLabel("Artist signature for \(title)")
+                        Text("Signed by \(title)")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .lineLimit(1)
+                    }
                     .padding(.horizontal, 24)
+                } else {
+                    Text(title)
+                        .font(.largeTitle.bold())
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
+                        .padding(.horizontal, 24)
+                }
 
                 if showCredit {
                     Text(credit)

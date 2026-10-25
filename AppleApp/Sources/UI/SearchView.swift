@@ -652,6 +652,15 @@ struct SearchView: View {
         }
     }
 
+    /// Search hits may identify the playing item by its catalogue id or by the
+    /// source id retained after a quality upgrade/addon resolution.
+    private func isCurrentlyPlaying(_ hit: SearchHitDTO) -> Bool {
+        guard let current = controller.current else { return false }
+        let entry = hit.asEntry()
+        return current.id == entry.id
+            || (hit.videoId != nil && current.videoId == hit.videoId)
+    }
+
 
     private struct SearchSectionModel: Identifiable {
         var id: String { title ?? "all" }
@@ -709,6 +718,7 @@ struct SearchView: View {
             } else {
                 SongRow(
                     entry: hit.asEntry(),
+                    isCurrent: isCurrentlyPlaying(hit),
                     play: {
                         recordTrackEntity(hit)
                         let tracks = listHits.filter(\.isTrack).map { $0.asEntry() }
@@ -758,6 +768,7 @@ struct SearchView: View {
             } else {
                 SongRow(
                     entry: hit.asEntry(),
+                    isCurrent: isCurrentlyPlaying(hit),
                     play: {
                         recordTrackEntity(hit)
                         controller.playRadio(hit.asEntry())
