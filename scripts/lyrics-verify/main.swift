@@ -142,6 +142,7 @@ let began = Date()
 var failures: [String] = []
 var answered: [String] = []
 var dead: [String] = []
+var unavailableSources: [String] = []
 var thin_: [String] = []
 var blockedSources: [String] = []
 
@@ -165,11 +166,14 @@ let needsKey: Set<String> = ["PAXSENIX", "PAXSENIX_SPOTIFY", "PAXSENIX_MUSIXMATC
 ///   endpoint \u{2014} the shared web-app id and secret no longer get a token at all.
 /// - `BETTER_LYRICS_PORTATO` answers `404 page not found`. The main BetterLyrics
 ///   endpoint is alive, and is a separate source.
-/// - `MEGALOBIZ`'s search answers 404 and `/search/` answers 503. The scraper's two
-///   regexes are fine; the page they read is not serving.
 let goneUpstream: [String: String] = [
     "MUSIXMATCH": "401 upgrade \u{2014} the web app id gets no token",
     "BETTER_LYRICS_PORTATO": "404 \u{2014} the endpoint is gone",
+]
+
+/// A source whose current endpoint is unavailable, rather than a provider
+/// failure or a track-level catalogue miss.
+let unavailableUpstream: [String: String] = [
     "MEGALOBIZ": "404/503 \u{2014} the search page it scrapes is not serving",
 ]
 
@@ -207,17 +211,23 @@ for source in sources {
         best = max(best, lines.count)
         if lines.contains(where: { !$0.words.isEmpty }) { wordSynced = true }
     }
-    let verdict = providerBlocked ? "BLOCKED" : (hits == 0 ? "nothing" : "\(hits)/\(tracks.count)")
+    let verdict = providerBlocked
+        ? "BLOCKED"
+        : (hits > 0
+            ? "\(hits)/\(tracks.count)"
+            : (unavailableUpstream[source.name] != nil ? "UNAVAILABLE" : "nothing"))
     let note = needsKey.contains(source.name)
         ? " \u{00B7} needs a key"
-        : (goneUpstream[source.name] ?? thinCoverage[source.name]).map { " \u{00B7} \($0)" } ?? ""
-    print(pad(source.label, 22) + pad(source.name, 24) + pad(verdict, 8)
+        : (unavailableUpstream[source.name] ?? goneUpstream[source.name] ?? thinCoverage[source.name]).map { " \u{00B7} \($0)" } ?? ""
+    print(pad(source.label, 22) + pad(source.name, 24) + pad(verdict, 12)
         + pad("\(best) lines", 11) + pad(String(format: "%.1fs", slowest), 9)
         + (wordSynced ? "word-synced" : "line-synced") + note)
     if providerBlocked {
         blockedSources.append("\(source.name): provider blocks third-party apps")
     } else if hits > 0 {
         answered.append(source.label)
+    } else if let unavailable = unavailableUpstream[source.name] {
+        unavailableSources.append("\(source.name): \(unavailable)")
     } else if let gone = goneUpstream[source.name] {
         dead.append("\(source.name): \(gone)")
     } else if let thin = thinCoverage[source.name] {
@@ -235,6 +245,11 @@ if !dead.isEmpty {
     print("")
     print("dead upstream, checked against the service itself:")
     dead.forEach { print("  \u{00B7} \($0)") }
+}
+if !unavailableSources.isEmpty {
+    print("")
+    print("unavailable upstream:")
+    unavailableSources.forEach { print("  \u{00B7} \($0)") }
 }
 if !thin_.isEmpty {
     print("")
