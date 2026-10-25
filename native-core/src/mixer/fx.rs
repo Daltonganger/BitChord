@@ -102,6 +102,24 @@ pub(crate) fn window_seconds(style: TransitionStyle, beat_seconds: f64) -> Optio
     })
 }
 
+/// A requested phrase window for the two effects whose tails can span it.
+/// The phrase length is bounded by the outgoing and incoming material at the
+/// planner, so an upstream-style 30 s clamp would truncate valid phrases.
+pub(crate) fn window_seconds_for_phrase(
+    style: TransitionStyle,
+    beat_seconds: f64,
+    phrase_bars: u32,
+) -> Option<f64> {
+    let beat = sane_beat(beat_seconds);
+    if matches!(style, TransitionStyle::EchoOut | TransitionStyle::ReverbWash)
+        && matches!(phrase_bars, 8 | 16)
+    {
+        Some(phrase_bars as f64 * 4.0 * beat)
+    } else {
+        window_seconds(style, beat_seconds)
+    }
+}
+
 /// Where the incoming lands, as a fraction of [`window_seconds`].
 pub(crate) fn landing_fraction(style: TransitionStyle, beat_seconds: f64) -> Option<f64> {
     let technique = Technique::of(style)?;
@@ -110,6 +128,25 @@ pub(crate) fn landing_fraction(style: TransitionStyle, beat_seconds: f64) -> Opt
     let land = technique.shape().1 * base;
     let window = window_seconds(style, beat_seconds)?;
     Some((land / window).clamp(0.0, 1.0))
+}
+
+pub(crate) fn landing_fraction_for_window(
+    style: TransitionStyle,
+    beat_seconds: f64,
+    planned_window_seconds: f64,
+) -> Option<f64> {
+    let adaptive_window = window_seconds(style, beat_seconds)?;
+    if matches!(style, TransitionStyle::EchoOut | TransitionStyle::ReverbWash)
+        && planned_window_seconds.is_finite()
+        && planned_window_seconds > adaptive_window
+    {
+        Some(
+            ((planned_window_seconds - 4.0 * sane_beat(beat_seconds)) / planned_window_seconds)
+                .clamp(0.0, 1.0),
+        )
+    } else {
+        landing_fraction(style, beat_seconds)
+    }
 }
 
 fn sane_beat(beat_seconds: f64) -> f64 {
@@ -136,20 +173,48 @@ pub(crate) struct DeckFx {
 
 impl DeckFx {
     pub(crate) fn new(style: TransitionStyle, device_rate: u32, beat_seconds: f64) -> Option<Self> {
+        Self::new_with_window(style, device_rate, beat_seconds, None)
+    }
+
+    pub(crate) fn new_with_window(
+        style: TransitionStyle,
+        device_rate: u32,
+        beat_seconds: f64,
+        requested_window_seconds: Option<f64>,
+    ) -> Option<Self> {
         let technique = Technique::of(style)?;
         let rate = device_rate.max(8_000) as f64;
         let beat = sane_beat(beat_seconds);
         let beat_frames = (beat * rate).round().max(1.0) as usize;
         let (base_beats, base_land) = technique.shape();
         let base_window_frames = (base_beats * beat_frames as f64).round().max(1.0) as u64;
-        let land_frame = (base_land * base_window_frames as f64).round() as u64;
+        let phrase_window_frames = requested_window_seconds
+            .filter(|_| matches!(style, TransitionStyle::EchoOut | TransitionStyle::ReverbWash))
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .map(|seconds| (seconds * rate).round().max(1.0) as u64);
+        let window_base_frames = phrase_window_frames.unwrap_or(base_window_frames);
+        let land_frame = if phrase_window_frames.is_some() {
+            match technique {
+                Technique::EchoOut | Technique::ReverbWash => {
+                    window_base_frames.saturating_sub(4 * beat_frames as u64)
+                }
+                _ => (base_land * window_base_frames as f64).round() as u64,
+            }
+        } else {
+            (base_land * window_base_frames as f64).round() as u64
+        };
         let wanted_overlap = (overlap_seconds(style, beat_seconds) * rate).round().max(1.0) as u64;
-        let (window_frames, overlap_frames) = if technique.extends_window() {
-            (base_window_frames + wanted_overlap, wanted_overlap)
+        let (window_frames, overlap_frames) = if phrase_window_frames.is_some() {
+            (
+                window_base_frames,
+                wanted_overlap.min(window_base_frames.saturating_sub(land_frame)).max(1),
+            )
+        } else if technique.extends_window() {
+            (window_base_frames + wanted_overlap, wanted_overlap)
         } else {
             (
-                base_window_frames,
-                wanted_overlap.min(base_window_frames.saturating_sub(land_frame)).max(1),
+                window_base_frames,
+                wanted_overlap.min(window_base_frames.saturating_sub(land_frame)).max(1),
             )
         };
         // A dotted eighth: the delay DJs set by default, because it lands
@@ -258,11 +323,7 @@ impl DeckFx {
                     let dry = self.dry_gain();
                     // Thrown on the beat before the landing; nothing after it
                     // feeds the echo, so it rings out rather than piling up.
-                    let send = if n < land {
-                        (((n - (land - beat)) / (beat * 0.25)).clamp(0.0, 1.0)) as f32
-                    } else {
-                        0.0
-                    };
+                    let send = echo_send_gain(n, land, beat, window);
                     let (wl, wr) = self.delay.process(l * send, r * send);
                     // The last beat of the window fades what is left.
                     let tail = ((window - n) / beat).clamp(0.0, 1.0) as f32;
@@ -312,6 +373,17 @@ impl DeckFx {
             self.elapsed += 1;
         }
     }
+}
+
+fn echo_send_gain(elapsed: f64, land: f64, beat: f64, _window: f64) -> f32 {
+    if elapsed >= land {
+        return 0.0;
+    }
+    // Adaptive and phrase windows throw the same way: the send opens over a
+    // quarter beat into the final beat before landing and nothing earlier
+    // feeds the echo. A phrase ride stays dry, because opening the send any
+    // sooner stacks repeats and lands louder than the adaptive throw.
+    (((elapsed - (land - beat)) / (beat * 0.25)).clamp(0.0, 1.0)) as f32
 }
 
 fn glide(from: f64, to: f64, amount: f64) -> f64 {
@@ -583,6 +655,111 @@ mod tests {
 
     fn peak(samples: &[f32]) -> f32 {
         samples.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    #[test]
+    fn phrase_windows_extend_only_echo_and_wash_and_keep_adaptive_default() {
+        let beat = 0.5;
+        assert_eq!(window_seconds_for_phrase(TransitionStyle::EchoOut, beat, 0), Some(2.5));
+        assert_eq!(window_seconds_for_phrase(TransitionStyle::ReverbWash, beat, 0), Some(4.0));
+        assert_eq!(window_seconds_for_phrase(TransitionStyle::EchoOut, beat, 8), Some(16.0));
+        assert_eq!(window_seconds_for_phrase(TransitionStyle::EchoOut, beat, 16), Some(32.0));
+        assert_eq!(window_seconds_for_phrase(TransitionStyle::ReverbWash, beat, 8), Some(16.0));
+        assert_eq!(window_seconds_for_phrase(TransitionStyle::ReverbWash, beat, 16), Some(32.0));
+        assert_eq!(window_seconds_for_phrase(TransitionStyle::LoopRoll, beat, 16), Some(3.0));
+        assert_eq!(
+            window_seconds_for_phrase(TransitionStyle::DropCut, beat, 16),
+            window_seconds(TransitionStyle::DropCut, beat)
+        );
+
+        let adaptive = landing_fraction(TransitionStyle::EchoOut, beat).unwrap();
+        assert_eq!(adaptive, 0.2);
+        assert_eq!(landing_fraction(TransitionStyle::ReverbWash, beat), Some(0.5));
+        assert_eq!(
+            landing_fraction_for_window(TransitionStyle::EchoOut, beat, 2.5),
+            Some(adaptive)
+        );
+        assert_eq!(
+            landing_fraction_for_window(TransitionStyle::ReverbWash, beat, 4.0),
+            Some(0.5)
+        );
+        assert_eq!(
+            landing_fraction_for_window(TransitionStyle::EchoOut, beat, 32.0),
+            Some(15.0 / 16.0)
+        );
+        assert_eq!(
+            landing_fraction_for_window(TransitionStyle::ReverbWash, beat, 32.0),
+            Some(15.0 / 16.0)
+        );
+
+        let mut phrase_fx =
+            DeckFx::new_with_window(TransitionStyle::EchoOut, 48_000, beat, Some(32.0)).unwrap();
+        assert_eq!(phrase_fx.window_frames, 32 * 48_000);
+        let expected_land = 32 * 48_000 - 4 * 24_000;
+        assert_eq!(phrase_fx.land_frame, expected_land);
+        let beat = phrase_fx.beat_frames as f64;
+        let input = tone(phrase_fx.window_frames as usize, 48_000.0);
+        let ride_end = phrase_fx.land_frame - 4 * phrase_fx.beat_frames as u64;
+        let mut ride_peak = 0.0f32;
+        let mut ride_input_peak = 0.0f32;
+        let mut last_bar_peak = 0.0f32;
+        for frame in 0..phrase_fx.window_frames {
+            let sample = &input[frame as usize * 2..frame as usize * 2 + 2];
+            let mut output = [0.0, 0.0];
+            if frame < phrase_fx.land_frame {
+                assert_eq!(phrase_fx.dry_gain(), 1.0, "echo dry changed at frame {frame}");
+            }
+            // Open from a quarter beat into the throw beat, as adaptive is.
+            if frame >= phrase_fx.land_frame - (phrase_fx.beat_frames as u64 * 3) / 4
+                && frame < phrase_fx.land_frame
+            {
+                assert_eq!(
+                    echo_send_gain(
+                        frame as f64,
+                        phrase_fx.land_frame as f64,
+                        beat,
+                        phrase_fx.window_frames as f64,
+                    ),
+                    1.0,
+                    "echo send closed during the throw at frame {frame}"
+                );
+            }
+            phrase_fx.render(sample, &mut output, 1);
+            if frame < ride_end {
+                ride_peak = ride_peak.max(peak(&output));
+                ride_input_peak = ride_input_peak.max(peak(sample));
+            } else if frame < phrase_fx.land_frame {
+                last_bar_peak = last_bar_peak.max(peak(&output));
+            }
+        }
+        assert!(phrase_fx.finished());
+        assert!((ride_peak - ride_input_peak).abs() < 1e-6);
+
+        let mut adaptive_fx = DeckFx::new(TransitionStyle::EchoOut, 48_000, 0.5).unwrap();
+        let adaptive_throw_start = adaptive_fx.land_frame - adaptive_fx.beat_frames as u64;
+        let mut adaptive_throw_peak = 0.0f32;
+        for frame in 0..adaptive_fx.window_frames {
+            let sample = &input[frame as usize * 2..frame as usize * 2 + 2];
+            let mut output = [0.0, 0.0];
+            adaptive_fx.render(sample, &mut output, 1);
+            if frame >= adaptive_throw_start && frame < adaptive_fx.land_frame {
+                adaptive_throw_peak = adaptive_throw_peak.max(peak(&output));
+            }
+        }
+        assert!(
+            last_bar_peak <= adaptive_throw_peak * 10.0f32.powf(1.0 / 20.0),
+            "last-bar peak {last_bar_peak} exceeded adaptive throw-beat peak {adaptive_throw_peak} by more than 1 dB"
+        );
+
+        let mut phrase_wash =
+            DeckFx::new_with_window(TransitionStyle::ReverbWash, 48_000, 0.5, Some(32.0)).unwrap();
+        assert_eq!(phrase_wash.land_frame, expected_land);
+        for frame in 0..phrase_wash.land_frame {
+            assert!(phrase_wash.dry_gain() > 0.0, "wash dry ended at frame {frame}");
+            let sample = &input[frame as usize * 2..frame as usize * 2 + 2];
+            let mut output = [0.0, 0.0];
+            phrase_wash.render(sample, &mut output, 1);
+        }
     }
 
     /// Render one frame at a time until `target`, so gains can be sampled

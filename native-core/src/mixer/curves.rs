@@ -212,7 +212,12 @@ pub(super) fn ride_effect_intro(
 /// Where an effect plan's incoming lands, as a fraction of a fade of
 /// `fade_seconds` whose last `1 - hold` is the technique window.
 pub(super) fn effect_landing(plan: &TransitionPlan, hold: f64) -> f64 {
-    let land = fx::landing_fraction(plan.style, plan.beat_seconds).unwrap_or(0.5);
+    let land = fx::landing_fraction_for_window(
+        plan.style,
+        plan.beat_seconds,
+        plan.effect_seconds,
+    )
+    .unwrap_or(0.5);
     hold + (1.0 - hold) * land
 }
 

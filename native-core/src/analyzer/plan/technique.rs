@@ -5,7 +5,7 @@ use super::analysis::{Analysis, Tier};
 use super::bridge::{vocal_peak_between, VOCAL_FREE_MEAN_MAX, VOCAL_FREE_PEAK_MAX};
 use super::choose::{energy_between, pair_salt};
 use super::cue::{beat_seconds_of, incoming_handoff};
-use super::edges::{assess, normalized_tempo_ratio, tempo_summary};
+use super::edges::{assess, final_chord_attack, normalized_tempo_ratio, tempo_summary};
 use super::key::{key_distance, trusted_key};
 use super::mix_out::resolve_mix_out_anchor;
 use super::vocal_overlap::vocal_activity_between;
@@ -286,6 +286,7 @@ pub(super) fn technique_plan(
     entry: f64,
     blend: Option<(f64, f64, f64)>,
     throw_at: Option<f64>,
+    phrase_bars: u32,
 ) -> Option<TransitionPlan> {
     let outgoing_falls = throw_at.is_some();
     let out_bpm = outgoing.bpm;
@@ -411,7 +412,34 @@ pub(super) fn technique_plan(
             entry,
         ),
     };
-    let technique_window = crate::mixer::technique_window_seconds(style, beat)?;
+    let adaptive_window = crate::mixer::technique_window_seconds(style, beat)?;
+    let intro = (EFFECT_INTRO_BEATS * beat).max(EFFECT_INTRO_MIN_SECONDS);
+    let mut available_outgoing = (duration - outgoing.audible_start_time.max(0.0)).max(0.0);
+    if phrase_bars != 0
+        && matches!(style, TransitionStyle::EchoOut | TransitionStyle::ReverbWash)
+        && (mix_end - duration).abs() <= 1.5
+    {
+        if let Some(chord) = final_chord_attack(outgoing) {
+            // The final-chord guard keeps an effect inside the chord's decay;
+            // a phrase that would cross the attack falls back to adaptive.
+            available_outgoing = available_outgoing.min((duration - chord).max(0.0));
+        }
+    }
+    let incoming_content_end = if incoming.content_end > 0.0 {
+        incoming.content_end
+    } else {
+        incoming.duration
+    };
+    let available_incoming = (incoming_content_end - blend_cue.max(0.0)).max(0.0);
+    let technique_window = phrase_window_or_adaptive(
+        style,
+        beat,
+        phrase_bars,
+        available_outgoing,
+        available_incoming,
+        intro,
+    );
+    let phrase_window_active = technique_window > adaptive_window;
     let analysed_fade = if style == TransitionStyle::DropCut {
         // A deliberate short swap, at most one bar.
         blend_fade.clamp(0.5, 4.0 * beat)
@@ -424,10 +452,12 @@ pub(super) fn technique_plan(
     let blend_fade = if style == TransitionStyle::DropCut {
         analysed_fade
     } else {
-        let intro = (EFFECT_INTRO_BEATS * beat).max(EFFECT_INTRO_MIN_SECONDS);
-        analysed_fade
-            .max(technique_window + intro)
-            .min(AUTO_TRANSITION_MAX_SECONDS.max(analysed_fade))
+        let required = analysed_fade.max(technique_window + intro);
+        if phrase_window_active {
+            required
+        } else {
+            required.min(AUTO_TRANSITION_MAX_SECONDS.max(analysed_fade))
+        }
     };
     let effect_seconds = if style == TransitionStyle::DropCut {
         (beat / 4.0).max(0.06)
@@ -442,7 +472,7 @@ pub(super) fn technique_plan(
     // of the fall. Without that the technique dressed a record already most
     // of the way down. At most `MAX_THROW_DISCARD_SECONDS` of tail goes.
     let natural_end = blend_start + analysed_fade;
-    let end = match throw_at {
+    let end = match throw_at.filter(|_| !phrase_window_active) {
         Some(throw)
             if throw + effect_seconds < natural_end
                 && natural_end - (throw + effect_seconds) <= MAX_THROW_DISCARD_SECONDS =>
@@ -489,7 +519,7 @@ pub(super) fn technique_plan(
         bridge_seconds: 0.0,
         bridge_repeats: 0,
         effect_seconds,
-        effect_start_seconds: (end - effect_seconds).max(0.0),
+        effect_start_seconds: effect_window_start(end, effect_seconds),
         transition_end_seconds: end,
         cue_seconds: cue,
         playback_rate: 1.0,
@@ -510,6 +540,40 @@ pub(super) fn technique_plan(
             outgoing.beat_confidence
         ),
     })
+}
+
+pub(super) fn phrase_window_or_adaptive(
+    style: TransitionStyle,
+    beat_seconds: f64,
+    phrase_bars: u32,
+    available_outgoing: f64,
+    available_incoming: f64,
+    intro_seconds: f64,
+) -> f64 {
+    let adaptive = crate::mixer::technique_window_seconds(style, beat_seconds)
+        .unwrap_or(AUTO_FALLBACK_SECONDS);
+    let requested = crate::mixer::technique_window_seconds_for_phrase(
+        style,
+        beat_seconds,
+        phrase_bars,
+    )
+    .unwrap_or(adaptive);
+    let required_outgoing = requested + intro_seconds.max(0.0);
+    // Both phrase-capable effects keep their adaptive four-beat post-landing
+    // tail. The incoming deck only needs that tail plus its planned intro.
+    let required_incoming = 4.0 * beat_seconds.max(0.0) + intro_seconds.max(0.0);
+    if requested > adaptive
+        && available_outgoing >= required_outgoing
+        && available_incoming >= required_incoming
+    {
+        requested
+    } else {
+        adaptive
+    }
+}
+
+pub(super) fn effect_window_start(window_end_seconds: f64, window_seconds: f64) -> f64 {
+    (window_end_seconds - window_seconds).max(0.0)
 }
 
 pub(super) fn long_blend_allowed(outgoing: &Analysis, incoming: &Analysis) -> bool {

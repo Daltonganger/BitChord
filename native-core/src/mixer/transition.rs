@@ -446,7 +446,15 @@ impl MixerState {
             t.fx = if t.plan.reason.starts_with("skip-mix:") {
                 fx::DeckFx::new_skip_echo(device_rate, t.plan.beat_seconds)
             } else {
-                fx::DeckFx::new(t.plan.style, device_rate, t.plan.beat_seconds)
+                let phrase_window = fx::window_seconds(t.plan.style, t.plan.beat_seconds)
+                    .filter(|adaptive| t.plan.effect_seconds > *adaptive + 1e-6)
+                    .map(|_| t.plan.effect_seconds);
+                fx::DeckFx::new_with_window(
+                    t.plan.style,
+                    device_rate,
+                    t.plan.beat_seconds,
+                    phrase_window,
+                )
             };
             if let Some(record) = automix_winner_record(&t.plan, snap_error) {
                 log::info!(

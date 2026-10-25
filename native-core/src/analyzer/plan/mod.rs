@@ -28,7 +28,7 @@ use crate::mixer::{TransitionPlan, TransitionStyle};
 use analysis::Analysis;
 use bridge::apply_bridge;
 use cache::{analyze_cached, last_sources};
-use choose::plan_from;
+use choose::plan_from_with_phrase_bars;
 use cue::record_transition_edges;
 use edges::respect_music_edges;
 use mix_out::resolve_mix_out_anchor;
@@ -143,6 +143,40 @@ pub fn plan_pair(
     decode: impl Fn(&str, f64, f64, bool) -> Option<(Vec<f32>, u32, f64)>,
     duration_of: impl Fn(&str) -> f64,
 ) -> TransitionPlan {
+    plan_pair_with_phrase_bars(
+        outgoing_path,
+        incoming_path,
+        outgoing_text,
+        incoming_text,
+        album_sequential,
+        crossfade_seconds,
+        outgoing_duration_hint,
+        incoming_duration_hint,
+        skip_vocals,
+        tier_label,
+        allow_effects,
+        0,
+        decode,
+        duration_of,
+    )
+}
+
+pub fn plan_pair_with_phrase_bars(
+    outgoing_path: &str,
+    incoming_path: &str,
+    outgoing_text: &str,
+    incoming_text: &str,
+    album_sequential: bool,
+    crossfade_seconds: f64,
+    outgoing_duration_hint: f64,
+    incoming_duration_hint: f64,
+    skip_vocals: bool,
+    tier_label: &str,
+    allow_effects: bool,
+    phrase_bars: u32,
+    decode: impl Fn(&str, f64, f64, bool) -> Option<(Vec<f32>, u32, f64)>,
+    duration_of: impl Fn(&str) -> f64,
+) -> TransitionPlan {
     let fade = if crossfade_seconds > 0.0 {
         crossfade_seconds.clamp(1.0, 12.0)
     } else {
@@ -217,7 +251,9 @@ pub fn plan_pair(
     // The most ambitious move: a beat-matched, harmonically-compatible pair gets
     // a WSOLA phrase-switch before the adaptive overlap (upstream `phraseSwitch`).
     let mut plan =
-        phrase_switch(&out, &inc).unwrap_or_else(|| plan_from(&out, &inc, fade, allow_effects));
+        phrase_switch(&out, &inc).unwrap_or_else(|| {
+            plan_from_with_phrase_bars(&out, &inc, fade, allow_effects, phrase_bars)
+        });
     respect_music_edges(&out, &inc, &mut plan);
     apply_bridge(&out, &mut plan);
     record_transition_edges(&out, &inc, &plan);

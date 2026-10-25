@@ -98,6 +98,15 @@ pub fn technique_window_seconds(style: TransitionStyle, beat_seconds: f64) -> Op
     fx::window_seconds(style, beat_seconds)
 }
 
+/// The phrase-aware technique window used during AutoMix planning.
+pub fn technique_window_seconds_for_phrase(
+    style: TransitionStyle,
+    beat_seconds: f64,
+    phrase_bars: u32,
+) -> Option<f64> {
+    fx::window_seconds_for_phrase(style, beat_seconds, phrase_bars)
+}
+
 const BAIL_MS: u64 = 120;
 const ARM_LEAD_MS: u64 = 4_000;
 const ARM_TIMEOUT_MS: u64 = 12_000;

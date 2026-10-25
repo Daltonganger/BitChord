@@ -1,6 +1,7 @@
 //! When a pair earns a DJ technique, and the intro that brings the next record in.
 
 use super::*;
+use crate::analyzer::plan::technique::{effect_window_start, phrase_window_or_adaptive};
 
 #[test]
 fn an_unmatched_pair_crosses_over_where_the_tail_falls() {
@@ -130,6 +131,65 @@ fn a_busy_handover_earns_the_technique() {
         plan.reason
     );
     assert!(!plan.reason.is_empty());
+}
+
+#[test]
+fn phrase_windows_end_at_content_end_and_fall_back_when_material_is_short() {
+    let beat = 0.5;
+    let adaptive = phrase_window_or_adaptive(
+        TransitionStyle::EchoOut,
+        beat,
+        0,
+        120.0,
+        120.0,
+        4.0,
+    );
+    assert_eq!(adaptive, 2.5, "0 keeps today's adaptive EchoOut window");
+
+    let eight_bars = phrase_window_or_adaptive(
+        TransitionStyle::EchoOut,
+        beat,
+        8,
+        120.0,
+        120.0,
+        4.0,
+    );
+    assert_eq!(eight_bars, 16.0);
+
+    let content_end = 120.0;
+    let outgoing_duration = 124.0;
+    let sixteen_bars = phrase_window_or_adaptive(
+        TransitionStyle::EchoOut,
+        beat,
+        16,
+        120.0,
+        120.0,
+        4.0,
+    );
+    let window_start = effect_window_start(content_end, sixteen_bars);
+    assert!((sixteen_bars - 32.0).abs() <= beat, "window={sixteen_bars:.3}s");
+    assert!((content_end - window_start - 32.0).abs() <= beat);
+    let outgoing_discard = outgoing_duration - content_end;
+    assert!(outgoing_discard <= 12.0, "outgoing discard={outgoing_discard}s");
+
+    let short_outro = phrase_window_or_adaptive(
+        TransitionStyle::EchoOut,
+        beat,
+        16,
+        35.0,
+        120.0,
+        4.0,
+    );
+    assert_eq!(short_outro, 2.5, "short outgoing material uses the adaptive window");
+    let short_intro = phrase_window_or_adaptive(
+        TransitionStyle::EchoOut,
+        beat,
+        16,
+        120.0,
+        5.9,
+        4.0,
+    );
+    assert_eq!(short_intro, 2.5, "short incoming material uses the adaptive window");
 }
 
 #[test]
