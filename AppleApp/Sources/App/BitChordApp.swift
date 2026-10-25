@@ -264,6 +264,15 @@ struct BitChordApp: App {
         }
 #endif
 #if os(macOS)
+        WindowGroup(id: MacBrowseWindow.sceneID, for: MacBrowseWindowRoute.self) { $route in
+            MacBrowseWindowView(route: route)
+                .environment(controller)
+                .environment(appModel)
+                .environment(auth)
+                .environment(toast)
+                .environment(party)
+                .preferredColorScheme(appModel.preferredScheme)
+        }
         Window("Mini Player", id: MiniPlayerWindow.id) {
             MiniPlayerView()
                 .environment(controller)
