@@ -26,6 +26,7 @@ struct SourcesView: View {
     @State private var health: [String: Health] = [:]
     @State private var probing = Set<String>()
     @State private var editing: ConfigDocument?
+    @State private var removingAddon: ConfigDocument?
     /// The confirm JioSaavn opens before it is opted into — see `onConfirmJioSaavn`.
     @State private var confirmingJioSaavn = false
     /// The WebDAV editor. A sheet on this screen rather than inside Settings, which is
@@ -98,6 +99,19 @@ struct SourcesView: View {
         .sheet(isPresented: $editingWebDav) {
             WebDavSettingsSheet()
         }
+        .alert(
+            "Remove addon?",
+            isPresented: Binding(
+                get: { removingAddon != nil },
+                set: { if !$0 { removingAddon = nil } }
+            ),
+            presenting: removingAddon
+        ) { config in
+            Button("Remove addon", role: .destructive) { removeAddon(config.id) }
+            Button("Cancel", role: .cancel) {}
+        } message: { config in
+            Text("Remove \(config.displayName) from BitChord's sources?")
+        }
         .confirmationDialog(
             jioSaavnWarning,
             isPresented: $confirmingJioSaavn,
@@ -138,6 +152,16 @@ struct SourcesView: View {
                 // setting for when it is switched back on.
                 handle: config.kind == "ADDON" ? { AnyView(dragHandle(config.id)) } : nil
             )
+            #if os(iOS)
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                if config.kind == "ADDON" {
+                    Button("Remove", systemImage: "trash") {
+                        removingAddon = config
+                    }
+                    .tint(.red)
+                }
+            }
+            #endif
         }
         .onMove(perform: moveAddons)
     }
@@ -355,6 +379,22 @@ struct SourcesView: View {
             callback: NoReply { _, _ in }
         )
         Task { await reload() }
+    }
+
+    private func removeAddon(_ id: String) {
+        guard configs.contains(where: { $0.id == id && $0.kind == "ADDON" }) else { return }
+        SourceResolverBridge.shared.remove(
+            configId: id,
+            callback: NoReply { ok, message in
+                Task { @MainActor in
+                    if ok {
+                        await reload()
+                    } else {
+                        toast.show(message ?? "Could not remove addon", kind: .failure)
+                    }
+                }
+            }
+        )
     }
 
     // MARK: - Reordering
