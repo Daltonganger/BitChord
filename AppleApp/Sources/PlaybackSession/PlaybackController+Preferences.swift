@@ -3,9 +3,7 @@ import BitChordShared
 import os
 #if os(iOS)
 import UIKit
-#if DEBUG
 import AVFoundation
-#endif
 #else
 import AppKit
 #endif
@@ -129,6 +127,30 @@ extension PlaybackController {
         return raw == "ALBUM" ? .album : raw == "TRACK" ? .track : .off
     }
 
+    /// The built-in phone speaker benefits from dynamics; the persisted
+    /// preference can suppress normalization there without changing the user's
+    /// selected mode for headphones or external routes.
+    var routeAwareLoudnessMode: LoudnessMode {
+        #if os(iOS)
+        let builtInSpeaker = AudioRouteState.shared.kind == AVAudioSession.Port.builtInSpeaker.rawValue
+        if builtInSpeaker,
+           PlatformSettings.shared.getBoolean(key: "loudness_off_on_speaker", default: true) {
+            return .off
+        }
+        #endif
+        return Self.storedLoudnessMode()
+    }
+
+    var effectiveBitPerfectOutput: Bool {
+        guard bitPerfectOutput, let stats = nerd else { return false }
+        let integerPcm = stats.bitDepth > 0 && stats.sampleRate > 0
+        return LosslessRoute.permitsBitPerfect(
+            routeKind: AudioRouteState.shared.kind,
+            sourceIsLossless: QualityUpgrade.Format.isLosslessCodec(stats.codec),
+            integerPcm: integerPcm
+        )
+    }
+
     func updateSoundMode(_ value: String) {
         soundMode = value == "ENHANCED" ? "ENHANCED" : "TRANSPARENT"
         PlatformSettings.shared.putString(key: "sound_mode", value: soundMode)
@@ -148,7 +170,7 @@ extension PlaybackController {
         loudnessNormalization = loudnessMode != "OFF"
         PlatformSettings.shared.putString(key: "loudness_mode", value: loudnessMode)
         PlatformSettings.shared.putBoolean(key: "loudness_normalization", value: loudnessNormalization)
-        try? engine.setLoudnessMode(mode: Self.storedLoudnessMode())
+        try? engine.setLoudnessMode(mode: routeAwareLoudnessMode)
         scheduleLoudnessMeasurement()
     }
 
@@ -164,7 +186,7 @@ extension PlaybackController {
     func updateBitPerfectOutput(_ enabled: Bool) {
         bitPerfectOutput = enabled
         PlatformSettings.shared.putBoolean(key: "bit_perfect_output", value: enabled)
-        try? engine.setBitPerfectEnabled(enabled: enabled)
+        try? engine.setBitPerfectEnabled(enabled: effectiveBitPerfectOutput)
         if enabled, isPlaying, current != nil {
             restartCurrent(keepingPosition: true)
         }

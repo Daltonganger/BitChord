@@ -70,6 +70,8 @@ extension PlaybackController {
             return
         }
         let prefs = ResolvePrefs.current()
+        // Lossless upgrades are not useful over a route that cannot preserve
+        // them; do not spend a catalogue/stream request on Bluetooth.
         if let shelved = QualityUpgrade.shelvedFor(mediaId) {
             debugLog.record("re-offering the upgrade already proved", about: mediaId)
             QualityUpgrade.onRaceStart(mediaId)
@@ -128,7 +130,8 @@ extension PlaybackController {
         racingLossless = true
         let eng = engine
         let log = debugLog
-        Task.detached(priority: .utility) { [weak self] in
+        qualityUpgradeTask?.cancel()
+        qualityUpgradeTask = Task.detached(priority: .utility) { [weak self] in
             let better: QualityUpgrade.Candidate?
             if let shelved {
                 better = shelved
@@ -155,6 +158,8 @@ extension PlaybackController {
                             entry, prefs: prefs, waitForAll: true, playingDurationSec: dur, playing: playing
                         ) else { return nil }
                         let format = hit.format
+                        let canCarryLossless = await MainActor.run { AudioRouteState.shared.carriesLossless }
+                        if format.lossless && !canCarryLossless { return nil }
                         guard QualityUpgrade.worthSwapping(format, playing: playing) else {
                             return nil
                         }
@@ -169,7 +174,10 @@ extension PlaybackController {
             defer {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    if self.upgradeFor == mediaId { self.upgradeFor = nil }
+                    if self.upgradeFor == mediaId {
+                        self.upgradeFor = nil
+                        self.qualityUpgradeTask = nil
+                    }
                     if self.current?.id == mediaId {
                         self.racingLossless = QualityUpgrade.isRacing(mediaId)
                     }
@@ -183,6 +191,8 @@ extension PlaybackController {
                 return "gone"
             }
             guard let better else { return }
+            let routeCanCarry = await MainActor.run { AudioRouteState.shared.carriesLossless }
+            guard !better.format.lossless || routeCanCarry else { return }
             switch moment {
             case "current":
                 await self?.performSwap(
@@ -227,6 +237,8 @@ extension PlaybackController {
             log.record("upgrade audition failed", about: mediaId)
             return
         }
+        let routeCanCarry = await MainActor.run { AudioRouteState.shared.carriesLossless }
+        guard !stream.format.lossless || routeCanCarry else { return }
         let context = await MainActor.run { () -> (String, String, String, String, Bool, Double, [String: String])? in
             guard self.playGeneration == generation, self.nextEntry?.id == mediaId else { return nil }
             let outgoing = self.loadedSourcePath ?? ""
@@ -323,7 +335,8 @@ extension PlaybackController {
         log: PlaybackDebugLog
     ) async {
         let snapshot = await MainActor.run { () -> (Double, Double, Bool, Double)? in
-            guard self.playGeneration == generation, self.current?.id == mediaId else { return nil }
+            guard self.playGeneration == generation, self.current?.id == mediaId,
+                  !stream.format.lossless || AudioRouteState.shared.carriesLossless else { return nil }
             let planned = self.pendingAutomixPlan?.fadeSeconds ?? 0
             // No plan yet still means a blend is coming. Eight seconds is the
             // plain-crossfade floor, and a swap inside that window is the cut.

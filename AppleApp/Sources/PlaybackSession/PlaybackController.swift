@@ -378,8 +378,8 @@ final class PlaybackController {
     /// or float to match; the Audio Pipeline readout reports what is actually
     /// in effect.
     var outputPcmMode = migrateOutputPcmMode()
-    /// Opt-in exact integer output on macOS routes that grant CoreAudio hog
-    /// mode. Unsupported tracks and routes stay on the normal audio path.
+    /// Opt-in exact integer output on qualifying direct routes. Unsupported
+    /// tracks and routes stay on the normal path.
     var bitPerfectOutput = PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: false)
     /// Request the current source's sample rate from the DAC/audio session.
     var matchSourceSampleRate = PlatformSettings.shared.getBoolean(key: "match_source_sample_rate", default: true)
@@ -444,6 +444,7 @@ final class PlaybackController {
     let debugLog = PlaybackDebugLog.shared
     var pendingAutomixPlan: TransitionPlanRec?
     var upgradeFor: String?
+    @ObservationIgnored var qualityUpgradeTask: Task<Void, Never>?
     var mixFadeUntil: Date?
 
     /// Id the engine currently has loaded — nil after a cold restore until Play.
@@ -680,6 +681,7 @@ final class PlaybackController {
         let spatial = PlatformSettings.shared.getBoolean(key: "spatial_audio", default: false) && AudioRouteState.shared.permitsCustomSpatial
         let skip = PlatformSettings.shared.getBoolean(key: "skip_silence", default: false)
         let speed = PlatformSettings.shared.getFloat(key: "playback_speed", default: 1)
+        let startBitPerfect = effectiveBitPerfectOutput
         playbackRate = Double(speed).isFinite ? min(max(Double(speed), 0.5), 2.0) : 1.0
         let eq = Self.currentEqTuning()
         engineStartupTask = Task.detached(priority: .utility) { [weak self] in
@@ -692,9 +694,7 @@ final class PlaybackController {
                 // stream. Applying them just after start caused a second output
                 // build while the first track could already be playing.
                 try eng.setOutputPcmMode(mode: Self.migrateOutputPcmMode())
-                try eng.setBitPerfectEnabled(
-                    enabled: PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: false)
-                )
+                try eng.setBitPerfectEnabled(enabled: startBitPerfect)
                 try eng.setPreferUsbDac(
                     enabled: PlatformSettings.shared.getBoolean(key: "prefer_usb_dac", default: false)
                 )
@@ -827,6 +827,15 @@ final class PlaybackController {
     ///    even if CoreAudio's own rebuild beat us to it.
     private var routeRecoveryGeneration: UInt64 = 0
     private func outputRouteChanged() {
+        let route = AudioRouteState.shared
+        if !route.carriesLossless, let mediaId = current?.id {
+            qualityUpgradeTask?.cancel()
+            qualityUpgradeTask = nil
+            QualityUpgrade.forget(mediaId)
+            upgradeFor = nil
+            racingLossless = false
+        }
+        let returnedFromBluetooth = route.previousKind.lowercased().contains("bluetooth") && route.carriesLossless
         routeRecoveryGeneration &+= 1
         let recovery = routeRecoveryGeneration
         guard started, state == .playing else { return }
@@ -848,7 +857,13 @@ final class PlaybackController {
                 guard let self, self.isPlaying, self.playGeneration == selection,
                       self.resumeGeneration == intent, self.routeRecoveryGeneration == recovery else { return }
                 do {
+                    try engine.setLoudnessMode(mode: self.routeAwareLoudnessMode)
+                    try engine.setBitPerfectEnabled(enabled: self.effectiveBitPerfectOutput)
                     if self.dolbyRenderer == nil { try engine.requestOutputRebuild(force: true) }
+                    if returnedFromBluetooth, let entry = self.current {
+                        QualityUpgrade.resetAutomaticAttemptForRoute(entry.id)
+                        self.lookForBetterCopy(entry, codec: self.nerd?.codec ?? "", kbps: self.nerd?.kbps ?? 0)
+                    }
                     self.nowPlaying.requestPrimaryIfPossible(reason: "route activation")
                 } catch {
                     NSLog("[BitChord] output rebuild after route change failed: \(error)")

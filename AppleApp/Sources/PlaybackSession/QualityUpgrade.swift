@@ -147,6 +147,12 @@ enum QualityUpgrade {
         store.refused.insert(mediaId)
     }
 
+    static func resetAutomaticAttemptForRoute(_ mediaId: String) {
+        store.lock.lock(); defer { store.lock.unlock() }
+        store.asked.remove(mediaId)
+        store.refused.remove(mediaId)
+    }
+
     static func couldStillUpgrade(
         mediaId: String,
         canSubstitute: Bool
@@ -216,6 +222,7 @@ enum QualityUpgrade {
 
         if let lookup = inFlight {
             let late = await lookup.value
+            guard !Task.isCancelled else { return nil }
             if let late,
                worthSwapping(late.format, playing: playing),
                sameRecordingAs(late.durationSec, playingDurationSec)
@@ -226,6 +233,7 @@ enum QualityUpgrade {
             }
         }
         let next = await search()
+        guard !Task.isCancelled else { return nil }
         found = next
         answered = true
         return next
