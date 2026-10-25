@@ -348,6 +348,14 @@ pub(super) fn ride_bass_swap(
     let swap_at = plan.bass_swap_fraction.clamp(0.05, 0.95);
     let handover = ((progress - swap_at) / BASS_SWAP_WIDTH * 0.5 + 0.5).clamp(0.0, 1.0);
     let clash = plan.vocal_overlap.clamp(0.0, 1.0);
+    // The entry high-pass has to be open by the swap. Left on its own clock
+    // it outlasted an early swap: the outgoing had already handed its low end
+    // over while the incoming was still filtered at ~300 Hz, and for seconds
+    // neither record had a kick or a bass line — only hats and the click of
+    // the beat, which is heard as hiss.
+    let open_by = (BLEND_ENTRY_OPEN_BY
+        + (BLEND_ENTRY_CLASH_OPEN_BY - BLEND_ENTRY_OPEN_BY) * clash)
+        .min(swap_at);
     let entry = bass_cutoff(1.0 - handover).max(entry_high_pass(
         progress,
         1.0,
@@ -356,7 +364,7 @@ pub(super) fn ride_bass_swap(
             BLEND_ENTRY_CLASH_HIGH_PASS_HZ,
             clash,
         ),
-        BLEND_ENTRY_OPEN_BY + (BLEND_ENTRY_CLASH_OPEN_BY - BLEND_ENTRY_OPEN_BY) * clash,
+        open_by,
     ));
     inc.set_cutoffs(TransitionFilter::open_hz(), entry);
     out.set_cutoffs(blend_exit_low_pass(progress, clash), bass_cutoff(handover));

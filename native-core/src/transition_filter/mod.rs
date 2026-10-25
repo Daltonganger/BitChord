@@ -90,6 +90,12 @@ impl TransitionFilter {
         OFF_HZ
     }
 
+    /// The high-pass the filter is gliding to.
+    #[cfg(test)]
+    pub(crate) fn target_high_pass_hz(&self) -> f32 {
+        self.target_high_pass_hz
+    }
+
     /// Aims the filter. `low_pass_hz` at or above [`OPEN_HZ`] and
     /// `high_pass_hz` at or below [`OFF_HZ`] mean "not filtering".
     pub fn set_cutoffs(&mut self, low_pass_hz: f32, high_pass_hz: f32) {
