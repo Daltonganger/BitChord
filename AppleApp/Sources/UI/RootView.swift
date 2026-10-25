@@ -476,11 +476,16 @@ struct RootView: View {
             if !macPlaylists.isEmpty {
                 Section("Playlists") {
                     ForEach(macPlaylists) { playlist in
-                        sideRow(
-                            .playlist(id: playlist.browseId, title: playlist.title),
-                            LocalizedStringKey(playlist.title),
-                            "music.note.list"
-                        )
+                        // Each playlist by its own artwork, as the iPad's
+                        // sidebar shows them, rather than one shared glyph.
+                        Label {
+                            Text(playlist.title)
+                        } icon: {
+                            ArtworkView(url: playlist.thumbnailUrl, data: nil, side: 20)
+                                .frame(width: 20, height: 20)
+                                .clipShape(.rect(cornerRadius: 4, style: .continuous))
+                        }
+                        .tag(MacSide.playlist(id: playlist.browseId, title: playlist.title))
                     }
                 }
             }
@@ -490,8 +495,15 @@ struct RootView: View {
     }
 
     private func sideRow(_ side: MacSide, _ title: LocalizedStringKey, _ icon: String) -> some View {
-        Label(title, systemImage: icon)
-            .tag(side)
+        Label {
+            Text(title)
+        } icon: {
+            // The glyph takes the text's colour, as Music's sidebar draws it;
+            // the system's sidebar tint is the accent blue.
+            Image(systemName: icon)
+                .foregroundStyle(macSide == side ? Color.white : Color.primary)
+        }
+        .tag(side)
     }
 
     @ViewBuilder
