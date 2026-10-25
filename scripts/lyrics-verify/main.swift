@@ -35,7 +35,7 @@ struct Track {
 func searchVideoId(_ track: Track) async -> String? {
     do {
         let json = try await withCheckedThrowingContinuation { c in
-            let callback = LyricsVerifySearch { json, _ in
+            let callback = LyricsVerifySearch { json, _, _ in
                 if let json { c.resume(returning: json) } else { c.resume(throwing: HarnessError.noValue) }
             }
             SearchBridge.shared.search(
@@ -64,9 +64,11 @@ func searchVideoId(_ track: Track) async -> String? {
 private enum HarnessError: Error { case noValue }
 
 private final class LyricsVerifySearch: SearchBridgeSearchCallback {
-    private let handler: (String?, String?) -> Void
-    init(_ handler: @escaping (String?, String?) -> Void) { self.handler = handler }
-    func onResult(json: String?, message: String?) { handler(json, message) }
+    private let handler: (String?, String?, String?) -> Void
+    init(_ handler: @escaping (String?, String?, String?) -> Void) { self.handler = handler }
+    func onResult(json: String?, continuation: String?, message: String?) {
+        handler(json, continuation, message)
+    }
 }
 
 // Four catalogues, because a provider that only carries Hindi is not broken and
