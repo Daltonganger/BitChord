@@ -225,7 +225,11 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
         say(nil)
         controller.detach()
 
-        PlaybackDebugLog.shared.record("video: resolving (forceRefresh=\(forceRefresh))", about: id)
+        let requestedTrack = hooks?.track()
+        PlaybackDebugLog.shared.record(
+            "video: resolving song=\(requestedTrack?.title ?? id) artist=\(requestedTrack?.artist ?? "") (forceRefresh=\(forceRefresh))",
+            about: id
+        )
         resolveTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -235,7 +239,10 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
                 self.resolveTask = nil
                 // The upload is itself a music video (and not a still image
                 // posted as one): same file, same timeline.
-                if side.url != nil, side.looksLikeMusicVideo, !side.isStillImage {
+                let sameFileIsPlayable = side.isAuthoritativeMusicVideo
+                    ? side.qualifiesAsCounterpartVideo()
+                    : side.qualifiesAsSearchVideo()
+                if sameFileIsPlayable {
                     PlaybackDebugLog.shared.record("video: attaching the picture", about: id)
                     self.preparing = false
                     self.side = side
@@ -253,7 +260,17 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
                 for candidate in candidates.prefix(3) {
                     let videoSide = try await InnertubeStreamResolver.shared.resolveVideo(videoId: candidate.videoId)
                     guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
-                    guard videoSide.url != nil, videoSide.looksLikeMusicVideo, !videoSide.isStillImage else {
+                    let isCounterpart = candidate.source == "counterpart"
+                    let qualifies = isCounterpart
+                        ? videoSide.qualifiesAsCounterpartVideo()
+                        : videoSide.qualifiesAsSearchVideo()
+                    guard qualifies else {
+                        if isCounterpart {
+                            PlaybackDebugLog.shared.record(
+                                "video: counterpart \(candidate.videoId) rejected (AVC/MP4=\(videoSide.isAVCInMP4), bitrate=\(videoSide.bitrate.map { String($0) } ?? "?") kbps, \(videoSide.kbpsPerMegapixel.map { String(format: "%.0f", $0) } ?? "?") kbps/MP)",
+                                about: id
+                            )
+                        }
                         PlaybackDebugLog.shared.record(
                             "video: \(candidate.videoId) (\(candidate.type ?? "untyped")) is not moving picture; next", about: id
                         )
@@ -261,7 +278,7 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
                     }
                     if fallback == nil { fallback = candidate }
                     PlaybackDebugLog.shared.record(
-                        "video: aligning the song with \(candidate.videoId) (\(candidate.type ?? "untyped"), \(candidate.durationText ?? "?"))",
+                        "video: aligning \(requestedTrack?.title ?? id) by \(requestedTrack?.artist ?? "") with \(candidate.videoId) (\(candidate.type ?? "untyped"), \(candidate.durationText ?? "?"), source=\(candidate.source ?? "search"))",
                         about: id
                     )
                     // The picture loads while the two recordings are lined up,
@@ -272,7 +289,8 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
                     guard !Task.isCancelled, self.mountedId == id, self.gate.canRequest else { return }
                     if let map, map.confident {
                         PlaybackDebugLog.shared.record(
-                            "video: picture of \(candidate.videoId) over the song, aligned: \(map.summary)", about: id
+                            "video: picture of \(candidate.videoId) for \(requestedTrack?.title ?? id) by \(requestedTrack?.artist ?? "") aligned: \(map.summary) min-window=\(String(format: "%.3f", map.minimumWindowSimilarity))",
+                            about: id
                         )
                         self.preparing = false
                         self.side = videoSide
@@ -331,15 +349,18 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
         aheadTask?.cancel()
         aheadTask = Task(priority: .utility) {
             let own = try? await InnertubeStreamResolver.shared.resolveVideo(videoId: next.videoId)
-            if let own, own.url != nil, own.looksLikeMusicVideo, !own.isStillImage { return }
+            if let own, own.isAuthoritativeMusicVideo ? own.qualifiesAsCounterpartVideo() : own.qualifiesAsSearchVideo() { return }
             let track = (title: next.title, artist: next.artist, seconds: next.seconds, durationText: next.durationText)
             for candidate in await Self.findVideoVersions(videoId: next.videoId, track: track).prefix(3) {
                 guard !Task.isCancelled else { return }
-                guard let side = try? await InnertubeStreamResolver.shared.resolveVideo(videoId: candidate.videoId),
-                      side.url != nil, side.looksLikeMusicVideo, !side.isStillImage else { continue }
+                guard let side = try? await InnertubeStreamResolver.shared.resolveVideo(videoId: candidate.videoId) else { continue }
+                let qualifies = candidate.source == "counterpart"
+                    ? side.qualifiesAsCounterpartVideo()
+                    : side.qualifiesAsSearchVideo()
+                guard qualifies else { continue }
                 let map = await VideoVersionAlignment.shared.map(songId: next.videoId, videoId: candidate.videoId)
                 PlaybackDebugLog.shared.record(
-                    "video: lined up ahead with \(candidate.videoId): \(map?.confident == true ? "aligned" : "not aligned")",
+                    "video: lined up \(next.title) by \(next.artist) ahead with \(candidate.videoId): \(map?.confident == true ? "aligned" : "not aligned") map=\(map?.summary ?? "none") min-window=\(map.map { String(format: "%.3f", $0.minimumWindowSimilarity) } ?? "?")",
                     about: next.videoId
                 )
                 if map?.confident == true { return }
@@ -366,6 +387,7 @@ final class VideoPlayback: NSObject, AVPictureInPictureControllerDelegate {
         let title: String
         let durationText: String?
         let type: String?
+        let source: String?
     }
 
     private static func findVideoVersions(

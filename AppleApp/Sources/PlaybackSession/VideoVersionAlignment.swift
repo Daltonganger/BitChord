@@ -19,6 +19,33 @@ actor VideoVersionAlignment {
         }
         let segments: [Segment]
         let confident: Bool
+        let minimumWindowSimilarity: Double
+
+        init(segments: [Segment], confident: Bool, minimumWindowSimilarity: Double) {
+            self.segments = segments
+            self.confident = confident
+            self.minimumWindowSimilarity = minimumWindowSimilarity
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case segments, confident, minimumWindowSimilarity
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            segments = try values.decode([Segment].self, forKey: .segments)
+            confident = try values.decode(Bool.self, forKey: .confident)
+            // A pre-window map lacks this metric and must be remeasured before
+            // being trusted by the video surface.
+            minimumWindowSimilarity = try values.decodeIfPresent(Double.self, forKey: .minimumWindowSimilarity) ?? -1
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encode(segments, forKey: .segments)
+            try values.encode(confident, forKey: .confident)
+            try values.encode(minimumWindowSimilarity, forKey: .minimumWindowSimilarity)
+        }
 
         /// Video time for a song time. Before the first segment and after the
         /// last, the nearest segment's offset holds.
@@ -52,7 +79,9 @@ actor VideoVersionAlignment {
         let key = "\(songId)_\(videoId)"
         if let known = maps[key] { return known }
         let file = directory.appendingPathComponent("\(key).json")
-        if let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(Map.self, from: data) {
+        if let data = try? Data(contentsOf: file),
+           let saved = try? JSONDecoder().decode(Map.self, from: data),
+           saved.minimumWindowSimilarity >= 0 {
             maps[key] = saved
             return saved
         }
@@ -93,12 +122,13 @@ actor VideoVersionAlignment {
             }
             let map = Map(
                 segments: rec.segments.map { .init(songStart: $0.songStart, songEnd: $0.songEnd, offset: $0.offset) },
-                confident: rec.confident
+                confident: rec.confident,
+                minimumWindowSimilarity: rec.minimumWindowSimilarity
             )
             PlaybackDebugLog.shared.record(String(
-                format: "video align: %@ %@ in %.1fs (similarity %.2f, baseline %.2f, coverage %.2f): %@",
+                format: "video align: %@ %@ in %.1fs (similarity %.2f, baseline %.2f, window minimum %.2f, coverage %.2f): %@",
                 videoId, rec.confident ? "aligned" : "NOT confident", Date().timeIntervalSince(started),
-                rec.similarity, rec.baseline, rec.coverage, map.summary
+                rec.similarity, rec.baseline, rec.minimumWindowSimilarity, rec.coverage, map.summary
             ), about: songId)
             if let data = try? JSONEncoder().encode(map) { try? data.write(to: file, options: .atomic) }
             return map

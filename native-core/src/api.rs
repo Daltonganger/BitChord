@@ -194,6 +194,7 @@ pub fn align_versions(song_path: String, other_path: String) -> Option<VersionAl
             .collect(),
         similarity: alignment.similarity,
         baseline: alignment.baseline,
+        minimum_window_similarity: alignment.minimum_window_similarity,
         coverage: alignment.coverage,
     })
 }
