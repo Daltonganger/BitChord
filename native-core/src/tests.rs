@@ -88,7 +88,7 @@ fn automix_corpus_scorecard() {
             })
     };
     let headers = std::collections::HashMap::new();
-    let pairs = files.len().saturating_sub(1).min(12);
+    let pairs = files.len().saturating_sub(1).min(50);
     let mut fades = Vec::new();
     let mut non_dropcut_fades = Vec::new();
     let mut effects = 0usize;
@@ -98,6 +98,12 @@ fn automix_corpus_scorecard() {
     let mut cold_endings = 0usize;
     let mut clipped_chords = 0usize;
     let mut bridged = 0usize;
+    let style_names = [
+        "equal_power", "dj_filter", "dj_blend", "gapless", "echo_out", "loop_roll",
+        "reverb_wash", "drop_cut",
+    ];
+    let mut style_histogram = [0usize; 8];
+    let mut unclassified = 0usize;
     println!("automix corpus: {pairs} pairs from {} files", files.len());
     // The corpus is one session in a row, paced as the app paces it
     // (`TransitionPacing`): three effects in a row hold the next to a blend.
@@ -122,6 +128,25 @@ fn automix_corpus_scorecard() {
             allow_effects,
         );
         let style = crate::mixer::TransitionPlan::from(plan.clone());
+        // Each corpus pair is one finalized planned transition. The live mixer
+        // calls this same record builder at start_fade with its measured snap
+        // error; this planner-only harness has no playback clock for that field.
+        let winner_record = if plan.fade_seconds > 0.0 {
+            crate::mixer::automix_winner_record(&style, None)
+        } else {
+            None
+        };
+        if plan.fade_seconds > 0.0 {
+            if let Some(record) = &winner_record {
+                if let Some(index) = style_names.iter().position(|name| *name == record.style) {
+                    style_histogram[index] += 1;
+                } else {
+                    unclassified += 1;
+                }
+            } else {
+                unclassified += 1;
+            }
+        }
         recent_effects.push_back(style.style.is_effect());
         if recent_effects.len() > 3 {
             recent_effects.pop_front();
@@ -206,6 +231,21 @@ fn automix_corpus_scorecard() {
         "automix edges: discarded out median {median_out:.1}s max {max_out:.1}s, in median \
          {median_in:.1}s max {max_in:.1}s, cold endings {cold_endings}, clipped final chords \
          {clipped_chords}"
+    );
+    println!(
+        "automix scorecard telemetry: winner_records={} unclassified={} styles={}",
+        style_histogram.iter().sum::<usize>(),
+        unclassified,
+        style_names
+            .iter()
+            .zip(style_histogram.iter())
+            .map(|(name, count)| format!("{name}:{count}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    assert_eq!(
+        unclassified, 0,
+        "automix corpus contains a real transition without a classified winner record"
     );
     // A′3 turns these into gates; A′2 reports them. The cached files are
     // Opus-in-MP4 and the Rust analyser does not decode every one, so an
