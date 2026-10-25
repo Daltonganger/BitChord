@@ -30,8 +30,31 @@ struct PlaybackPill: View {
 
     // ---- iOS: mini-player above the tab bar --------------------------------
     #if os(iOS)
+    private enum PillDragAxis: Equatable {
+        case horizontal
+        case vertical
+    }
+
+    private struct PillDragState: Equatable {
+        var axis: PillDragAxis? = nil
+        var translation = CGSize.zero
+
+        mutating func track(_ translation: CGSize) {
+            if axis == nil, max(abs(translation.width), abs(translation.height)) >= 10 {
+                axis = abs(translation.height) > abs(translation.width) ? .vertical : .horizontal
+            }
+            self.translation = translation
+        }
+    }
+
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @GestureState private var pillDrag = PillDragState()
+    @State private var lockedPillDrag: (start: CGPoint, axis: PillDragAxis)?
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
+    private var pillPullLift: CGFloat {
+        guard pillDrag.axis == .vertical, pillDrag.translation.height < 0 else { return 0 }
+        return min(max(-pillDrag.translation.height * 0.5, 0), 72)
+    }
 
     private var iOSPill: some View {
         HStack(spacing: 12) {
@@ -64,19 +87,57 @@ struct PlaybackPill: View {
         .modifier(MiniPlayerChrome(fill: chromeFill))
         .overlay(alignment: .bottom) { progressHairline.clipShape(Capsule()) }
         .contentShape(.rect)
-        .modifier(NowPlayingZoomSource())
         // Long press: what is coming next. Upstream's mini player answers a long
         // press with the queue, and on a phone the pill has no queue button beside
         // the transport — this is the way to reach the next few tracks without
         // opening the player first.
         .contextMenu { quickQueueMenu }
-        // Horizontal swipe to skip, matching upstream MiniPlayer's 72dp fling:
-        // left for next, right for previous.
-        // `minimumDistance: 20` keeps ordinary taps on the tap-to-expand path.
+        .offset(y: -pillPullLift)
+        // Direct gesture-state updates make the pill follow the finger at half
+        // rate. Only the release back to rest springs; the pull itself does not lag.
+        .animation(
+            pillDrag == PillDragState()
+                ? .spring(response: 0.38, dampingFraction: 0.86)
+                : nil,
+            value: pillDrag
+        )
+        .modifier(NowPlayingZoomSource())
+        // One detector resolves the axis after the system's touch slop: an
+        // upward pull opens Now Playing, while a 72 pt horizontal swipe skips.
         .gesture(
-            DragGesture(minimumDistance: 20)
+            DragGesture(minimumDistance: 10)
+                .updating($pillDrag) { value, state, _ in
+                    state.track(value.translation)
+                }
+                .onChanged { value in
+                    if let lockedPillDrag, lockedPillDrag.start != value.startLocation {
+                        self.lockedPillDrag = nil
+                    }
+                    if lockedPillDrag == nil,
+                       max(abs(value.translation.width), abs(value.translation.height)) >= 10 {
+                        lockedPillDrag = (
+                            start: value.startLocation,
+                            axis: abs(value.translation.height) > abs(value.translation.width)
+                                ? .vertical
+                                : .horizontal
+                        )
+                    }
+                }
                 .onEnded { value in
                     let dx = value.translation.width
+                    let dy = value.translation.height
+                    let axis = lockedPillDrag?.axis
+                        ?? (abs(dy) > abs(dx) ? PillDragAxis.vertical : .horizontal)
+                    lockedPillDrag = nil
+                    if axis == .vertical {
+                        guard dy < -10 else { return }
+                        let heldPull = min(max(-dy * 0.5, 0), 72)
+                        let flickedUp = value.predictedEndTranslation.height < dy - 72
+                        guard flickedUp || heldPull > 36 else { return }
+                        Haptics.play(.tap)
+                        appModel.nowPlayingPresented = true
+                        return
+                    }
                     guard abs(dx) >= 72 else { return }
                     guard !PartyStore.shared.state.controlsLocked else {
                         Haptics.play(.tap)
