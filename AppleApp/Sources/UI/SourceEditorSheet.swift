@@ -73,6 +73,9 @@ struct SourceEditorSheet: View {
                     } header: {
                         Text("Automatic renewal")
                     } footer: {
+                        if config.refreshUrlUnavailable == true {
+                            Text("The renewal link is temporarily unavailable. Unlock your device or Keychain, then reopen this editor to edit it.")
+                        }
                         Text("Use a renewal link supplied by the addon provider. Supported services can return a fresh addon URL automatically. Pages requiring sign-in or a CAPTCHA need manual renewal.")
                     }
                 }
@@ -136,7 +139,7 @@ struct SourceEditorSheet: View {
     }
 
     private var validConfiguration: Bool {
-        !normalised.isEmpty && (!autoRefresh || !refreshUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        !normalised.isEmpty && (!autoRefresh || !refreshUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || config.refreshUrlUnavailable == true)
     }
 
     /// What the kind actually needs, said before the field rather than after a
@@ -223,6 +226,7 @@ struct SourceEditorSheet: View {
             enabled: config.enabled,
             refreshEnabled: autoRefresh,
             refreshUrl: refreshUrl,
+            preserveUnavailableRefreshUrl: config.refreshUrlUnavailable == true && refreshUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             callback: Saved { ok, message in
                 Task { @MainActor in
                     saving = false

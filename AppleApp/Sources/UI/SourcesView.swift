@@ -475,6 +475,7 @@ struct ConfigDocument: Codable, Identifiable, Hashable {
     let labels: [String]
     var refreshEnabled: Bool? = nil
     var refreshUrl: String? = nil
+    var refreshUrlUnavailable: Bool? = nil
 
     /// A blank addon, for the "Add" row.
     static func newAddon() -> ConfigDocument {

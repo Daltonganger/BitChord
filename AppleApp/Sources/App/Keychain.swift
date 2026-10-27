@@ -27,13 +27,20 @@ enum Keychain {
     /// that cannot be read degrades to "not signed in" instead of taking the app
     /// down on launch.
     static func get(_ account: String) -> String? {
+        read(account).value
+    }
+
+    /// A failed read and a missing item require different persistence decisions.
+    static func read(_ account: String) -> (value: String?, available: Bool) {
         var result: AnyObject?
         var query = baseQuery(account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        if status == errSecItemNotFound { return (nil, true) }
+        guard status == errSecSuccess, let data = result as? Data,
+              let value = String(data: data, encoding: .utf8) else { return (nil, false) }
+        return (value, true)
     }
 
     /// Replace an existing value without a delete/add window that can lose the

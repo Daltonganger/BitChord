@@ -331,16 +331,17 @@ object SourceResolverBridge {
     ) {
         val existing = SourceRegistry.config(id)
         saveWithRefresh(id, kind, label, baseUrl, enabled,
-            existing?.refreshEnabled ?: false, existing?.refreshUrl.orEmpty(), callback)
+            existing?.refreshEnabled ?: false, existing?.refreshUrl.orEmpty(), existing?.refreshUrlUnavailable ?: false, callback)
     }
 
     fun saveWithRefresh(
         id: String, kind: String, label: String, baseUrl: String, enabled: Boolean,
-        refreshEnabled: Boolean, refreshUrl: String, callback: ActionCallback,
+        refreshEnabled: Boolean, refreshUrl: String, preserveUnavailableRefreshUrl: Boolean = false, callback: ActionCallback,
     ) {
         scope.launch {
             try {
-                if (refreshEnabled && (kind != "ADDON" || !AddonRefresh.validAddress(refreshUrl.trim()))) {
+                val preserveLink = preserveUnavailableRefreshUrl && refreshUrl.isBlank()
+                if (refreshEnabled && (kind != "ADDON" || (!preserveLink && !AddonRefresh.validAddress(refreshUrl.trim())))) {
                     callback.onResult(false, "Enter an HTTPS renewal link from the addon provider")
                     return@launch
                 }
@@ -357,6 +358,7 @@ object SourceResolverBridge {
                     enabled = enabled,
                     refreshEnabled = refreshEnabled,
                     refreshUrl = refreshUrl,
+                    refreshUrlUnavailable = preserveLink,
                 )
                 if (SourceRegistry.config(id) == null) {
                     SourceRegistry.add(config)
@@ -389,19 +391,27 @@ object SourceResolverBridge {
     fun addonCount(): Int = SourceRegistry.active().count { it is AddonSource }
 
     fun setEnabled(configId: String, enabled: Boolean, callback: ActionCallback) {
-        SourceRegistry.setEnabled(configId, enabled)
-        callback.onResult(true, null)
+        sourceAction(callback) { SourceRegistry.setEnabled(configId, enabled) }
     }
 
     fun remove(configId: String, callback: ActionCallback) {
-        SourceRegistry.remove(configId)
-        callback.onResult(true, null)
+        sourceAction(callback) { SourceRegistry.remove(configId) }
     }
 
     /** Put the addons in the order the listener dragged them into. */
     fun reorderAddons(orderedIds: List<String>, callback: ActionCallback) {
-        SourceRegistry.reorderAddons(orderedIds)
-        callback.onResult(true, null)
+        sourceAction(callback) { SourceRegistry.reorderAddons(orderedIds) }
+    }
+
+    /** Kotlin exceptions must not cross the Swift callback boundary. */
+    internal fun sourceAction(callback: ActionCallback, action: () -> Unit) {
+        val error = try {
+            action()
+            null
+        } catch (_: Exception) {
+            "Could not save source settings; unlock your device or Keychain and try again"
+        }
+        callback.onResult(error == null, error)
     }
 
     /**
@@ -490,6 +500,7 @@ object SourceResolverBridge {
                     labels = config.kind.labels,
                     refreshEnabled = config.refreshEnabled,
                     refreshUrl = config.refreshUrl,
+                    refreshUrlUnavailable = config.refreshUrlUnavailable,
                 )
             },
         )
@@ -540,6 +551,7 @@ data class ConfigDocument(
     val labels: List<String>,
     val refreshEnabled: Boolean = false,
     val refreshUrl: String = "",
+    val refreshUrlUnavailable: Boolean = false,
 )
 
 @Serializable

@@ -230,4 +230,6 @@ final class HarnessSecretStore: SecretStoreBridgeImpl {
     var usingKeychain: Bool { false }
     func get(key: String) -> String? { values[key] }
     func put(key: String, value: String?) { values[key] = value }
+    func read(key: String) -> SecretRead { SecretRead(value: values[key], available: true) }
+    func write(key: String, value: String?) -> Bool { values[key] = value; return true }
 }
