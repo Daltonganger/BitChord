@@ -182,10 +182,9 @@ object SourceResolver {
         val active = SourceRegistry.activeForPlayback()
         val youtube = active.firstOrNull { it.kind == SourceKind.YOUTUBE } ?: return null
         val requested = requestForNow()
-        val mayUseLossless = PlaybackCodecCapabilities.losslessOutput
-        // On a lossy-only route ask for the best ordinary substitute and keep
-        // racing after FLAC/ALAC answers, so a fast lossy catalogue result can
-        // still stand in for YouTube without spending a lossless-only request.
+        val mayUseLossless = PlaybackCodecCapabilities.allowLosslessSources
+        // The chosen source quality still applies on Bluetooth. The physical
+        // output capability remains separate for addons that explicitly require it.
         val routeRequest = if (requested is StreamRequest.Lossless && !mayUseLossless) StreamRequest.Best else requested
         val (source, stream) = bestAcross(
             rankedAbove(youtube.configId, active), target, routeRequest,
@@ -318,15 +317,15 @@ object SourceResolver {
         val (source, chosen) = bestAcross(
             rankedAbove(youtube.configId, active).filterNot { it.configId == servedBy },
             target,
-            if (requestForNow() is StreamRequest.Lossless && !PlaybackCodecCapabilities.losslessOutput) {
+            if (requestForNow() is StreamRequest.Lossless && !PlaybackCodecCapabilities.allowLosslessSources) {
                 StreamRequest.Best
             } else requestForNow(),
             waitForAll = true,
             strictLength = true,
             requireSharedArtist = true,
-            allowLossless = PlaybackCodecCapabilities.losslessOutput,
+            allowLossless = PlaybackCodecCapabilities.allowLosslessSources,
         ) { candidate, stream ->
-            (PlaybackCodecCapabilities.losslessOutput || stream.format.isLossless != true) &&
+            (PlaybackCodecCapabilities.allowLosslessSources || stream.format.isLossless != true) &&
                 worthSwapping(stream.format, playing).also { worth ->
                 // Named rather than skipped silently. This is the one refusal in the
                 // upgrade path that discards a stream already found, matched and

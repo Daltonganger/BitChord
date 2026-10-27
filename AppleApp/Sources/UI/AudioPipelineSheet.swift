@@ -229,11 +229,7 @@ struct AudioPipelineSheet: View {
     private var device: OutputDeviceRec { controller.outputDevice }
 
     private var sourceName: String {
-        guard let entry = controller.current else { return "—" }
-        if entry.isLocal { return entry.source }
-        if entry.source.hasPrefix("yt:") { return "YouTube" }
-        if entry.source.hasPrefix("saavn:") { return "JioSaavn" }
-        return entry.source.isEmpty ? "—" : entry.source
+        controller.playbackSourceName ?? "—"
     }
 
     private var codec: String { nerd?.codec.isEmpty == false ? nerd!.codec : "—" }

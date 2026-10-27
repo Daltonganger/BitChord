@@ -115,6 +115,9 @@ struct SourceEditorSheet: View {
     /// What the kind actually needs, said before the field rather than after a
     /// failure.
     private var urlHelp: String {
+        if config.kind == "ADDON", SourceResolverBridge.shared.automaticallyRenewsAddon(url: normalised) {
+            return "Last Babe renews its temporary addon URL automatically when needed. You can keep the main website address here; BitChord checks it when you use the addon."
+        }
         switch config.kind {
         case "MODULE":
             return "The module index — the JSON document listing plugins. Each plugin ships a JavaScript file that BitChord runs to search and stream."

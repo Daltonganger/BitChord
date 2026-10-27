@@ -12,6 +12,16 @@ import AppKit
 
 // Quality upgrades: finding a better copy and swapping to it mid-track.
 extension PlaybackController {
+
+    var playbackSourceName: String? {
+        guard let current else { return nil }
+        return PlaybackSourceLabel.name(
+            origin: resolvedOrigin[current.id]?.rawValue,
+            source: current.source,
+            isLocal: current.isLocal
+        )
+    }
+
     func noteResolved(_ entry: QueueEntry, outcome: ResolveOutcome, prefs: ResolvePrefs) {
         resolvedOrigin[entry.id] = outcome.source.origin
         if let videoId = outcome.source.youtubeVideoId { resolvedVideoIds[outcome.source.source] = videoId }
@@ -70,8 +80,8 @@ extension PlaybackController {
             return
         }
         let prefs = ResolvePrefs.current()
-        // Lossless upgrades are not useful over a route that cannot preserve
-        // them; do not spend a catalogue/stream request on Bluetooth.
+        // A selected lossless source remains useful on Bluetooth; the output
+        // encoding is reported separately from the source format.
         if let shelved = QualityUpgrade.shelvedFor(mediaId) {
             debugLog.record("re-offering the upgrade already proved", about: mediaId)
             QualityUpgrade.onRaceStart(mediaId)
@@ -158,8 +168,8 @@ extension PlaybackController {
                             entry, prefs: prefs, waitForAll: true, playingDurationSec: dur, playing: playing
                         ) else { return nil }
                         let format = hit.format
-                        let canCarryLossless = await MainActor.run { AudioRouteState.shared.carriesLossless }
-                        if format.lossless && !canCarryLossless { return nil }
+                        let allowsLosslessSources = await MainActor.run { PlaybackCodecCapabilities.shared.allowLosslessSources }
+                        if format.lossless && !allowsLosslessSources { return nil }
                         guard QualityUpgrade.worthSwapping(format, playing: playing) else {
                             return nil
                         }
@@ -191,8 +201,8 @@ extension PlaybackController {
                 return "gone"
             }
             guard let better else { return }
-            let routeCanCarry = await MainActor.run { AudioRouteState.shared.carriesLossless }
-            guard !better.format.lossless || routeCanCarry else { return }
+            let allowsLosslessSources = await MainActor.run { PlaybackCodecCapabilities.shared.allowLosslessSources }
+            guard !better.format.lossless || allowsLosslessSources else { return }
             switch moment {
             case "current":
                 await self?.performSwap(
@@ -237,8 +247,8 @@ extension PlaybackController {
             log.record("upgrade audition failed", about: mediaId)
             return
         }
-        let routeCanCarry = await MainActor.run { AudioRouteState.shared.carriesLossless }
-        guard !stream.format.lossless || routeCanCarry else { return }
+        let allowsLosslessSources = await MainActor.run { PlaybackCodecCapabilities.shared.allowLosslessSources }
+        guard !stream.format.lossless || allowsLosslessSources else { return }
         let context = await MainActor.run { () -> (String, String, String, String, Bool, Double, [String: String])? in
             guard self.playGeneration == generation, self.nextEntry?.id == mediaId else { return nil }
             let outgoing = self.loadedSourcePath ?? ""
@@ -321,6 +331,7 @@ extension PlaybackController {
         await MainActor.run { [weak self] in
             guard let self, self.playGeneration == generation, self.nextEntry?.id == mediaId else { return }
             self.adoptAutomixPlan(plan)
+            self.resolvedOrigin[mediaId] = .substitute
         }
         QualityUpgrade.unshelve(mediaId)
         log.record("upgrade joined the blend as \(stream.format.summary)", about: mediaId)
@@ -336,7 +347,7 @@ extension PlaybackController {
     ) async {
         let snapshot = await MainActor.run { () -> (Double, Double, Bool, Double)? in
             guard self.playGeneration == generation, self.current?.id == mediaId,
-                  !stream.format.lossless || AudioRouteState.shared.carriesLossless else { return nil }
+                  !stream.format.lossless || PlaybackCodecCapabilities.shared.allowLosslessSources else { return nil }
             let planned = self.pendingAutomixPlan?.fadeSeconds ?? 0
             // No plan yet still means a blend is coming. Eight seconds is the
             // plain-crossfade floor, and a swap inside that window is the cut.
@@ -380,15 +391,15 @@ extension PlaybackController {
             log.record("upgrade audition failed", about: mediaId)
             return
         }
-        let again = await MainActor.run { () -> (Double, Bool, Double?, String?, [String: String])? in
+        let again = await MainActor.run { () -> (Double, Bool, Double?, String?, [String: String], ResolvedSource.Origin?)? in
             guard self.playGeneration == generation, self.current?.id == mediaId else { return nil }
             if self.smartMixInProgress { return nil }
             return (
                 self.position, self.isPlaying, self.currentLoudnessDb,
-                self.loadedSourcePath, self.loadedSourceHeaders
+                self.loadedSourcePath, self.loadedSourceHeaders, self.resolvedOrigin[mediaId]
             )
         }
-        guard let (nowPos, playing, loudnessDb, priorSource, priorHeaders) = again else {
+        guard let (nowPos, playing, loudnessDb, priorSource, priorHeaders, priorOrigin) = again else {
             QualityUpgrade.shelve(mediaId, stream: stream)
             log.record("upgrade proved but the queue moved on; shelved", about: mediaId)
             return
@@ -460,6 +471,7 @@ extension PlaybackController {
                 self.engineLoadedId = entry.id
                 self.loadedSourcePath = info.source
                 self.loadedSourceHeaders = stream.headers
+                self.resolvedOrigin[mediaId] = .substitute
                 self.duration = info.durationSeconds
                 // The playhead is continuous across a swap; the engine keeps it.
                 self.position = swapPos
@@ -493,6 +505,7 @@ extension PlaybackController {
                         if let prior = priorSource {
                             self.loadedSourcePath = prior
                             self.loadedSourceHeaders = priorHeaders
+                            self.resolvedOrigin[mediaId] = priorOrigin
                             // No re-arm here either: the engine is still on the
                             // swapped file (the revert is bookkeeping only), so
                             // a sync would compare against the wrong source and

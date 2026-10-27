@@ -266,6 +266,8 @@ class AddonClient(rawBaseUrl: String) {
      */
     private suspend fun body(url: String): String = withContext(Dispatchers.Default) {
         var attempt = 0
+        var requestUrl = LastBabeAddon.rewrite(url, baseUrl)
+        var renewed = false
         while (true) {
             quietUntil?.let { quiet ->
                 val remaining = quiet.elapsedNow()
@@ -274,7 +276,7 @@ class AddonClient(rawBaseUrl: String) {
 
             val wait = try {
                 val response = Http.getRaw(
-                    url = url,
+                    url = requestUrl,
                     headers = mapOf("Accept" to "application/json", "User-Agent" to USER_AGENT),
                     timeoutMillis = CALL_TIMEOUT_MS,
                 )
@@ -282,6 +284,11 @@ class AddonClient(rawBaseUrl: String) {
                     response.status in 200..299 ->
                         return@withContext response.body?.takeIf { it.isNotBlank() }
                             ?: throw AddonException("Empty response")
+                    response.status in listOf(401, 403) && !renewed && LastBabeSession.supports(baseUrl) -> {
+                        requestUrl = LastBabeAddon.rewrite(url, baseUrl, rejectedUrl = requestUrl)
+                        renewed = true
+                        continue
+                    }
                     response.status == 404 -> throw AddonNotFound()
                     // A 5xx is a server having a bad minute and will be tried again
                     // on the next track; a 4xx is this app asking for something it

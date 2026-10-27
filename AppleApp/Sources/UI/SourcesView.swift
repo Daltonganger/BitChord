@@ -215,6 +215,9 @@ struct SourcesView: View {
     @ViewBuilder
     private var orderFooter: some View {        VStack(alignment: .leading, spacing: 8) {
             Text("If a source does not have a track or cannot be reached, BitChord tries the next one. Sources above YouTube can replace its recording when they return a better version.")
+            if !AudioRouteState.shared.carriesLossless {
+                Text("Bluetooth compresses the output. Choosing Lossless still allows lossless sources; addons that require a lossless output need a speaker or wired connection.")
+            }
             if cappedByQuality {
                 Text("This connection is set below High quality, so streams are transcoded to fit that limit. Downloads are unaffected.")
             } else if !anyLosslessSource {
