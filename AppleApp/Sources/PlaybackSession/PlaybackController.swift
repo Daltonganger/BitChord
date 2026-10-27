@@ -851,7 +851,7 @@ final class PlaybackController {
     private var routeRecoveryGeneration: UInt64 = 0
     private func outputRouteChanged() {
         let route = AudioRouteState.shared
-        if !route.carriesLossless, let mediaId = current?.id {
+        if !PlaybackCodecCapabilities.shared.allowLosslessSources, let mediaId = current?.id {
             qualityUpgradeTask?.cancel()
             qualityUpgradeTask = nil
             QualityUpgrade.forget(mediaId)
