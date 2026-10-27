@@ -77,6 +77,9 @@ fn swap_to_an_identical_copy_reports_its_alignment() {
         rho > 0.99,
         "two byte-identical copies must correlate at 1.0, got {rho}"
     );
+    let snapshot = harness.nerd.lock().unwrap().clone();
+    assert_eq!(snapshot.swap_target, copy.display().to_string());
+    assert_eq!(snapshot.swap_accepted, Some(true));
     harness.finish();
 }
 
@@ -365,6 +368,9 @@ fn source_swap_with_mismatched_recording_is_rejected() {
         kbps, 96,
         "kbps must NOT be promoted to 320 when swap is rejected"
     );
+    let snapshot = harness.nerd.lock().unwrap().clone();
+    assert_eq!(snapshot.swap_target, mismatched.display().to_string());
+    assert_eq!(snapshot.swap_accepted, Some(false));
     harness.finish();
 }
 

@@ -201,6 +201,8 @@ pub struct NerdSnapshot {
     /// master are — and it is the only number that says whether the swap's
     /// linear fade is the flat one.
     pub swap_correlation: Option<f64>,
+    pub swap_target: String,
+    pub swap_accepted: Option<bool>,
     pub active_stages: Vec<String>,
     pub converter_delay_frames: f64,
     pub protection_reduction_db: f32,
@@ -233,6 +235,8 @@ impl MixerState {
             // not this track.
             let correlation = nerd.swap_correlation;
             let transition_match = nerd.transition_match_db;
+            let swap_target = nerd.swap_target.clone();
+            let swap_accepted = nerd.swap_accepted;
             *nerd = NerdSnapshot {
                 codec: info.codec.clone(),
                 sample_rate: info.sample_rate,
@@ -242,6 +246,8 @@ impl MixerState {
                 loudness_gain_db: gain_db,
                 swap_correlation: correlation,
                 transition_match_db: transition_match,
+                swap_target,
+                swap_accepted,
                 ..NerdSnapshot::default()
             };
         }
@@ -426,6 +432,11 @@ impl MixerState {
             seconds * 1000.0
         );
         self.swap_probe.reset();
+        if let Ok(mut nerd) = self.nerd.lock() {
+            nerd.swap_correlation = None;
+            nerd.swap_target = info.source.clone();
+            nerd.swap_accepted = None;
+        }
         self.incoming = Some(voice);
         self.transition = Some(TransitionState {
             phase: Phase::Fading,
