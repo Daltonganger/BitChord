@@ -5,6 +5,7 @@ import com.music.bitchord.data.sources.addon.AddonException
 import com.music.bitchord.data.sources.addon.AddonRefresh
 import com.music.bitchord.data.sources.addon.AddonRefreshSession
 import com.music.bitchord.data.sources.module.SharedCalls
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
@@ -24,6 +25,8 @@ class AddonRefreshTest {
         var now = 100_000L
         var stored: String? = null
         var gets = 0
+        var attempts = 0
+        var cancelled = false
         var posts = 0
         var unavailable = false
         var document: String? = null
@@ -34,6 +37,8 @@ class AddonRefreshTest {
         fun client() = AddonRefreshSession(
             refreshUrl = refresh,
             get = {
+                attempts++
+                if (cancelled) throw CancellationException("cancelled")
                 if (unavailable) error("outage with private response data")
                 if (it == refresh) { gets++; response() }
                 else {
@@ -150,6 +155,7 @@ class AddonRefreshTest {
         val error = runCatching { client.rewrite("$base/manifest.json", base) }.exceptionOrNull()!!
         assertFalse(error.message.orEmpty().contains("private response"))
         f.unavailable = false
+        f.now += 31
         assertTrue(client.rewrite("$base/manifest.json", base).startsWith(f.target))
     }
 
@@ -207,4 +213,53 @@ class AddonRefreshTest {
         }
         assertFailsWith<AddonException> { AddonRefreshSession.solve("fixture", 8) }
     }
+
+    @Test fun earlyRenewalFailureReusesValidLeaseWithoutRepeatedNetworkWork() = runTest {
+        val f = Fixture(); f.lifetime = 30; val client = f.client(); val base = "https://old.example"
+        val old = client.rewrite("$base/manifest.json", base)
+        f.now += 28; f.unavailable = true
+        repeat(20) { assertEquals(old, client.rewrite("$base/manifest.json", base)) }
+        assertEquals(2, f.attempts)
+        f.now += 31; f.unavailable = false
+        assertNotEquals(old, client.rewrite("$base/manifest.json", base))
+        assertEquals(3, f.attempts)
+    }
+
+    @Test fun expiredLeaseFailuresShareANonSlidingCooldownAcrossConcurrentCallers() = runTest {
+        val f = Fixture(); f.lifetime = 30; val client = f.client(); val base = "https://old.example"
+        client.rewrite("$base/manifest.json", base)
+        f.now += 31; f.unavailable = true
+        (1..20).map { async {
+            assertTrue(runCatching { client.rewrite("$base/manifest.json", base) }.isFailure)
+        } }.awaitAll()
+        assertEquals(2, f.attempts)
+        f.now += 20
+        assertTrue(runCatching { client.rewrite("$base/manifest.json", base) }.isFailure)
+        assertEquals(2, f.attempts)
+        f.now += 11; f.unavailable = false
+        client.rewrite("$base/manifest.json", base)
+        assertEquals(3, f.attempts)
+    }
+
+    @Test fun rejectedLeaseCannotBeReturnedByTheNextCallerDuringCooldown() = runTest {
+        val f = Fixture(); f.lifetime = null; val client = f.client(); val base = "https://old.example"
+        val old = client.rewrite("$base/manifest.json", base)
+        f.unavailable = true
+        assertTrue(runCatching { client.rewrite("$base/manifest.json", base, old) }.isFailure)
+        assertTrue(runCatching { client.rewrite("$base/manifest.json", base) }.isFailure)
+        assertEquals(2, f.attempts)
+        f.now += 31; f.unavailable = false
+        assertNotEquals(old, client.rewrite("$base/manifest.json", base))
+    }
+
+    @Test fun cancellationDoesNotPersistALeaseOrThrottleTheNextCaller() = runTest {
+        val f = Fixture(); val client = f.client(); val base = "https://old.example"
+        f.cancelled = true
+        assertFailsWith<CancellationException> { client.rewrite("$base/manifest.json", base) }
+        assertEquals(null, f.stored)
+        f.cancelled = false
+        client.rewrite("$base/manifest.json", base)
+        assertEquals(2, f.attempts)
+    }
+
 }
