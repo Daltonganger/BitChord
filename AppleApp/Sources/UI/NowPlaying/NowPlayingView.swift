@@ -12,7 +12,7 @@ import AppKit
 #endif
 
 /// Full Now Playing (UI spec §3.3). On macOS this *is* the window: traffic
-/// lights stay, close / volume / AirPlay live in the real toolbar, and the
+/// lights stay, back / volume / AirPlay live in the real toolbar, and the
 /// wash shows through a hidden title. On iPhone it is a swipe-to-dismiss
 /// sheet that zooms from the mini player; on iPad a full-screen cover with
 /// Music's grabber-plus-swipe dismissal (a sheet can no longer be trusted
@@ -33,7 +33,7 @@ struct NowPlayingView: View {
     @State var pane: PlayerPane = PlayerPane.restored
     #if os(macOS)
     /// The trailing spacer that puts AirPlay as far from the right edge as
-    /// Close is from the left.
+    /// Back is from the left.
     @State var trailingInset: CGFloat = 0
     #endif
     @State var lyricsControlsOpen = true
@@ -168,7 +168,7 @@ struct NowPlayingView: View {
         #endif
     }
 
-    // iOS only — macOS has its own window-toolbar close button, in
+    // iOS only — macOS has its own window-toolbar back button, in
     // `macPlayerToolbar`.
     #if os(iOS)
     @ToolbarContentBuilder
