@@ -12,7 +12,7 @@ import AppKit
 #endif
 
 // The Mac player: the window body, its toolbar, and the edge balance
-// between Close and AirPlay.
+// between Back and AirPlay.
 extension NowPlayingView {
     // ---- macOS: window-root player -----------------------------------------
     #if os(macOS)
@@ -52,14 +52,13 @@ extension NowPlayingView {
 
     @ToolbarContentBuilder
     var macPlayerToolbar: some ToolbarContent {
-        // Close by the traffic lights, and full screen beside it as its own
+        // Back by the traffic lights, and full screen beside it as its own
         // button; volume and AirPlay at the far end. The player spans the
         // whole window's toolbar (RootView collapses the sidebar while it is
         // up), so the flexible space reaches the trailing edge.
         if #available(macOS 26.0, *) {
             ToolbarItem(placement: .navigation) {
-                macCloseButton
-                    .frame(width: 32, height: 32)
+                macBackButton
                     .glassEffect(.regular.interactive(), in: Circle())
                     .background(WindowLeadingReader { closeLeading in
                         trailingInset = max(0, closeLeading - Self.systemTitlebarMargin)
@@ -75,7 +74,7 @@ extension NowPlayingView {
             .sharedBackgroundVisibility(.hidden)
             ToolbarSpacer(.flexible, placement: .primaryAction)
         } else {
-            ToolbarItem(placement: .navigation) { macCloseButton }
+            ToolbarItem(placement: .navigation) { macBackButton }
             ToolbarItem(placement: .navigation) { MacFullScreenButton() }
         }
 
@@ -99,7 +98,7 @@ extension NowPlayingView {
                     .help("AirPlay")
             }
             .sharedBackgroundVisibility(.hidden)
-            // As far from the right edge as Close is from the left.
+            // As far from the right edge as Back is from the left.
             ToolbarItem(placement: .primaryAction) {
                 Color.clear.frame(width: trailingInset, height: 1)
             }
@@ -131,15 +130,20 @@ extension NowPlayingView {
         return cachedTitlebarMargin ?? 0
     }
 
-    private var macCloseButton: some View {
-        Button("Close", systemImage: "xmark") {
+    private var macBackButton: some View {
+        Button {
             appModel.nowPlayingPresented = false
+        } label: {
+            Image(systemName: "chevron.left")
+                // Size the label so the whole visible button receives clicks.
+                .frame(width: 32, height: 32)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .keyboardShortcut(.cancelAction)
         .labelStyle(.iconOnly)
-        .help("Close")
-        .accessibilityLabel("Close")
+        .help("Back to Library")
+        .accessibilityLabel("Back to Library")
     }
 
     #endif
