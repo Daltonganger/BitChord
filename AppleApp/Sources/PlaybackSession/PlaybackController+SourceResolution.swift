@@ -43,7 +43,7 @@ extension PlaybackController {
         var origin: Origin = .other
         var youtubeVideoId: String? = nil
 
-        enum Origin: Sendable { case local, cache, youtube, substitute, other }
+        enum Origin: String, Sendable { case local, cache, youtube, substitute, other }
 
         var format: QualityUpgrade.Format {
             QualityUpgrade.Format(
