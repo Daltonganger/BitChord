@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -42,6 +43,7 @@ object SourceRegistry {
 
     private const val TAG = "BitChord"
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val refreshStorage = SourceRefreshStorage(PlatformSettings::readSecret, PlatformSettings::writeSecret)
 
     /** Every configured source, enabled or not. */
     private val _configs = MutableStateFlow<List<SourceConfig>>(emptyList())
@@ -49,6 +51,7 @@ object SourceRegistry {
     val configs: StateFlow<List<SourceConfig>>
         get() {
             init()
+            restoreUnavailableRefreshUrls()
             return configFlow
         }
 
@@ -157,22 +160,25 @@ object SourceRegistry {
             runCatching { json.decodeFromJsonElement(SourceConfig.serializer(), element) }
                 .onFailure { DebugLog.w("dropping unreadable stored source: ${it.message}") }
                 .getOrNull()?.let { config ->
-                    config.copy(refreshUrl = PlatformSettings.getSecret(refreshSecretAccount(config.id)) ?: config.refreshUrl)
+                    refreshStorage.restore(config)
                 }
         }
     }
 
     private fun writeStored(configs: List<SourceConfig>) {
-        configs.forEach { config ->
-            PlatformSettings.putSecret(refreshSecretAccount(config.id), config.refreshUrl.ifBlank { null })
-            check(PlatformSettings.getSecret(refreshSecretAccount(config.id)).orEmpty() == config.refreshUrl) {
-                "Could not securely save the addon renewal link"
-            }
+        refreshStorage.commit(configs, _configs.value) {
+            PlatformSettings.putString(
+                KEY_SOURCES,
+                json.encodeToString(ListSerializer(SourceConfig.serializer()), configs.map { it.copy(refreshUrl = "") }),
+            )
         }
-        PlatformSettings.putString(
-            KEY_SOURCES,
-            json.encodeToString(ListSerializer(SourceConfig.serializer()), configs.map { it.copy(refreshUrl = "") }),
-        )
+    }
+
+    private fun restoreUnavailableRefreshUrls() {
+        val before = _configs.value
+        if (before.none { it.refreshUrlUnavailable }) return
+        val after = before.map { if (it.refreshUrlUnavailable) refreshStorage.restore(it) else it }
+        if (before != after) publish(after, persist = false)
     }
 
     /**
@@ -189,6 +195,7 @@ object SourceRegistry {
      */
     fun active(): List<MusicSource> {
         init()
+        restoreUnavailableRefreshUrls()
         return enabledConfigs(_configs.value)
             .sortedBy { it.kind.rank }
             .mapNotNull { instances[it.id] }
@@ -217,11 +224,13 @@ object SourceRegistry {
 
     fun instance(configId: String): MusicSource? {
         init()
+        restoreUnavailableRefreshUrls()
         return instances[configId]
     }
 
     fun config(configId: String): SourceConfig? {
         init()
+        restoreUnavailableRefreshUrls()
         return _configs.value.firstOrNull { it.id == configId }
     }
 
@@ -234,7 +243,10 @@ object SourceRegistry {
 
     fun update(config: SourceConfig) {
         init()
-        val tidied = config.tidied()
+        val previous = this.config(config.id)
+        val tidied = config.tidied().let {
+            if (previous?.refreshUrlUnavailable == true && it.refreshUrl.isBlank()) it.copy(refreshUrlUnavailable = true) else it
+        }
         publish(_configs.value.map { if (it.id == tidied.id) tidied else it })
     }
 
@@ -258,9 +270,8 @@ object SourceRegistry {
         // then re-create by typing anything in.
         if (target.kind in BUILT_IN_KINDS) return
         // The secret outlives the config that named it, so drop it with them.
-        PlatformSettings.putSecret(secretAccount(target.id), null)
-        PlatformSettings.putSecret(refreshSecretAccount(target.id), null)
         publish(_configs.value.filterNot { it.id == configId })
+        PlatformSettings.putSecret(secretAccount(target.id), null)
     }
 
     /**
@@ -481,6 +492,7 @@ data class SourceConfig(
     val enabled: Boolean = kind != SourceKind.JIOSAAVN,
     val refreshEnabled: Boolean = false,
     val refreshUrl: String = "",
+    @Transient val refreshUrlUnavailable: Boolean = false,
 ) {
     /** What the sources screen and the player show. Never blank. */
     val displayName: String

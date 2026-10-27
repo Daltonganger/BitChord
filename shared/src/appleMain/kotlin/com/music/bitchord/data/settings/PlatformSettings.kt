@@ -57,6 +57,8 @@ actual object PlatformSettings {
     actual fun getSecret(key: String): String? = SecretStoreBridge.get(key)
 
     actual fun putSecret(key: String, value: String?) = SecretStoreBridge.put(key, value)
+    actual fun readSecret(key: String): SecretRead = SecretStoreBridge.read(key)
+    actual fun writeSecret(key: String, value: String?): Boolean = SecretStoreBridge.write(key, value)
 }
 
 /**
@@ -68,6 +70,12 @@ object SecretStoreBridge {
     interface Impl {
         fun get(key: String): String?
         fun put(key: String, value: String?)
+        fun read(key: String): SecretRead = SecretRead(get(key), true)
+        fun write(key: String, value: String?): Boolean {
+            put(key, value)
+            val result = read(key)
+            return result.available && result.value == value
+        }
     }
 
     @Volatile
@@ -78,6 +86,8 @@ object SecretStoreBridge {
     }
 
     fun get(key: String): String? = impl?.get(key)
+    fun read(key: String): SecretRead = impl?.read(key) ?: SecretRead(null, false)
+    fun write(key: String, value: String?): Boolean = impl?.write(key, value) ?: false
 
     fun put(key: String, value: String?) {
         impl?.put(key, value)
