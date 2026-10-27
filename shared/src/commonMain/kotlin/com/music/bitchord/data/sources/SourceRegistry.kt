@@ -156,14 +156,22 @@ object SourceRegistry {
         return elements.mapNotNull { element ->
             runCatching { json.decodeFromJsonElement(SourceConfig.serializer(), element) }
                 .onFailure { DebugLog.w("dropping unreadable stored source: ${it.message}") }
-                .getOrNull()
+                .getOrNull()?.let { config ->
+                    config.copy(refreshUrl = PlatformSettings.getSecret(refreshSecretAccount(config.id)) ?: config.refreshUrl)
+                }
         }
     }
 
     private fun writeStored(configs: List<SourceConfig>) {
+        configs.forEach { config ->
+            PlatformSettings.putSecret(refreshSecretAccount(config.id), config.refreshUrl.ifBlank { null })
+            check(PlatformSettings.getSecret(refreshSecretAccount(config.id)).orEmpty() == config.refreshUrl) {
+                "Could not securely save the addon renewal link"
+            }
+        }
         PlatformSettings.putString(
             KEY_SOURCES,
-            json.encodeToString(ListSerializer(SourceConfig.serializer()), configs),
+            json.encodeToString(ListSerializer(SourceConfig.serializer()), configs.map { it.copy(refreshUrl = "") }),
         )
     }
 
@@ -241,7 +249,7 @@ object SourceRegistry {
      * true for every caller and not just the one with a text field.
      */
     private fun SourceConfig.tidied(): SourceConfig =
-        if (kind == SourceKind.ADDON) copy(baseUrl = normalizeAddonBase(baseUrl)) else this
+        if (kind == SourceKind.ADDON) copy(baseUrl = normalizeAddonBase(baseUrl), refreshUrl = refreshUrl.trim()) else this
 
     fun remove(configId: String) {
         val target = config(configId) ?: return
@@ -251,6 +259,7 @@ object SourceRegistry {
         if (target.kind in BUILT_IN_KINDS) return
         // The secret outlives the config that named it, so drop it with them.
         PlatformSettings.putSecret(secretAccount(target.id), null)
+        PlatformSettings.putSecret(refreshSecretAccount(target.id), null)
         publish(_configs.value.filterNot { it.id == configId })
     }
 
@@ -298,6 +307,7 @@ object SourceRegistry {
     }
 
     private fun publish(next: List<SourceConfig>, persist: Boolean = true) {
+        if (persist) writeStored(next)
         _configs.value = next
         // Rebuilt against the previous map so an untouched source keeps the
         // instance it already had, rather than being replaced by an
@@ -307,7 +317,6 @@ object SourceRegistry {
             val existing = previous[config.id]?.takeIf { it.configuredBy(config) }
             config.id to (existing ?: build(config))
         }
-        if (persist) writeStored(next)
     }
 
     /**
@@ -374,6 +383,7 @@ object SourceRegistry {
      * try a request to a URL it no longer has.
      */
     internal fun secretAccount(configId: String): String = "source.$configId"
+    internal fun refreshSecretAccount(configId: String): String = "source-refresh.$configId"
 
     internal fun baseUrlOf(config: SourceConfig): String {
         if (!config.kind.needsServer) return config.baseUrl
@@ -469,6 +479,8 @@ data class SourceConfig(
     val baseUrl: String = "",
     /** JioSaavn is opt-in because catalogue matches can select the wrong recording. */
     val enabled: Boolean = kind != SourceKind.JIOSAAVN,
+    val refreshEnabled: Boolean = false,
+    val refreshUrl: String = "",
 ) {
     /** What the sources screen and the player show. Never blank. */
     val displayName: String
@@ -486,7 +498,8 @@ data class SourceConfig(
      * every walk, rather than the app trying a request to a URL it no longer has.
      */
     val isComplete: Boolean
-        get() = !kind.needsServer || SourceRegistry.baseUrlOf(this).isNotBlank()
+        get() = !kind.needsServer || (SourceRegistry.baseUrlOf(this).isNotBlank() &&
+            (!refreshEnabled || refreshUrl.isNotBlank()))
 }
 
 private fun hostOf(url: String): String? = runCatching {

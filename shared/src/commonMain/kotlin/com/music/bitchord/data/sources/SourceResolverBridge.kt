@@ -4,8 +4,7 @@ import com.music.bitchord.data.DebugLog
 import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.AudioQuality
-import com.music.bitchord.data.sources.addon.AddonClient
-import com.music.bitchord.data.sources.addon.AddonSessions
+import com.music.bitchord.data.sources.addon.AddonRefresh
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,7 +36,6 @@ import kotlinx.serialization.json.Json
  * substitute.
  */
 object SourceResolverBridge {
-    fun automaticallyRenewsAddon(url: String): Boolean = AddonSessions.supports(AddonClient.normalizeBase(url))
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val json = Json { ignoreUnknownKeys = true }
@@ -283,6 +281,11 @@ object SourceResolverBridge {
         baseUrl: String,
         label: String,
         callback: ActionCallback,
+    ) = probeCandidateWithRefresh(kind, baseUrl, label, false, "", callback)
+
+    fun probeCandidateWithRefresh(
+        kind: String, baseUrl: String, label: String,
+        refreshEnabled: Boolean, refreshUrl: String, callback: ActionCallback,
     ) {
         scope.launch {
             val resolved = SourceKind.entries.firstOrNull { it.name == kind }
@@ -297,6 +300,8 @@ object SourceResolverBridge {
                     label = label,
                     baseUrl = baseUrl,
                     enabled = true,
+                    refreshEnabled = refreshEnabled,
+                    refreshUrl = refreshUrl,
                 ),
             )
             // Reported through the action channel because it is one question with
@@ -324,8 +329,21 @@ object SourceResolverBridge {
         enabled: Boolean,
         callback: ActionCallback,
     ) {
+        val existing = SourceRegistry.config(id)
+        saveWithRefresh(id, kind, label, baseUrl, enabled,
+            existing?.refreshEnabled ?: false, existing?.refreshUrl.orEmpty(), callback)
+    }
+
+    fun saveWithRefresh(
+        id: String, kind: String, label: String, baseUrl: String, enabled: Boolean,
+        refreshEnabled: Boolean, refreshUrl: String, callback: ActionCallback,
+    ) {
         scope.launch {
             try {
+                if (refreshEnabled && (kind != "ADDON" || !AddonRefresh.validAddress(refreshUrl.trim()))) {
+                    callback.onResult(false, "Enter an HTTPS renewal link from the addon provider")
+                    return@launch
+                }
                 val resolved = SourceKind.entries.firstOrNull { it.name == kind }
                 if (resolved == null) {
                     callback.onResult(false, "Unknown kind \"$kind\"")
@@ -337,6 +355,8 @@ object SourceResolverBridge {
                     label = label,
                     baseUrl = baseUrl,
                     enabled = enabled,
+                    refreshEnabled = refreshEnabled,
+                    refreshUrl = refreshUrl,
                 )
                 if (SourceRegistry.config(id) == null) {
                     SourceRegistry.add(config)
@@ -468,6 +488,8 @@ object SourceResolverBridge {
                     needsServer = config.kind.needsServer,
                     canServeLossless = config.kind.canServeLossless,
                     labels = config.kind.labels,
+                    refreshEnabled = config.refreshEnabled,
+                    refreshUrl = config.refreshUrl,
                 )
             },
         )
@@ -516,6 +538,8 @@ data class ConfigDocument(
     val needsServer: Boolean,
     val canServeLossless: Boolean,
     val labels: List<String>,
+    val refreshEnabled: Boolean = false,
+    val refreshUrl: String = "",
 )
 
 @Serializable

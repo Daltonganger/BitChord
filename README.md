@@ -22,6 +22,7 @@ The current codebase includes:
 
 - YouTube Music search, browsing, and playback, with optional Google sign-in. Sign-in lets you review the profile before saving; accounts with multiple YouTube channels can switch profiles in Settings.
 - Configurable music sources and source modules, local music files, and WebDAV libraries.
+- Optional [automatic addon renewal](ADDON_REFRESH.md) using a renewal link supplied by the listener; no addon providers are bundled.
 - A native playback engine with downloads, queue management, gapless playback, crossfade, equalizer, and audio-route information.
 - Lyrics from multiple providers, including word-synced lyrics where a source supplies them.
 - Automix transitions with beat analysis. Optional analysis models can be downloaded in the app; Automix retains a fallback when they are not installed.
