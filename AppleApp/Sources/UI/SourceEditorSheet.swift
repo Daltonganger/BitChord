@@ -116,7 +116,7 @@ struct SourceEditorSheet: View {
     /// failure.
     private var urlHelp: String {
         if config.kind == "ADDON", SourceResolverBridge.shared.automaticallyRenewsAddon(url: normalised) {
-            return "Last Babe renews its temporary addon URL automatically when needed. You can keep the main website address here; BitChord checks it when you use the addon."
+            return "This addon renews its temporary URL automatically when needed. You can keep the main website address here; BitChord checks it when you use the addon."
         }
         switch config.kind {
         case "MODULE":

@@ -266,7 +266,7 @@ class AddonClient(rawBaseUrl: String) {
      */
     private suspend fun body(url: String): String = withContext(Dispatchers.Default) {
         var attempt = 0
-        var requestUrl = LastBabeAddon.rewrite(url, baseUrl)
+        var requestUrl = AddonSessions.rewrite(url, baseUrl)
         var renewed = false
         while (true) {
             quietUntil?.let { quiet ->
@@ -284,8 +284,8 @@ class AddonClient(rawBaseUrl: String) {
                     response.status in 200..299 ->
                         return@withContext response.body?.takeIf { it.isNotBlank() }
                             ?: throw AddonException("Empty response")
-                    response.status in listOf(401, 403) && !renewed && LastBabeSession.supports(baseUrl) -> {
-                        requestUrl = LastBabeAddon.rewrite(url, baseUrl, rejectedUrl = requestUrl)
+                    response.status in listOf(401, 403) && !renewed && AddonSessions.supports(baseUrl) -> {
+                        requestUrl = AddonSessions.rewrite(url, baseUrl, rejectedUrl = requestUrl)
                         renewed = true
                         continue
                     }
