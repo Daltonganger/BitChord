@@ -232,17 +232,17 @@ struct NowPlayingView: View {
             let line = nerdLine(nerd)
             if !line.trimmingCharacters(in: .whitespaces).isEmpty { return line }
         }
-        guard let current = controller.current else { return nil }
-        if current.isLocal { return "Playing from Local files" }
-        if current.source.hasPrefix("yt:") { return "Playing from YouTube" }
-        if !current.source.isEmpty { return "Playing from \(current.source)" }
-        return nil
+        return controller.playbackSourceName.map { "Playing from \($0)" }
     }
 
     /// The compact source caption that sits over upstream's full-bleed cover.
     /// Nerd statistics stay in the deck; they are not the origin of playback.
     var playbackOriginCaption: String? {
         guard !hideSongStatus, let current = controller.current else { return nil }
+        if controller.resolvedOrigin[current.id] == .substitute,
+           let source = controller.playbackSourceName {
+            return "Playing from \(source)"
+        }
         if let context = controller.playbackContext, !context.isEmpty {
             return "Playing from \(context)"
         }
