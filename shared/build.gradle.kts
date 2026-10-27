@@ -42,6 +42,7 @@ kotlin {
 
         commonTest.dependencies {
             implementation(kotlin("test"))
+            implementation("io.ktor:ktor-client-mock:3.5.2")
             // For `runTest` only. Kotlin/Native's `kotlin.test` refuses a `suspend`
             // test function outright, and a `@Test` that blocks the test thread
             // instead is how a suspended read deadlocks in CI rather than in a

@@ -5,7 +5,7 @@ import com.music.bitchord.data.model.Song
 import com.music.bitchord.data.settings.AppSettings
 import com.music.bitchord.data.settings.AudioQuality
 import com.music.bitchord.data.sources.addon.AddonClient
-import com.music.bitchord.data.sources.addon.LastBabeSession
+import com.music.bitchord.data.sources.addon.AddonSessions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,7 +37,7 @@ import kotlinx.serialization.json.Json
  * substitute.
  */
 object SourceResolverBridge {
-    fun automaticallyRenewsAddon(url: String): Boolean = LastBabeSession.supports(AddonClient.normalizeBase(url))
+    fun automaticallyRenewsAddon(url: String): Boolean = AddonSessions.supports(AddonClient.normalizeBase(url))
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val json = Json { ignoreUnknownKeys = true }

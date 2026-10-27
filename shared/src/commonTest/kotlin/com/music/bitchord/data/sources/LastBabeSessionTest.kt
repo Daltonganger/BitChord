@@ -2,10 +2,11 @@ package com.music.bitchord.data.sources
 
 import com.music.bitchord.data.crypto.Sha256
 import com.music.bitchord.data.sources.addon.AddonException
-import com.music.bitchord.data.sources.addon.LastBabeSession
+import com.music.bitchord.data.sources.addon.LastBabeSessionProvider
+import com.music.bitchord.data.sources.addon.AddonSession
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -16,6 +17,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
+// The real proof solver runs on Dispatchers.Default; use real deadlines here.
 class LastBabeSessionTest {
     private class Fixture {
         var now = 100_000L
@@ -24,39 +26,41 @@ class LastBabeSessionTest {
         var badHost = false
         var unavailable = false
         var rickroll = false
-        val root = LastBabeSession.ORIGIN
-        fun client() = LastBabeSession(
-            get = {
-                assertEquals("$root/challenge", it)
-                """{"challenge":"test-challenge","difficulty":1,"rickroll":$rickroll}"""
-            },
-            post = { url, body ->
-                assertEquals("$root/mint", url)
-                val proof = Json.parseToJsonElement(body).jsonObject
-                val digest = Sha256.digest((proof.getValue("challenge").jsonPrimitive.content +
-                    proof.getValue("nonce").jsonPrimitive.content).encodeToByteArray())
-                assertEquals(0, digest[0].toInt() and 0xf0)
-                if (unavailable) error("temporary outage")
-                minted++
-                val host = if (badHost) "https://elsewhere.example" else root
-                """{"manifestUrl":"$host/e/${now + 172800}/token$minted/manifest.json","expiresAt":${now + 172800}}"""
-            },
+        val root = LastBabeSessionProvider.ORIGIN
+        fun client() = AddonSession(
+            LastBabeSessionProvider(
+                get = {
+                    assertEquals("$root/challenge", it)
+                    """{"challenge":"test-challenge","difficulty":1,"rickroll":$rickroll}"""
+                },
+                post = { url, body ->
+                    assertEquals("$root/mint", url)
+                    val proof = Json.parseToJsonElement(body).jsonObject
+                    val digest = Sha256.digest((proof.getValue("challenge").jsonPrimitive.content +
+                        proof.getValue("nonce").jsonPrimitive.content).encodeToByteArray())
+                    assertEquals(0, digest[0].toInt() and 0xf0)
+                    if (unavailable) error("temporary outage")
+                    minted++
+                    val host = if (badHost) "https://elsewhere.example" else root
+                    """{"manifestUrl":"$host/e/${now + 172800}/token$minted/manifest.json","expiresAt":${now + 172800}}"""
+                },
+            ),
             read = { stored }, write = { stored = it }, now = { now },
         )
     }
 
     @Test fun onlyTheKnownProviderAndTokenPathsAreManaged() {
-        val root = LastBabeSession.ORIGIN
-        assertTrue(LastBabeSession.supports(root))
-        assertTrue(LastBabeSession.supports("$root:443"))
-        assertTrue(LastBabeSession.supports("$root/e/123456/token"))
+        val root = LastBabeSessionProvider.ORIGIN
+        assertTrue(LastBabeSessionProvider.supports(root))
+        assertTrue(LastBabeSessionProvider.supports("$root:443"))
+        assertTrue(LastBabeSessionProvider.supports("$root/e/123456/token"))
         for (url in listOf("$root.evil.example", "$root/other-config", "$root/e/1/t?secret=x",
             "https://user@lastbabe.velixir.run/e/1/t", "http://lastbabe.velixir.run", "$root:444/e/1/t")) {
-            assertFalse(LastBabeSession.supports(url), url)
+            assertFalse(LastBabeSessionProvider.supports(url), url)
         }
     }
 
-    @Test fun rootAndPreviouslyMintedAddressesRenewAndPreserveEncodedEndpoints() = runTest {
+    @Test fun rootAndPreviouslyMintedAddressesRenewAndPreserveEncodedEndpoints() = runBlocking {
         val f = Fixture(); val client = f.client()
         val suffix = "/stream/id%2Fpart?quality=LOSSLESS"
         val result = client.rewrite(f.root + suffix, f.root)
@@ -66,7 +70,7 @@ class LastBabeSessionTest {
         assertEquals(1, f.minted)
     }
 
-    @Test fun storedLeaseSurvivesAnotherClientAndCorruptStorageCanRecover() = runTest {
+    @Test fun storedLeaseSurvivesAnotherClientAndCorruptStorageCanRecover() = runBlocking {
         val f = Fixture()
         val first = f.client().rewrite(f.root + "/manifest.json", f.root)
         assertEquals(first, f.client().rewrite(f.root + "/manifest.json", f.root))
@@ -76,14 +80,14 @@ class LastBabeSessionTest {
         assertEquals(2, f.minted)
     }
 
-    @Test fun concurrentFirstRequestsShareOneMint() = runTest {
+    @Test fun concurrentFirstRequestsShareOneMint() = runBlocking {
         val f = Fixture(); val client = f.client()
         val answers = (1..20).map { async { client.rewrite(f.root + "/search?q=test", f.root) } }.awaitAll()
         assertEquals(1, answers.toSet().size)
         assertEquals(1, f.minted)
     }
 
-    @Test fun renewsBeforeExpiryWithoutChangingTheSavedConfiguration() = runTest {
+    @Test fun renewsBeforeExpiryWithoutChangingTheSavedConfiguration() = runBlocking {
         val f = Fixture(); val client = f.client()
         val before = client.rewrite(f.root + "/manifest.json", f.root)
         f.now += 172800 - 599
@@ -93,7 +97,7 @@ class LastBabeSessionTest {
         assertTrue(after.startsWith(f.root))
     }
 
-    @Test fun rejectedTokenRenewsOnceAndConcurrentOldRejectionsReuseTheNewToken() = runTest {
+    @Test fun rejectedTokenRenewsOnceAndConcurrentOldRejectionsReuseTheNewToken() = runBlocking {
         val f = Fixture(); val client = f.client()
         val old = client.rewrite(f.root + "/manifest.json", f.root)
         val fresh = client.rewrite(f.root + "/manifest.json", f.root, old)
@@ -102,29 +106,30 @@ class LastBabeSessionTest {
         assertEquals(2, f.minted)
     }
 
-    @Test fun failuresDoNotPersistOrPoisonTheNextAttempt() = runTest {
+    @Test fun failuresDoNotPersistOrPoisonTheNextAttempt() = runBlocking {
         val f = Fixture(); val client = f.client(); f.unavailable = true
         assertTrue(runCatching { client.rewrite(f.root + "/manifest.json", f.root) }.isFailure)
         assertEquals(null, f.stored)
         f.unavailable = false
+        f.now += 31
         assertTrue(client.rewrite(f.root + "/manifest.json", f.root).endsWith("/manifest.json"))
         assertEquals(1, f.minted)
     }
 
-    @Test fun unsafeMintedOriginIsRejectedWithoutStoringCredentials() = runTest {
+    @Test fun unsafeMintedOriginIsRejectedWithoutStoringCredentials() = runBlocking {
         val f = Fixture(); f.badHost = true
-        assertFailsWith<AddonException> { f.client().rewrite(f.root + "/manifest.json", f.root) }
+        assertFailsWith<com.music.bitchord.data.sources.addon.AddonUnavailable> { f.client().rewrite(f.root + "/manifest.json", f.root) }
         assertEquals(null, f.stored)
     }
 
-    @Test fun providerNonMusicModeDoesNotMintOrPretendToServeTheRequestedTrack() = runTest {
+    @Test fun providerNonMusicModeDoesNotMintOrPretendToServeTheRequestedTrack() = runBlocking {
         val f = Fixture(); f.rickroll = true
-        assertFailsWith<AddonException> { f.client().rewrite(f.root + "/manifest.json", f.root) }
+        assertFailsWith<com.music.bitchord.data.sources.addon.AddonUnavailable> { f.client().rewrite(f.root + "/manifest.json", f.root) }
         assertEquals(0, f.minted)
         assertEquals(null, f.stored)
     }
 
-    @Test fun ordinaryConfiguredPathsAreNeverRewrittenOrMinted() = runTest {
+    @Test fun ordinaryConfiguredPathsAreNeverRewrittenOrMinted() = runBlocking {
         val f = Fixture()
         val configured = "https://example.org/u/private-config"
         val url = "$configured/stream/track"
@@ -132,12 +137,13 @@ class LastBabeSessionTest {
         assertEquals(0, f.minted)
     }
 
-    @Test fun oddAndEvenProofDifficultiesAreSatisfiedAndInvalidWorkIsBounded() = runTest {
+    @Test fun oddAndEvenProofDifficultiesAreSatisfiedAndInvalidWorkIsBounded() = runBlocking {
         for (difficulty in 1..2) {
-            val nonce = LastBabeSession.solve("fixture", difficulty)
+            val nonce = LastBabeSessionProvider.solve("fixture", difficulty)
             val digest = Sha256.digest(("fixture" + nonce).encodeToByteArray())
             assertEquals(0, if (difficulty == 1) digest[0].toInt() and 0xf0 else digest[0].toInt())
         }
-        assertFailsWith<AddonException> { LastBabeSession.solve("fixture", 8) }
+        assertFailsWith<AddonException> { LastBabeSessionProvider.solve("fixture", 8) }
+        Unit
     }
 }

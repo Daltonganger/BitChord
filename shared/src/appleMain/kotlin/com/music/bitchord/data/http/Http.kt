@@ -106,6 +106,9 @@ actual object Http {
         followRedirects = false
     }.apply {
         plugin(HttpSend).intercept { initial ->
+            if (initial.attributes.getOrNull(com.music.bitchord.data.sources.addon.AddonSessionTransport.noRedirects) == true) {
+                return@intercept execute(initial)
+            }
             var request = initial
             var call = execute(request)
             repeat(5) {
