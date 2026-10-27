@@ -663,6 +663,9 @@ impl MixerState {
                     // so mismatched recordings/transcodes do not cut over.
                     if let Some(rho) = correlation {
                         if rho < 0.85 {
+                            if let Ok(mut nerd) = self.nerd.lock() {
+                                nerd.swap_accepted = Some(false);
+                            }
                             log::warn!(
                                 "source swap rejected: rho={rho:.4} < 0.85 \
                                  (mismatched recording or transcode)"
@@ -699,6 +702,9 @@ impl MixerState {
                         // playing, and that only becomes true here.
                         let db = self.current.as_ref().and_then(|v| v.loudness_db);
                         self.publish_nerd(&info, db);
+                        if let Ok(mut nerd) = self.nerd.lock() {
+                            nerd.swap_accepted = Some(true);
+                        }
                     }
                 }
                 // Old current dropped; its tail is spent by definition of the

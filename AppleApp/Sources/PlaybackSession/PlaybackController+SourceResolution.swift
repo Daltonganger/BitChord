@@ -65,71 +65,6 @@ extension PlaybackController {
         let leftover: Task<QualityUpgrade.Candidate?, Never>?
     }
 
-    /// Completes as soon as either source yields a usable stream. A task group
-    /// waits for every child when its scope exits, even after cancellation, so
-    /// it must not own the two independent lookups in this first-audio race.
-    private actor FirstUsableSourceRace {
-        enum Winner: Sendable {
-            case substitute(QualityUpgrade.Candidate)
-            case youtube(ResolvedSource)
-            case timedOut
-            case none
-        }
-
-        private var result: Winner?
-        private var lookupFinished = false
-        private var fallbackFinished = false
-        private var continuation: CheckedContinuation<Winner, Never>?
-        private var timeoutTask: Task<Void, Never>?
-
-        func wait(timeoutNanoseconds: UInt64 = 800_000_000) async -> Winner {
-            await withCheckedContinuation { continuation in
-                if let result {
-                    continuation.resume(returning: result)
-                } else {
-                    self.continuation = continuation
-                    timeoutTask = Task {
-                        try? await Task.sleep(nanoseconds: timeoutNanoseconds)
-                        await self.timeOut()
-                    }
-                }
-            }
-        }
-
-        private func timeOut() {
-            finish(.timedOut)
-        }
-
-        func finishLookup(_ candidate: QualityUpgrade.Candidate?) {
-            guard result == nil else { return }
-            if let candidate {
-                finish(.substitute(candidate))
-            } else {
-                lookupFinished = true
-                if fallbackFinished { finish(.none) }
-            }
-        }
-
-        func finishFallback(_ source: ResolvedSource?) {
-            guard result == nil else { return }
-            if let source {
-                finish(.youtube(source))
-            } else {
-                fallbackFinished = true
-                if lookupFinished { finish(.none) }
-            }
-        }
-
-        private func finish(_ winner: Winner) {
-            guard result == nil else { return }
-            result = winner
-            timeoutTask?.cancel()
-            timeoutTask = nil
-            continuation?.resume(returning: winner)
-            continuation = nil
-        }
-    }
-
     struct ResolvePrefs: Sendable {
         let maxKbps: Int
         let wantLossless: Bool
@@ -224,7 +159,8 @@ extension PlaybackController {
             )
         }
         let videoId = String(entry.source.dropFirst(3))
-        if let growing = streamGate.lock.withLock({ streamGate.growing[videoId] }),
+        if !(prefs.wantLossless && prefs.canSubstitute),
+           let growing = streamGate.lock.withLock({ streamGate.growing[videoId] }),
            FileManager.default.fileExists(atPath: growing) {
             await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cached", "stream cache")
             return ResolveOutcome(
@@ -262,8 +198,8 @@ extension PlaybackController {
     }
 
     /// Upstream `resolveWithModulePriority`: start YouTube and substitutes
-    /// together. First usable URL wins so a slow lookup cannot hold the first
-    /// note hostage. A lookup that loses is **not** cancelled — it is handed
+    /// together. Lossless gives configured sources up to three seconds to answer
+    /// before a ready YouTube fallback is selected. A lookup that loses is **not** cancelled — it is handed
     /// to QualityUpgrade as `inFlight`.
     private static func resolveWithModulePriority(
         _ entry: QueueEntry, videoId: String, prefs: ResolvePrefs,
@@ -303,12 +239,13 @@ extension PlaybackController {
             return ResolveOutcome(source: source, leftover: nil)
         }
 
-        let race = FirstUsableSourceRace()
+        let preferLossless = prefs.wantLossless && prefs.canSubstitute
+        let race = PlaybackSourceRace<QualityUpgrade.Candidate, ResolvedSource>(preferPrimary: preferLossless)
         _ = Task { await race.finishLookup(await lookup.value) }
         _ = Task { await race.finishFallback(try? await fallback.value) }
 
-        switch await race.wait(timeoutNanoseconds: 800_000_000) {
-        case .substitute(let stream):
+        switch await race.wait(timeoutNanoseconds: preferLossless ? 3_000_000_000 : 800_000_000) {
+        case .preferred(let stream):
             fallback.cancel()
             await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "source substitute")
             let source = ResolvedSource(
@@ -319,7 +256,7 @@ extension PlaybackController {
                 origin: .substitute
             )
             return ResolveOutcome(source: source, leftover: nil)
-        case .youtube(let source):
+        case .fallback(let source):
             // Preserve the slower substitute lookup for the in-playback quality
             // upgrade path instead of making it delay the first audible sample.
             await latencyResolved?(source.resolutionAt ?? ProcessInfo.processInfo.systemUptime,
@@ -341,6 +278,10 @@ extension PlaybackController {
                 await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", source.clientName ?? "recovered")
                 return ResolveOutcome(source: source, leftover: nil)
             }
+        case .cancelled:
+            lookup.cancel()
+            fallback.cancel()
+            throw CancellationError()
         case .none:
             // Preserve the resolver's actual failure instead of replacing
             // account/CDN errors with an uninformative "No stream".
