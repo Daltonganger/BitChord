@@ -48,7 +48,7 @@ internal object AddonRefresh {
                     get = { AddonSessionTransport.request(it) },
                     post = { address, body -> AddonSessionTransport.request(address, body) },
                     read = { PlatformSettings.getSecret(key) },
-                    write = { PlatformSettings.putSecret(key, it) },
+                    write = { check(PlatformSettings.writeSecret(key, it)) { "Could not securely save the renewed addon session" } },
                     now = { Clock.System.now().epochSeconds },
                 )
             }
@@ -73,6 +73,8 @@ internal class AddonRefreshSession(
     private val json = Json { ignoreUnknownKeys = true }
     private val lock = Mutex()
     private var current: Lease? = null
+    private var retryAfter = 0L
+    private var rejectedLeaseId: String? = null
 
     suspend fun cacheIdentity(base: String): String {
         rewrite(AddonClient.manifestUrl(base), base)
@@ -87,11 +89,20 @@ internal class AddonRefreshSession(
             val cached = current ?: read()?.let { runCatching { json.decodeFromString<Lease>(it) }.getOrNull() }
             val safe = cached?.takeIf { validBase(it.baseUrl) }
             val rejected = safe != null && rejectedUrl?.startsWith(safe.baseUrl + "/") == true
-            if (safe != null && (safe.expiresAt == null || safe.expiresAt > now()) &&
-                (safe.refreshAt == null || safe.refreshAt > now()) && !rejected) {
+            if (rejected) rejectedLeaseId = safe?.cacheId
+            val usable = safe != null && safe.cacheId != rejectedLeaseId &&
+                (safe.expiresAt == null || safe.expiresAt > now())
+            if (usable && (safe!!.refreshAt == null || safe.refreshAt > now())) {
                 current = safe
-                safe
+                checkNotNull(safe)
             } else {
+                if (now() < retryAfter) {
+                    if (usable) {
+                        current = safe
+                        return@withLock checkNotNull(safe)
+                    }
+                    throw AddonUnavailable("Addon renewal is temporarily unavailable; try again later")
+                }
                 try {
                     val fresh = withContext(Dispatchers.Default) {
                         withTimeoutOrNull(40_000) { renew() }
@@ -100,14 +111,17 @@ internal class AddonRefreshSession(
                     fresh.also {
                         write(json.encodeToString(Lease.serializer(), it))
                         current = it
+                        retryAfter = 0
+                        rejectedLeaseId = null
                     }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    retryAfter = now() + 30
                     // A temporarily unavailable renewal service need not interrupt a still-valid lease.
-                    if (!rejected && safe?.expiresAt != null && safe.expiresAt > now()) {
+                    if (usable) {
                         current = safe
-                        safe
+                        checkNotNull(safe)
                     } else if (e is AddonException) {
                         throw e
                     } else {

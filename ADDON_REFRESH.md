@@ -61,9 +61,17 @@ health checks and playback. A rejected token gets one renewal retry after HTTP
 401, 403 or 410; a missing manifest may also be retried once. A track's ordinary
 404 does not trigger renewal. A still-valid lease can keep playing through a
 temporary renewal-service failure, but a rejected or expired lease cannot.
+Failed renewals share a 30-second cooldown, so concurrent requests do not repeatedly
+contact an unavailable service. Cancellation does not start a cooldown.
 Cached manifest, search and stream answers are scoped to each issued lease, so
 renewal also discards stale answers when the provider returns the same base URL.
 
 Renewal is performed on demand. It does not require an iOS background timer or
 keep the app running while the listener is not using it. Failed renewals do not
 overwrite the configured source or discard other addons.
+
+A temporarily unavailable Keychain entry is distinct from a missing renewal
+link. Unrelated source edits do not rewrite renewal secrets, and unavailable
+links are restored when the Keychain becomes readable. Explicit link edits and
+removals must succeed in secure storage before the source list is published;
+storage failures are reported through the UI instead of escaping the native bridge.
