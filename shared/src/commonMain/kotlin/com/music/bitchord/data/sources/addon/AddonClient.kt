@@ -33,10 +33,11 @@ import kotlin.time.TimeSource
  * shaped by it survive across tracks — see [SourceRegistry]'s instance map and
  * [SharedCalls] for why sharing matters.
  */
-class AddonClient(rawBaseUrl: String) {
+class AddonClient(rawBaseUrl: String, refreshSource: String? = null) {
 
     /** Where this addon lives, with `/manifest.json` and trailing slashes off. */
     val baseUrl: String = normalizeBase(rawBaseUrl)
+    private val refreshUrl = refreshSource?.trim()?.takeIf { it.isNotEmpty() }
 
     private val json = Json {
         isLenient = true
@@ -76,26 +77,29 @@ class AddonClient(rawBaseUrl: String) {
      * URL they pasted, rather than the addon being accepted and then silently
      * returning nothing on every track.
      */
-    suspend fun manifest(): Result<AddonManifest> = manifests.get(
-        key = baseUrl,
-        describe = { "addon manifest(${redact(baseUrl)})" },
-    ) {
-        // Explicit type argument: `fetch` is reified, and here the expected type is
-        // not inferable through `mapCatching`, so inference has nothing to go on.
-        fetch<AddonManifest>(manifestUrl(baseUrl)).mapCatching { manifest ->
-            if (manifest.id.isBlank()) {
-                throw AddonException("That URL answered, but not with an addon manifest")
+    suspend fun manifest(): Result<AddonManifest> {
+        val identity = cacheIdentity().getOrElse { return Result.failure(it) }
+        return manifests.get(
+            key = identity,
+            describe = { "addon manifest(${redact(baseUrl)})" },
+        ) {
+            // Explicit type argument: `fetch` is reified, and here the expected type is
+            // not inferable through `mapCatching`, so inference has nothing to go on.
+            fetch<AddonManifest>(manifestUrl(baseUrl)).mapCatching { manifest ->
+                if (manifest.id.isBlank()) {
+                    throw AddonException("That URL answered, but not with an addon manifest")
+                }
+                if (!manifest.isPlayable) {
+                    val declared = manifest.resources.joinToString(", ")
+                    throw AddonException("This addon declares $declared — BitChord needs search and stream")
+                }
+                manifest
+            }.recoverCatching { failure ->
+                // A manifest 404 is not "no such track", it is "no addon here" — the
+                // one place the miss/fault distinction below has to be undone.
+                if (failure is AddonNotFound) throw AddonException("No manifest at that URL")
+                throw failure
             }
-            if (!manifest.isPlayable) {
-                val declared = manifest.resources.joinToString(", ")
-                throw AddonException("This addon declares $declared — BitChord needs search and stream")
-            }
-            manifest
-        }.recoverCatching { failure ->
-            // A manifest 404 is not "no such track", it is "no addon here" — the
-            // one place the miss/fault distinction below has to be undone.
-            if (failure is AddonNotFound) throw AddonException("No manifest at that URL")
-            throw failure
         }
     }
 
@@ -129,12 +133,13 @@ class AddonClient(rawBaseUrl: String) {
         val trimmed = query.trim()
         if (trimmed.isEmpty()) return Result.success(emptyList())
         val params = settingsFor(tier)
+        val identity = cacheIdentity().getOrElse { return Result.failure(it) }
         return searches.get(
             // The parameters are in the key because they are in the request: the
             // same query at a different quality is a different question, and an
             // addon whose catalogue differs by tier would otherwise answer the
             // second one with the first one's rows.
-            key = keyOf(trimmed, params.toString()),
+            key = keyOf(trimmed, params.toString(), identity),
             describe = { "addon search(${redact(baseUrl)}) q=\"$trimmed\" tier=$tier" },
         ) {
             fetch<AddonSearchResponse>(endpoint(listOf("search"), params + ("q" to trimmed)))
@@ -153,8 +158,9 @@ class AddonClient(rawBaseUrl: String) {
      */
     suspend fun stream(trackId: String, tier: String): Result<AddonStream> {
         val params = settingsFor(tier)
+        val identity = cacheIdentity().getOrElse { return Result.failure(it) }
         return streams.get(
-            key = keyOf(trackId, params.toString()),
+            key = keyOf(trackId, params.toString(), identity),
             describe = { "addon stream(${redact(baseUrl)}) tier=$tier" },
         ) {
             fetch<AddonStream>(endpoint(listOf("stream", trackId), params))
@@ -225,6 +231,13 @@ class AddonClient(rawBaseUrl: String) {
 
     // ── Transport ─────────────────────────────────────────────────────────
 
+    // A refreshed lease must not reuse a stream URL cached under an older lease,
+    // even when the provider returns the same base URL with a new lifetime.
+    private suspend fun cacheIdentity(): Result<String> =
+        runCatching { AddonRefresh.cacheIdentity(baseUrl, refreshUrl) }.onFailure {
+            if (it is CancellationException) throw it
+        }
+
     /** `{base}/{segments…}?{params}`, with every part properly encoded. */
     private fun endpoint(segments: List<String>, params: Map<String, String>): String {
         if (baseUrl.isBlank()) throw AddonException("That is not a usable address")
@@ -266,7 +279,7 @@ class AddonClient(rawBaseUrl: String) {
      */
     private suspend fun body(url: String): String = withContext(Dispatchers.Default) {
         var attempt = 0
-        var requestUrl = LastBabeAddon.rewrite(url, baseUrl)
+        var requestUrl = AddonRefresh.rewrite(url, baseUrl, refreshUrl)
         var renewed = false
         while (true) {
             quietUntil?.let { quiet ->
@@ -284,8 +297,9 @@ class AddonClient(rawBaseUrl: String) {
                     response.status in 200..299 ->
                         return@withContext response.body?.takeIf { it.isNotBlank() }
                             ?: throw AddonException("Empty response")
-                    response.status in listOf(401, 403) && !renewed && LastBabeSession.supports(baseUrl) -> {
-                        requestUrl = LastBabeAddon.rewrite(url, baseUrl, rejectedUrl = requestUrl)
+                    !renewed && refreshUrl != null && (response.status in listOf(401, 403, 410) ||
+                        (response.status == 404 && url.substringBefore('?').endsWith("/manifest.json"))) -> {
+                        requestUrl = AddonRefresh.rewrite(url, baseUrl, refreshUrl, rejectedUrl = requestUrl)
                         renewed = true
                         continue
                     }

@@ -23,6 +23,8 @@ struct SourceEditorSheet: View {
     @State private var testing = false
     @State private var result: TestOutcome?
     @State private var saving = false
+    @State private var autoRefresh = false
+    @State private var refreshUrl = ""
 
     struct TestOutcome {
         var name: String
@@ -56,6 +58,25 @@ struct SourceEditorSheet: View {
                     Text(urlHelp)
                 }
 
+                if config.kind == "ADDON" {
+                    Section {
+                        Toggle("Automatically renew temporary URLs", isOn: $autoRefresh)
+                        if autoRefresh {
+                            TextField("Renewal link from the addon provider", text: $refreshUrl)
+                                .textContentType(.URL)
+                                #if os(iOS)
+                                .keyboardType(.URL)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                #endif
+                        }
+                    } header: {
+                        Text("Automatic renewal")
+                    } footer: {
+                        Text("Use a renewal link supplied by the addon provider. Supported services can return a fresh addon URL automatically. Pages requiring sign-in or a CAPTCHA need manual renewal.")
+                    }
+                }
+
                 Section {
                     Button {
                         test()
@@ -66,7 +87,7 @@ struct SourceEditorSheet: View {
                             if testing { ProgressView().controlSize(.small) }
                         }
                     }
-                    .disabled(testing || normalised.isEmpty)
+                    .disabled(testing || !validConfiguration)
 
                     if let result, !testing {
                         Label {
@@ -79,7 +100,7 @@ struct SourceEditorSheet: View {
                     }
 
                     Button(isNew ? "Add" : "Save") { save() }
-                        .disabled(normalised.isEmpty || saving)
+                        .disabled(!validConfiguration || saving)
                 }
             }
             .formStyle(.grouped)
@@ -99,6 +120,8 @@ struct SourceEditorSheet: View {
         .onAppear {
             url = config.baseUrl
             name = config.label
+            autoRefresh = config.refreshEnabled ?? false
+            refreshUrl = config.refreshUrl ?? ""
         }
     }
 
@@ -112,12 +135,13 @@ struct SourceEditorSheet: View {
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
+    private var validConfiguration: Bool {
+        !normalised.isEmpty && (!autoRefresh || !refreshUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
     /// What the kind actually needs, said before the field rather than after a
     /// failure.
     private var urlHelp: String {
-        if config.kind == "ADDON", SourceResolverBridge.shared.automaticallyRenewsAddon(url: normalised) {
-            return "Last Babe renews its temporary addon URL automatically when needed. You can keep the main website address here; BitChord checks it when you use the addon."
-        }
         switch config.kind {
         case "MODULE":
             return "The module index — the JSON document listing plugins. Each plugin ships a JavaScript file that BitChord runs to search and stream."
@@ -152,11 +176,12 @@ struct SourceEditorSheet: View {
     /// only way to find out whether a pasted URL is any good would be to save it
     /// and then remove it again.
     private func test() {
-        guard !normalised.isEmpty else { return }
+        guard validConfiguration else { return }
         testing = true
         result = nil
-        SourceResolverBridge.shared.probeCandidate(
+        SourceResolverBridge.shared.probeCandidateWithRefresh(
             kind: kindName, baseUrl: normalised, label: name,
+            refreshEnabled: autoRefresh, refreshUrl: refreshUrl,
             callback: Verdict { ok, message in
                 Task { @MainActor in
                     testing = false
@@ -178,7 +203,7 @@ struct SourceEditorSheet: View {
     }
 
     private func save() {
-        guard !normalised.isEmpty else { return }
+        guard validConfiguration else { return }
         // Refuse a second copy of a source already configured. Same address,
         // different trailing slash, or written as its manifest rather than its
         // root — all the same source, and all of them would otherwise end up as
@@ -190,12 +215,14 @@ struct SourceEditorSheet: View {
             return
         }
         saving = true
-        SourceResolverBridge.shared.save(
+        SourceResolverBridge.shared.saveWithRefresh(
             id: config.id.nilIfEmpty ?? UUID().uuidString,
             kind: kindName,
             label: name,
             baseUrl: normalised,
             enabled: config.enabled,
+            refreshEnabled: autoRefresh,
+            refreshUrl: refreshUrl,
             callback: Saved { ok, message in
                 Task { @MainActor in
                     saving = false
