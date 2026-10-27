@@ -20,7 +20,7 @@ import com.music.bitchord.data.sources.addon.AddonUnavailable
  */
 class AddonSource(override val config: SourceConfig) : MusicSource, ConfigBacked {
 
-    private val client = AddonClient(SourceRegistry.baseUrlOf(config))
+    private val client = AddonClient(SourceRegistry.baseUrlOf(config), config.refreshUrl.takeIf { config.refreshEnabled })
 
     /** The manifest's policy flags, once read; the manifest call is cached anyway. */
     private suspend fun manifestFlags() = client.manifest().getOrNull()
