@@ -38,4 +38,9 @@ expect object PlatformSettings {
      */
     fun getSecret(key: String): String?
     fun putSecret(key: String, value: String?)
+    /** Available with a null value means missing; unavailable must never imply deletion. */
+    fun readSecret(key: String): SecretRead
+    fun writeSecret(key: String, value: String?): Boolean
 }
+
+data class SecretRead(val value: String?, val available: Boolean)

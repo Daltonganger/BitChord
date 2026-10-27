@@ -66,5 +66,10 @@ enum SecretStoreWiring {
         func get(key: String) -> String? { Keychain.get(key) }
 
         func put(key: String, value: String?) { Keychain.put(key, value) }
+        func read(key: String) -> SecretRead {
+            let result = Keychain.read(key)
+            return SecretRead(value: result.value, available: result.available)
+        }
+        func write(key: String, value: String?) -> Bool { Keychain.put(key, value) }
     }
 }
