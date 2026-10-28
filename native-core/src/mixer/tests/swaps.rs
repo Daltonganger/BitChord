@@ -460,32 +460,10 @@ fn source_swap_with_mismatched_recording_is_rejected() {
     let reply = reply_rx
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("the mixer must answer a swap");
-    assert!(reply.is_ok(), "swap initiation should succeed");
-
-    // Drain enough frames for the 550ms crossfade to run and finish_transition to trigger
-    for _ in 0..40 {
-        drain_frames(&mut harness.consumer, &harness.buffered, 44_100 / 4);
-        if harness.nerd.lock().unwrap().swap_correlation.is_some() {
-            break;
-        }
-    }
-
-    let (rho, kbps) = {
-        let nerd = harness.nerd.lock().unwrap();
-        (
-            nerd.swap_correlation
-                .expect("swap correlation must be measured"),
-            nerd.kbps,
-        )
-    };
-    assert!(
-        rho < 0.85,
-        "mismatched 440Hz vs 660Hz must yield rho < 0.85, got {rho}"
-    );
-    assert_eq!(
-        kbps, 96,
-        "kbps must NOT be promoted to 320 when swap is rejected"
-    );
+    assert!(reply.unwrap_err().contains("no confident PCM alignment"));
+    // Preflight refuses the candidate before any of its samples enter the mix.
+    drain_frames(&mut harness.consumer, &harness.buffered, 44_100 / 4);
+    assert_eq!(harness.nerd.lock().unwrap().kbps, 96);
     let snapshot = harness.nerd.lock().unwrap().clone();
     assert_eq!(snapshot.swap_target, mismatched.display().to_string());
     assert_eq!(snapshot.swap_accepted, Some(false));
@@ -587,4 +565,90 @@ fn skip_load_triggers_bail_flush_not_instant_flush() {
     );
 
     harness.finish();
+}
+
+#[test]
+fn preview_preserves_the_next_samples_and_audible_timeline() {
+    let (harness, low, _) = SwapHarness::new("preview-preserves-audio");
+    let mut reference = open_voice(&low);
+    let mut previewed = open_voice(&low);
+    assert_eq!(reference.pull(512, 48_000), previewed.pull(512, 48_000));
+    let position = previewed.emitted_position_seconds();
+    let emitted = previewed.emitted_dev_frames;
+    previewed.buffer_preview(12_000, 48_000);
+    assert!((previewed.emitted_position_seconds() - position).abs() < 1e-6);
+    assert_eq!(previewed.emitted_dev_frames, emitted);
+    assert_eq!(
+        reference.pull(13_000, 48_000),
+        previewed.pull(13_000, 48_000)
+    );
+    harness.finish();
+}
+
+#[test]
+fn swap_aligns_codec_delay_before_accepting_the_replacement() {
+    for delay_frames in [-137isize, 221] {
+        let (mut harness, low, high) = SwapHarness::new(&format!("codec-delay-{delay_frames}"));
+        let mut original = std::fs::read(&low).unwrap();
+        let mut x = 71u32;
+        for frame in original[44..].chunks_exact_mut(4) {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            let value = ((x as i32 / 131_072) as i16).to_le_bytes();
+            frame[..2].copy_from_slice(&value);
+            frame[2..].copy_from_slice(&value);
+        }
+        let mut delayed = original.clone();
+        for (index, frame) in delayed[44..].chunks_exact_mut(4).enumerate() {
+            let from = index as isize - delay_frames;
+            if from >= 0 && (from as usize + 1) * 4 <= original.len() - 44 {
+                frame.copy_from_slice(&original[44 + from as usize * 4..48 + from as usize * 4]);
+            } else {
+                frame.fill(0);
+            }
+        }
+        std::fs::write(&low, original).unwrap();
+        std::fs::write(&high, delayed).unwrap();
+        let (reply, loaded) = crossbeam_channel::bounded(1);
+        harness
+            .tx
+            .send(Command::Load {
+                request: SwapHarness::source(&low, "Original", 96),
+                reply,
+            })
+            .unwrap();
+        loaded
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        drain_frames(&mut harness.consumer, &harness.buffered, 44_100);
+        let (reply, submitted) = crossbeam_channel::bounded(1);
+        harness
+            .tx
+            .send(Command::SwapSource {
+                request: SwapHarness::source(&high, "Delayed copy", 320),
+                crossfade_seconds: 0.55,
+                reply,
+            })
+            .unwrap();
+        submitted
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        for _ in 0..20 {
+            drain_frames(&mut harness.consumer, &harness.buffered, 44_100 / 4);
+            if harness.nerd.lock().unwrap().swap_accepted.is_some() {
+                break;
+            }
+        }
+        let snapshot = harness.nerd.lock().unwrap().clone();
+        assert_eq!(snapshot.swap_accepted, Some(true), "delay={delay_frames}");
+        assert!(
+            snapshot.swap_correlation.unwrap() > 0.99,
+            "delay={delay_frames}"
+        );
+        assert_eq!(snapshot.kbps, 320);
+        harness.finish();
+    }
 }

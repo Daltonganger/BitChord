@@ -13,6 +13,10 @@ private actor SwapResultProbe {
 
 @main struct VerifySourcePriority {
     static func main() async {
+        precondition(PlaybackPreparationPolicy.lookupBudget(remainingSeconds: 180, transitionSeconds: 8) == 12.5)
+        precondition(PlaybackPreparationPolicy.lookupBudget(remainingSeconds: 15, transitionSeconds: 8) == 5)
+        precondition(PlaybackPreparationPolicy.lookupBudget(remainingSeconds: 10, transitionSeconds: 30) == 0.8)
+        precondition(PlaybackPreparationPolicy.lookupBudget(remainingSeconds: 0, transitionSeconds: 0) == 0.8)
         typealias Race = PlaybackSourceRace<String, String>
         let preferred = Race(preferPrimary: true)
         await preferred.finishFallback("youtube")
@@ -97,6 +101,6 @@ private actor SwapResultProbe {
         while await superseded.count() == 0 { await Task.yield() }
         await superseded.supersede()
         guard await obsolete.value == nil else { fatalError("An obsolete track must not update source metadata") }
-        print("PASS source priority (8 scenarios) and submitted swap reconciliation (3 scenarios)")
+        print("PASS source priority (8), submitted swap reconciliation (3), next-track timing (4 scenarios)")
     }
 }

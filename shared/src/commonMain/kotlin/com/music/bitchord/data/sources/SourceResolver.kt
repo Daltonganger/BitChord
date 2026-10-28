@@ -9,6 +9,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 
 /**
@@ -168,11 +169,9 @@ object SourceResolver {
      * substitutes something else for the track the user picked, and a loose match
      * plays the wrong song under the right title.
      *
-     * Every ranked source is asked at once and the first playable answer is taken —
-     * see [bestAcross]. This is the latency-critical half of the pair: it is racing
-     * YouTube's own walk, and a stream that arrives after that race is lost cannot
-     * start a track. The unhurried half is [upgradeFor], which runs with sound
-     * already playing and is where a slow source's better answer gets its hearing.
+     * Sources race concurrently. Lossless collects the best answer for up to
+     * 2.5 seconds; other tiers keep the first-usable latency policy. The host's
+     * separate three-second fallback deadline still bounds time to first sound.
      */
     suspend fun substituteForYouTube(target: TrackMatcher.Target): SourceStream? {
         // Video rows always use YouTube's own stream unless the listener explicitly
@@ -228,35 +227,25 @@ object SourceResolver {
         }
     }
 
-    /**
-     * The copy of [target] held by a source quick enough to ask about *before* the
-     * track is played — or null when no such source is enabled, or none has it.
-     *
-     * The same substitution [substituteForYouTube] makes, moved earlier. The
-     * difference is only which sources are asked: [SourceKind.worthPrefetching]
-     * narrows it to the ones that answer in a round trip rather than in ten seconds,
-     * because this runs speculatively for a track nobody has reached yet and a slow
-     * lookup would still be going when they did.
-     *
-     * ### What the caller must do with the answer
-     *
-     * Pin it. A returned stream is only useful if the *same* stream is what playback
-     * goes on to open, so the caller is expected to record it before caching a byte
-     * of it. Without that, playback re-runs the race, may land on a different
-     * source, and writes a second file into the cache entry the warm one already
-     * half-filled.
-     *
-     * Returning null is not a failure and needs no handling beyond falling back to
-     * YouTube: nothing has been pinned, so the ordinary resolve at playback time is
-     * untouched.
+    /** Prepare the next track using every preferred source, including slower addons.
+     * Lossless gets up to twelve seconds while the current track is still playing.
+     * The caller must retain this exact answer before buffering it.
      */
     suspend fun prefetchSubstitute(target: TrackMatcher.Target): SourceStream? {
         if (target.title.isBlank() || target.isVideo) return null
         val active = SourceRegistry.activeForPlayback()
         val youtube = active.firstOrNull { it.kind == SourceKind.YOUTUBE } ?: return null
-        val quick = rankedAbove(youtube.configId, active).filter { it.kind.worthPrefetching }
-        if (quick.isEmpty()) return null
-        val (source, stream) = bestAcross(quick, target, requestForNow()) ?: return null
+        val preferred = rankedAbove(youtube.configId, active)
+        val request = requestForNow()
+        val mayUseLossless = PlaybackCodecCapabilities.allowLosslessSources
+        val routeRequest = if (request is StreamRequest.Lossless && !mayUseLossless) StreamRequest.Best else request
+        val (source, stream) = bestAcross(
+            preferred, target, routeRequest,
+            waitForAll = true,
+            selectionWindowMs = if (routeRequest is StreamRequest.Lossless) 12_000 else 2_500,
+            allowLossless = mayUseLossless,
+            accept = { _, candidate -> mayUseLossless || candidate.format.isLossless != true },
+        ) ?: return null
         DebugLog.d("warmed: '${target.title}' from ${source.displayName} at ${stream.format.summary}")
         return stream
     }
@@ -576,42 +565,11 @@ object SourceResolver {
     }
 
     /**
-     * The best stream the given sources can serve for [target] — **all of them
-     * asked at once** — or null if none of them has the recording.
-     *
-     * ### Why they race rather than queue
-     *
-     * Asking them in rank order is the obvious reading of an ordered list, and it is
-     * wrong here, because the sources differ in speed by nearly two orders of
-     * magnitude. Measured upstream on one track: a JioSaavn search plus stream took
-     * ~0.4s while a module settled a stream in ~13.5s. Queued behind the module,
-     * the fast answer arrives at ~14s. Nobody waits that long for a song to start, so
-     * YouTube wins the race every single time and the listener gets 160kbps Opus —
-     * while a 320kbps copy sat four tenths of a second away.
-     *
-     * ### What rank still decides, and what it no longer does
-     *
-     * Rank decides who is *asked* — [rankedAbove] still builds this list — and it
-     * breaks ties between answers that arrive together, since each sweep folds in
-     * everything already across the line and picks the best of them with [isBetter].
-     * What it no longer does is let a slow favourite hold up a fast alternative.
-     *
-     * **A slow source is not thereby lost.** Whatever is returned here starts
-     * playing; if it is [SourceStream.belowRequest] the track is marked for a second
-     * look, and [upgradeFor] then asks *every* source again with no time limit and
-     * swaps up only if what comes back genuinely beats what is playing. So a source
-     * that needed thirteen seconds to find a FLAC still gets to serve it mid-track,
-     * and one that needed thirteen seconds to find a 128kbps MP3 is correctly
-     * ignored. That is the trade this whole path exists to make: sound now, quality
-     * shortly after.
-     *
-     * On the latency-critical path, sources still running when an answer is taken
-     * are cancelled — the second look re-asks them properly, and leaving them
-     * running would spend a listener's data on a result nothing is waiting for. The
-     * background-upgrade path passes [waitForAll] and so must collect the resulting
-     * streams before choosing: previously that flag only reached each source's
-     * search call, and this loop still returned the first usable stream and cancelled
-     * the rest, which could discard an exact FLAC during an upgrade.
+     * Ask sources concurrently and keep the best rendition. A positive
+     * [selectionWindowMs] bounds collection, including patient per-source lookups;
+     * expiry returns the best completed answer and cancels outstanding work.
+     * With no window, [waitForAll] chooses between first usable and all results.
+     * Equal-quality answers follow the configured source order.
      */
     internal suspend fun bestAcross(
         sources: List<MusicSource>,
@@ -621,6 +579,7 @@ object SourceResolver {
         strictLength: Boolean = false,
         requireSharedArtist: Boolean = false,
         allowLossless: Boolean = true,
+        selectionWindowMs: Long = if (!waitForAll && request is StreamRequest.Lossless) 2_500 else 0,
         accept: (MusicSource, SourceStream) -> Boolean = { _, _ -> true },
     ): Pair<MusicSource, SourceStream>? = coroutineScope {
         val running: MutableList<Deferred<Pair<MusicSource, SourceStream?>>> = sources
@@ -639,7 +598,7 @@ object SourceResolver {
             }
             .toMutableList()
         var best: Pair<MusicSource, SourceStream>? = null
-        try {
+        suspend fun collect() {
             while (running.isNotEmpty()) {
                 val first = select {
                     running.forEach { candidate -> candidate.onAwait { candidate } }
@@ -654,13 +613,27 @@ object SourceResolver {
                     val (source, stream) = done.await()
                     if (stream == null) continue
                     if (!accept(source, stream)) continue
-                    if (isBetter(stream.format, best?.second?.format)) best = source to stream
+                    val previous = best
+                    if (isBetter(stream.format, previous?.second?.format) ||
+                        (previous != null && !isBetter(previous.second.format, stream.format) &&
+                            sources.indexOf(source) < sources.indexOf(previous.first))) {
+                        best = source to stream
+                    }
                 }
                 // Playback needs the first usable answer so sound can start. An upgrade
                 // is different: it runs while audio is already playing, and its caller
                 // explicitly requested every source's patient result. Let every source
                 // finish so a fast lower tier cannot cancel a later, better rendition.
-                if (best != null && !waitForAll) break
+                if (best != null && !waitForAll && selectionWindowMs <= 0) break
+            }
+        }
+        try {
+            if (selectionWindowMs > 0) {
+                // Keep the best answer across the whole bounded window. A fast
+                // transcode must not cancel another provider's pending FLAC.
+                withTimeoutOrNull(selectionWindowMs) { collect() }
+            } else {
+                collect()
             }
         } finally {
             running.forEach { it.cancel() }

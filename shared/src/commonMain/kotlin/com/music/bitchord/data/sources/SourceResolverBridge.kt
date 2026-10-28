@@ -143,7 +143,7 @@ object SourceResolverBridge {
     }
 
     /**
-     * The copy a source quick enough to ask about *before* the track is played.
+     * The best copy within the next-track preparation window, including slow addons.
      *
      * The caller is expected to **pin** a returned stream before caching any of it,
      * or playback re-runs the race and may land on a different source — writing a

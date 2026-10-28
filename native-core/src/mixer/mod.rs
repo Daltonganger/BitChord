@@ -20,6 +20,7 @@ mod deck;
 mod fx;
 mod render;
 mod state;
+mod swap_alignment;
 mod transition;
 mod types;
 mod voice;

@@ -592,6 +592,18 @@ impl Voice {
         Some((total - self.emitted_position_seconds()).max(0.0))
     }
 
+    /// Decode ahead without advancing the audible timeline. Existing buffered
+    /// frames are retained, including any resampler tail beyond the preview.
+    pub(super) fn buffer_preview(&mut self, frames: usize, device_rate: u32) {
+        let emitted = self.emitted_dev_frames;
+        let preview = self.pull(frames, device_rate);
+        let rest = self.pending_dev.split_off(self.pending_dev_cursor);
+        self.pending_dev = preview;
+        self.pending_dev.extend_from_slice(&rest);
+        self.pending_dev_cursor = 0;
+        self.emitted_dev_frames = emitted;
+    }
+
     /// Decode the first `frames` of an armed incoming into `pending_dev`
     /// without emitting them. The decoder, resampler and stretch are primed,
     /// and the buffer is what `pull` serves when the blend starts — so the

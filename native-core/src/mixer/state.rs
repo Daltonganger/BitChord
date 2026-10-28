@@ -403,7 +403,10 @@ impl MixerState {
             .map(|voice| voice.emitted_position_seconds())
             .unwrap_or(0.0);
         let mut request = request;
-        request.start_seconds = anchor;
+        // Leave room before the nominal position for either sign of codec delay.
+        let speed = self.playback_speed as f64;
+        request.start_seconds =
+            (anchor - super::swap_alignment::MAX_OFFSET_SECONDS * speed).max(0.0);
         let mut voice = Voice::open(
             &request,
             self.spatial_enabled && self.sound_mode == SoundMode::Enhanced,
@@ -413,6 +416,21 @@ impl MixerState {
             self.skip_silence && self.sound_mode == SoundMode::Enhanced,
             false,
         )?;
+        if let Ok(mut nerd) = self.nerd.lock() {
+            nerd.swap_correlation = None;
+            nerd.swap_target = voice.info.source.clone();
+            nerd.swap_accepted = None;
+        }
+        if let Err(error) = super::swap_alignment::align(
+            self.current.as_mut().unwrap(),
+            &mut voice,
+            self.device_rate,
+        ) {
+            if let Ok(mut nerd) = self.nerd.lock() {
+                nerd.swap_accepted = Some(false);
+            }
+            return Err(error);
+        }
         voice.gain = 0.0; // silent until the fade lifts it
         voice.applied_gain = 0.0;
         let info = voice.info.clone();

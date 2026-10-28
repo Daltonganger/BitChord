@@ -40,6 +40,8 @@ extension PlaybackController {
             }
         }
         durationRepairTask?.cancel()
+        nextPreparationTask?.cancel()
+        nextPreparationTask = nil
         playGeneration += 1
         let generation = playGeneration
         resumeGeneration &+= 1
