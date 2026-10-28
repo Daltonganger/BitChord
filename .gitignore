@@ -42,3 +42,9 @@ docs/
 # sandboxed run has to relocate them here; neither is part of the project.
 .gradle-sandbox/
 .konan-sandbox/
+
+# Local device captures and investigation reports must stay private.
+/native-core/audio-validation/
+/AppleApp/tests/NativeResumeDeviceVerification/
+/AppleApp/tests/NowPlayingDeviceFindings.md
+/AppleApp/tests/NowPlayingMixingRepro/device-*

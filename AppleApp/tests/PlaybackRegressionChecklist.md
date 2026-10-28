@@ -1,0 +1,79 @@
+# Playback and native Now Playing regression checks
+
+Automated checks:
+
+- `bash scripts/check-now-playing.sh`: audio readiness, pause/stop during
+  publication or promotion, preparation before engine playback, uncancellable
+  requests across resume, superseded successful publication, retained
+  sessions, bounded retries, invalidation recovery, content identity and
+  foreground-only system takeover.
+- `bash scripts/check-transport.sh`: blocked loads, superseded selections,
+  queue revisions and automatic handoff invalidation.
+- `cargo test --manifest-path native-core/Cargo.toml --lib`: mixer, transitions,
+  quality swaps, resampling and stale-source command rejection.
+- `bash scripts/check-engine.sh`: real Mac output, muted load/commit,
+  pause during concurrent output preparation and stale quality swaps.
+- Regenerate native frameworks with `scripts/build-native-core.sh` before
+  building the app; the Swift bindings include the source-scoped commands.
+
+Device verification (iOS/iPadOS 27):
+
+1. Play a queue with at least three songs. Lock the device. Native Now Playing
+   must show the selected song with next, previous, play/pause and seeking.
+2. Pause during initial loading, then wait for the download to finish. It must
+   remain silent. Play again, then rapidly next/back/pause. Only the latest
+   selection may play; a final pause must remain paused.
+3. First test BitChord alone, including cold play, restored play, pause/resume,
+   rapid skipping, locking and returning to the foreground. Verify its native
+   metadata, seeking and transport controls. Mixing follows only the listener's
+   preference, in both foreground and background. Test another audio app started
+   both before and after BitChord; record effective session options at each step.
+   Stop the competing app and verify system arbitration while BitChord stays
+   in the background. Apple controls which session receives prominence.
+   Repeat with mixing disabled as an explicitly chosen exclusive-mode control.
+   While playing, change Play Alongside Other Apps in Settings: the effective
+   options must follow that explicit choice immediately and the publication log
+   must identify `mixing preference changed`. Changing it while paused must not
+   resume playback. An ordinary iOS pause retains its active session so native
+   controls remain available; changing mode during that pause must apply the
+   choice without playing audio or requesting takeover. Native controls are not guaranteed for a mixable session;
+   Apple's WWDC22 eligibility guidance requires nonmixable audio.
+   The main-pane pill must show Audio Output, the waveform mixing toggle, then
+   Listen Together. Highlighted waveform means mixing enabled. Verify its value
+   agrees with Settings, survives relaunch, and follows rapid toggles while
+   playing or loading. Pause or stop during activation: late completion must
+   not promote or restart playback. Check portrait/landscape and iPad; the queue
+   pill keeps its four controls, lyrics keeps the existing two, and macOS has
+   no mixing button or new preference-update logic.
+4. Repeat next/back/pause from the Lock Screen, Control Center, Dynamic Island
+   and headphones. Repeat on iPad (without Dynamic Island).
+   Native Pause/Play must settle on the actual state without oscillating. Resume
+   quickly and after a longer pause: audio must continue cleanly at the paused
+   position. An unchanged iOS output format should log `resume retained output`
+   without an output rebuild/decoder seek only while activation stayed valid.
+   On iOS, Pause must log `iOS output rendering paused` while retaining session
+   activation; Resume must log `iOS output rendering started`. A silent but
+   continuously running RemoteIO callback is not a transport pause.
+   Deactivation/interruption requires recovery even if the format is unchanged.
+   Change routes while paused and repeat
+   to check recovery, then rapidly alternate Pause/Play during activation.
+5. Enable Automix and allow a natural handoff. Only the intended transition may
+   overlap. Skip during the blend: the outgoing voices must stop. Pause/resume
+   during the blend: neither track may continue during the pause.
+6. Change output routes during playback and while paused. A paused track must
+   stay paused; a later play must use the new route.
+7. Upgrade from the version with custom Live Activities. Any old card should
+   disappear; playback must not create an ActivityKit card.
+
+Apple documents application-primary publication separately from foreground-only
+system takeover. `requestToBecomeSystemPrimary()` is a request, not a guarantee:
+https://developer.apple.com/documentation/nowplaying/mediasession/requesttobecomesystemprimary()
+
+For missing controls, open the song menu's Debug log. Capture the OS build,
+route, mixing setting and reproduction sequence alongside the audio activation
+outcome/options and Now Playing eligibility, application-primary and
+system-primary status. Publication failure and prominence refusal are separate
+log events. Do not treat a passing build or coordinator test as proof that iOS
+will grant prominence to a mixable session. If activation succeeds but iOS
+rejects publication or prominence, preserve mixing and use these diagnostics
+for a reproducible platform issue.
