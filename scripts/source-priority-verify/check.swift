@@ -1,5 +1,16 @@
 import Foundation
 
+private actor SwapResultProbe {
+    var current = true
+    var result: Bool?
+    var polls = 0
+    func isCurrent() -> Bool { current }
+    func outcome() -> Bool? { polls += 1; return result }
+    func count() -> Int { polls }
+    func finish(_ result: Bool) { self.result = result }
+    func supersede() { current = false }
+}
+
 @main struct VerifySourcePriority {
     static func main() async {
         typealias Race = PlaybackSourceRace<String, String>
@@ -61,6 +72,31 @@ import Foundation
         guard case .preferred("flac") = await waiting.value else {
             fatalError("Lossless arriving after YouTube must still win within the selection window")
         }
-        print("PASS source priority: preferred / fast-start / miss / deadline / late result / failures / cancellation / asynchronous arrival")
+        for result in [true, false] {
+            let probe = SwapResultProbe()
+            let submitted = Task {
+                await PlaybackSwapConfirmation.wait(
+                    isCurrent: { await probe.isCurrent() },
+                    outcome: { await probe.outcome() }, pollNanoseconds: 1_000_000
+                )
+            }
+            while await probe.count() == 0 { await Task.yield() }
+            submitted.cancel() // Models a route change after native submission.
+            await probe.finish(result)
+            guard await submitted.value == result else {
+                fatalError("Cancelling the lookup must still reconcile the submitted native result")
+            }
+        }
+        let superseded = SwapResultProbe()
+        let obsolete = Task {
+            await PlaybackSwapConfirmation.wait(
+                isCurrent: { await superseded.isCurrent() },
+                outcome: { await superseded.outcome() }, pollNanoseconds: 1_000_000
+            )
+        }
+        while await superseded.count() == 0 { await Task.yield() }
+        await superseded.supersede()
+        guard await obsolete.value == nil else { fatalError("An obsolete track must not update source metadata") }
+        print("PASS source priority (8 scenarios) and submitted swap reconciliation (3 scenarios)")
     }
 }
