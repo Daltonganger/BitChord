@@ -763,12 +763,12 @@ object AppSettings {
         val clean=value.copy(wet=value.wet.takeIf { it.isFinite() }?.coerceIn(0f,1f) ?: 1f,trimsDb=List(8) { i -> value.trimsDb.getOrNull(i)?.takeIf { it.isFinite() }?.coerceIn(-12f,12f) ?: 0f })
         _clarityTuning.value=clean;settings.putString("clarity_preset",clean.preset.name);settings.putFloat("clarity_wet",clean.wet);settings.putString("clarity_trims",clean.trimsDb.joinToString(","))
     }
-    // Existing normalization preference is preserved, while a fresh profile starts Off.
-    private val _loudnessMode = MutableStateFlow(LoudnessMode.entries.firstOrNull { it.name == settings.getString("loudness_mode", if(settings.getBoolean("loudness_normalization",false)) "TRACK" else "OFF") } ?: LoudnessMode.OFF)
+    // Preserve explicit Off; otherwise retain the upstream and legacy Track default.
+    private val _loudnessMode = MutableStateFlow(LoudnessMode.entries.firstOrNull { it.name == settings.getString("loudness_mode", if(settings.getBoolean("loudness_normalization",true)) "TRACK" else "OFF") } ?: LoudnessMode.OFF)
     val loudnessMode: StateFlow<LoudnessMode> = _loudnessMode.asStateFlow()
     fun setLoudnessMode(value: LoudnessMode) { _loudnessMode.value=value;settings.putString("loudness_mode",value.name);setLoudnessNormalization(value!=LoudnessMode.OFF) }
 
-    private val _loudnessNormalization = MutableStateFlow(settings.getBoolean("loudness_normalization", false))
+    private val _loudnessNormalization = MutableStateFlow(_loudnessMode.value != LoudnessMode.OFF)
     val loudnessNormalization: StateFlow<Boolean> = _loudnessNormalization.asStateFlow()
     fun setLoudnessNormalization(value: Boolean) {
         _loudnessNormalization.value = value

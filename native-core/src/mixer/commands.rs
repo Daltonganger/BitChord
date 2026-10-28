@@ -40,6 +40,10 @@ pub(super) fn handle_command(state: &mut MixerState, cmd: Command, ring: &mut Pr
                 true,
             ) {
                 Ok(mut voice) => {
+                    voice.normalization_mode = state.loudness_mode;
+                    // A fresh track must enter at its selected level, rather
+                    // than spend its first 50 ms driving an unneeded limiter.
+                    voice.arm_transition_match(None, state.loudness_enabled);
                     voice.bit_perfect = state.bit_perfect
                         && crate::output::is_lossless_pcm_codec(&voice.info.codec)
                         && voice.info.sample_rate == state.device_rate
@@ -47,10 +51,7 @@ pub(super) fn handle_command(state: &mut MixerState, cmd: Command, ring: &mut Pr
                         && voice.info.channels == 2;
                     let info = voice.info.clone();
                     let duration = voice.info.duration_seconds;
-                    let (_, gain_db) = loudness_gain(
-                        voice.loudness_db,
-                        state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
-                    );
+                    let (_, gain_db) = loudness_gain(voice.loudness_db, state.loudness_enabled);
                     if let Ok(mut nerd) = state.nerd.lock() {
                         *nerd = NerdSnapshot {
                             codec: info.codec.clone(),
@@ -234,6 +235,8 @@ pub(super) fn handle_command(state: &mut MixerState, cmd: Command, ring: &mut Pr
                     true,
                 ) {
                     Ok(mut voice) => {
+                        voice.normalization_mode = state.loudness_mode;
+                        voice.arm_transition_match(None, state.loudness_enabled);
                         // Same landing as a Load: ramp out the backlog, drop
                         // every straggler, start the new voice at the top.
                         state.hard_cut();
@@ -241,10 +244,7 @@ pub(super) fn handle_command(state: &mut MixerState, cmd: Command, ring: &mut Pr
                         voice.release_plan_stretch(state.playback_speed, state.device_rate);
                         let info = voice.info.clone();
                         let duration = info.duration_seconds;
-                        let (_, gain_db) = loudness_gain(
-                            voice.loudness_db,
-                            state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
-                        );
+                        let (_, gain_db) = loudness_gain(voice.loudness_db, state.loudness_enabled);
                         if let Ok(mut nerd) = state.nerd.lock() {
                             *nerd = NerdSnapshot {
                                 codec: info.codec.clone(),
@@ -536,9 +536,6 @@ pub(super) fn handle_command(state: &mut MixerState, cmd: Command, ring: &mut Pr
                 state.bail_flush.store(true, Ordering::Release);
             }
             for voice in state.current.iter_mut().chain(state.incoming.iter_mut()) {
-                if mode == SoundMode::Transparent {
-                    voice.smoothed_normalization = 1.0;
-                }
                 voice.spatial.set_enabled(
                     mode == SoundMode::Enhanced
                         && state.spatial_enabled

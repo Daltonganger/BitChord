@@ -241,8 +241,11 @@ do {
     ))
     Thread.sleep(forTimeInterval: 0.1)
     let transparent = engine.nerdStats()
-    check("Transparent bypasses selected normalization", transparent.loudnessGainDb == nil)
+    check("Transparent honors selected normalization", transparent.loudnessGainDb == -7 && transparent.activeStages.contains("Normalization"))
     check("Transparent has no clarity or protection stage", !transparent.activeStages.contains { $0.contains("clarity") || $0.contains("True-peak") })
+    try engine.setLoudnessMode(mode: .off)
+    Thread.sleep(forTimeInterval: 0.1)
+    check("Transparent respects explicit normalization Off", engine.nerdStats().loudnessGainDb == nil)
     try engine.setSoundMode(mode: .enhanced)
     try engine.setLoudnessMode(mode: .track)
     try engine.loadTrack(request: LoadRequest(
