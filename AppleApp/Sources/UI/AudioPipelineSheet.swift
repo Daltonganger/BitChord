@@ -45,6 +45,9 @@ struct AudioPipelineSheet: View {
                         row("Claimed Quality", claimedQuality)
                         row("Measured Stream", measuredStream)
                         row("Source", sourceName)
+                        if let id = controller.current?.id, let note = controller.sourceDecisionNotes[id] {
+                            row("Source decision", note)
+                        }
                         row("Format", codec)
                         row("Bit Depth", bitDepth)
                         row("Sample Rate", sourceRate)

@@ -131,6 +131,10 @@ object StreamResolver {
         botCheckedUntil.store(null)
         DebugLog.d("session changed; cleared upstream resolver flights and media URLs")
     }
+    fun forgetPlaybackUrl(videoId: String) {
+        recent.update { map -> map.entries.removeAll { it.key.split("|").getOrNull(1) == videoId } }
+    }
+
     fun onPlaybackRefused(url: String, responseCode: Int) {
         if (responseCode !in setOf(403, 404, 410)) return
         recent.update { map -> map.entries.removeAll { it.value.stream.url == url } }

@@ -25,6 +25,7 @@ unsafe impl Sync for CallbackHolder {}
 #[derive(Default)]
 pub(super) struct SharedEvents {
     pub(super) inner: Mutex<Option<CallbackHolder>>,
+    pub(super) source_errors: Mutex<Vec<crate::SourceErrorRec>>,
 }
 
 impl EngineEvents for SharedEvents {
@@ -42,6 +43,13 @@ impl EngineEvents for SharedEvents {
         if let Some(holder) = self.inner.lock().unwrap().as_ref() {
             holder.0.on_error(message);
         }
+    }
+    fn source_error(&self, source: String, message: String) {
+        let mut errors = self.source_errors.lock().unwrap();
+        if errors.len() >= 16 {
+            errors.remove(0);
+        }
+        errors.push(crate::SourceErrorRec { source, message });
     }
     fn handoff(&self, info: TrackInfo) {
         if let Some(holder) = self.inner.lock().unwrap().as_ref() {
@@ -62,5 +70,21 @@ impl EngineEvents for SharedEvents {
         if let Some(holder) = self.inner.lock().unwrap().as_ref() {
             holder.0.on_duration_changed(seconds);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn source_errors_are_bounded_and_keep_the_failing_voice_identity() {
+        let events = SharedEvents::default();
+        for index in 0..20 {
+            events.source_error(format!("voice-{index}"), "decoder failed".into());
+        }
+        let queue = events.source_errors.lock().unwrap();
+        assert_eq!(queue.len(), 16);
+        assert_eq!(queue.first().unwrap().source, "voice-4");
+        assert_eq!(queue.last().unwrap().source, "voice-19");
     }
 }

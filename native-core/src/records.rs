@@ -313,6 +313,19 @@ pub struct AudioSourceFormatRec {
 }
 
 #[derive(uniffi::Record, Debug, Clone)]
+pub struct SourceErrorRec {
+    pub source: String,
+    pub message: String,
+}
+
+/// Properties after successfully decoding a bounded PCM window.
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct VerifiedAudioSourceRec {
+    pub format: AudioSourceFormatRec,
+    pub estimated_kbps: Option<u32>,
+}
+
+#[derive(uniffi::Record, Debug, Clone)]
 pub struct MelSpectrogramResult {
     pub frames: u64,
     pub mels: u64,

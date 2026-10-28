@@ -15,7 +15,7 @@ use crate::output::{
 use crate::records::{
     AudioSourceFormatRec, AutomixTier, DecodedRegion, EngineError, LoadRequest,
     MelSpectrogramResult, NerdStatsRec, OutputDeviceRec, OutputHealthRec, OutputPcmMode,
-    QueuedTrackRec, TrackInfoRec, TransitionPlanRec,
+    QueuedTrackRec, TrackInfoRec, TransitionPlanRec, VerifiedAudioSourceRec,
 };
 use crate::{ClarityTuning, LoudnessMeasurement, LoudnessMode, PlaybackRegions, SoundMode};
 use cpal::traits::StreamTrait;
@@ -348,6 +348,40 @@ impl PlayerEngine {
             sample_rate: decoder.sample_rate(),
             bit_depth: decoder.bit_depth(),
             channels: decoder.channels() as u32,
+        })
+    }
+
+    /// Source identity prevents a stale/queued decoder failure from reopening the current track.
+    pub fn drain_source_errors(&self) -> Vec<crate::SourceErrorRec> {
+        std::mem::take(&mut *self.events.source_errors.lock().unwrap())
+    }
+
+    /// Decode a quarter-second window before trusting provider format claims.
+    pub fn verify_audio_source(
+        &self,
+        source: String,
+        headers: Option<std::collections::HashMap<String, String>>,
+    ) -> Result<VerifiedAudioSourceRec, EngineError> {
+        let kind = crate::decode::SourceKind::parse(&source);
+        let mut decoder =
+            crate::decode::SymphoniaDecoder::open_available(&kind, &headers.unwrap_or_default())
+                .map_err(|e| EngineError::LoadFailed(e.to_string()))?;
+        let samples = decoder
+            .read_stereo((decoder.sample_rate() / 4).max(1) as usize)
+            .map_err(|e| EngineError::LoadFailed(e.to_string()))?;
+        if samples.is_empty() {
+            return Err(EngineError::LoadFailed("No decodable audio frames".into()));
+        }
+        let codec = decoder.codec().to_string();
+        Ok(VerifiedAudioSourceRec {
+            estimated_kbps: decoder.estimated_kbps(),
+            format: AudioSourceFormatRec {
+                lossless_pcm: is_lossless_pcm_codec(&codec),
+                codec,
+                sample_rate: decoder.sample_rate(),
+                bit_depth: decoder.bit_depth(),
+                channels: decoder.channels() as u32,
+            },
         })
     }
 

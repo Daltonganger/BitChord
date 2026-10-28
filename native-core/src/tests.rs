@@ -607,3 +607,38 @@ fn sleep_gain_does_not_replace_user_volume() {
         0.4
     );
 }
+
+#[test]
+fn source_verification_decodes_payload_instead_of_trusting_the_extension() {
+    let path = std::env::temp_dir().join(format!("bitchord-verified-{}.flac", std::process::id()));
+    let rate = 48_000u32;
+    let frames = rate / 2;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + frames * 4).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+    bytes.extend_from_slice(&4u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&(frames * 4).to_le_bytes());
+    bytes.resize(44 + frames as usize * 4, 0); // Silence is decodable audio, not an empty file.
+    std::fs::write(&path, bytes).unwrap();
+    let engine = crate::PlayerEngine::new();
+    let verified = engine
+        .verify_audio_source(path.display().to_string(), None)
+        .unwrap();
+    assert_eq!(verified.format.codec, "PCM");
+    assert_eq!(verified.format.sample_rate, rate);
+    assert_eq!(verified.format.bit_depth, 16);
+    assert_eq!(verified.estimated_kbps, Some(1536));
+    std::fs::write(&path, b"not decodable audio").unwrap();
+    assert!(engine
+        .verify_audio_source(path.display().to_string(), None)
+        .is_err());
+    std::fs::remove_file(path).unwrap();
+}

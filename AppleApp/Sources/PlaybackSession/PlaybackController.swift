@@ -146,6 +146,10 @@ final class PlaybackController {
     var position: Double = 0
     var duration: Double = 0
     var lastError: String?
+    var recoveringEntryID: String?
+    var recoveryNeedsFreshResolution = false
+    var sourceDecisionNotes: [String: String] = [:]
+    @ObservationIgnored var streamRecovery = PlaybackRecoveryPolicy()
     @ObservationIgnored var pendingPlaybackLatency: PlaybackLatencySample?
     @ObservationIgnored var nextPreparationTask: Task<Void, Never>?
     @ObservationIgnored var urlPrefetchTask: Task<Void, Never>?
@@ -230,7 +234,6 @@ final class PlaybackController {
     /// then sit paused at its start instead of discarding it.
     var holdAfterLoad = false
     /// How often each track has been reloaded after its download failed.
-    var failedDownloadResumes: [String: Int] = [:]
     /// Tracks that failed every way of asking for them, and until when the
     /// queue steps over them instead of stopping on them.
     var unplayableUntil: [String: Date] = [:]
@@ -550,6 +553,7 @@ final class PlaybackController {
     var wasInterrupted = false
 
     init() {
+        NativeStreamVerifier.install()
         _ = LoadingMonitor.shared
         _ = LaunchReadiness.shared
         let configuredSpeed = Double(PlatformSettings.shared.getFloat(key: "playback_speed", default: 1))
@@ -765,6 +769,7 @@ final class PlaybackController {
                 guard let self else { return }
                 for event in drainTechnicalEvents() { self.debugLog.record(event) }
                 self.pollWidgetCommands()
+                self.pollStreamRecovery()
                 guard self.state == .playing else { return }
                 self.position = self.playbackPosition
                 self.positionSampledAt = Date()

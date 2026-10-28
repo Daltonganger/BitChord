@@ -135,7 +135,7 @@ object SourceResolver {
         }
 
         if (pinned != null) {
-            val pinnedStream = attempt(pinned) { pinned.stream(trackId, request) }
+            val pinnedStream = attempt(pinned) { pinned.stream(trackId, request) }?.let { StreamVerification.verify(it) }
             if (pinnedStream != null) {
                 if (!rejectUnsupportedNativeStream(pinned, pinnedStream, target.title)) {
                     return pinnedStream.copy(sourceConfigId = pinned.configId)
@@ -507,20 +507,21 @@ object SourceResolver {
      *
      * Lossless always is: it is what was asked for, and the whole point.
      *
-     * A lossy candidate has to clear [UPGRADE_MIN_GAIN_KBPS] over what is already
-     * playing, which is deliberately a wide gap rather than a strict improvement.
-     * Bitrate compares poorly across codecs — Opus at 160kbps and AAC at 256kbps are
-     * much the same thing to listen to — so a margin narrow enough to be
-     * codec-sensitive would be a margin that buys a seam in the audio for nothing.
-     * 160 to 320 clears it; 128 to 192 does not.
+     * Lossy swaps need the same codec family and a bitrate gain of at least
+     * [UPGRADE_MIN_GAIN_KBPS]. Cross-codec bitrates do not establish an upgrade.
+     * Lossless-to-lossless changes must improve decoded precision without
+     * reducing the other known format dimension.
      */
     internal fun worthSwapping(candidate: StreamFormat, playing: StreamFormat?): Boolean {
         // Never away from an immersive mix. A FLAC is a better *copy* and a worse
         // *mix* once Atmos is what the listener chose, and cutting one in over the
         // other mid-song is a downgrade dressed as an upgrade.
         if (playing?.isDolbyAtmos == true && !candidate.isDolbyAtmos) return false
-        if (candidate.isLossless == true || candidate.isDolbyAtmos) return true
-        val gain = (candidate.kbps ?: return false) - (playing?.kbps ?: return false)
+        if (candidate.isDolbyAtmos) return playing?.isDolbyAtmos != true
+        if (candidate.isLossless == true) return playing?.isLossless != true || isBetter(candidate, playing)
+        val baseline = playing ?: return false
+        if (baseline.isLossless == true || candidate.codecFamily == null || candidate.codecFamily != baseline.codecFamily) return false
+        val gain = (candidate.kbps ?: return false) - (baseline.kbps ?: return false)
         return gain >= UPGRADE_MIN_GAIN_KBPS
     }
 
@@ -631,7 +632,9 @@ object SourceResolver {
             if (selectionWindowMs > 0) {
                 // Keep the best answer across the whole bounded window. A fast
                 // transcode must not cancel another provider's pending FLAC.
-                withTimeoutOrNull(selectionWindowMs) { collect() }
+                if (withTimeoutOrNull(selectionWindowMs) { collect(); true } == null) {
+                    SourceResolutionReport.record("timeout")
+                }
             } else {
                 collect()
             }
@@ -773,10 +776,10 @@ object SourceResolver {
             // The row this URL came from knows how long the recording is; the URL
             // itself doesn't. Carried along so a caller swapping this into a track
             // already playing can check it.
-            val stream = opened.copy(
+            val stream = StreamVerification.verify(opened.copy(
                 durationSec = TrackMatcher.secondsOf(match.durationText),
                 sourceConfigId = source.configId,
-            )
+            )) ?: continue
             val served = stream.format
             if (rejectUnsupportedNativeStream(source, stream, match.title)) continue
             if (!allowLossless && served.isLossless == true) {
@@ -790,6 +793,7 @@ object SourceResolver {
                 )
                 return stream
             }
+            SourceResolutionReport.record("provider_lossy")
             DebugLog.d(
                 "${source.displayName} offered ${served.summary} for '${match.title}'; looking further",
             )
@@ -800,6 +804,7 @@ object SourceResolver {
             // catalogue happened to be asked first.
             settleFor = betterOf(settleFor, stream.copy(belowRequest = true))
         }
+        if (settleFor == null) SourceResolutionReport.record("no_match")
         return settleFor
     }
 
@@ -842,6 +847,17 @@ object SourceResolver {
         // the FLAC in over an Atmos stream already playing.
         if (candidate.isDolbyAtmos != current.isDolbyAtmos) return candidate.isDolbyAtmos
         if (candidate.isLossless != current.isLossless) return candidate.isLossless == true
+        if (candidate.isLossless == true) {
+            // Compressed FLAC/ALAC bitrate measures compression, not fidelity.
+            val depth = candidate.bitDepth ?: 0
+            val rate = candidate.sampleRateHz ?: 0
+            val oldDepth = current.bitDepth ?: 0
+            val oldRate = current.sampleRateHz ?: 0
+            return depth >= oldDepth && rate >= oldRate && (depth > oldDepth || rate > oldRate)
+        }
+        // Cross-codec bitrates are not a perceptual quality scale. Retain source
+        // preference rather than inventing an AAC/Opus conversion factor.
+        if (candidate.codecFamily == null || candidate.codecFamily != current.codecFamily) return false
         return (candidate.kbps ?: 0) > (current.kbps ?: 0)
     }
 

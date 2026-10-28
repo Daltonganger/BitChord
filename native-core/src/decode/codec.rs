@@ -1,7 +1,7 @@
 //! Codec probing: opening the decoder, ALAC bit depth, HE-AAC detection, and
 //! the labels and durations the app shows.
 
-use super::{DecodeError, SourceKind};
+use super::DecodeError;
 use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::formats::MediaInfo;
@@ -140,7 +140,6 @@ pub(super) fn lc_stereo_asc(sample_rate: u32) -> [u8; 2] {
 }
 
 pub(super) fn codec_label(
-    source: &SourceKind,
     audio: &symphonia::core::codecs::audio::AudioCodecParameters,
 ) -> String {
     use symphonia::core::codecs::audio::well_known::*;
@@ -210,36 +209,14 @@ pub(super) fn codec_label(
     if audio.codec == CODEC_ID_PCM_MULAW {
         return "G.711 μ-law".into();
     }
-    let from_path = match source {
-        SourceKind::Path(p) => std::path::Path::new(p)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase()),
-        SourceKind::Url(u) => {
-            let path = u.split('?').next().unwrap_or(u);
-            std::path::Path::new(path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase())
-        }
-    };
-    match from_path.as_deref() {
-        Some("flac") => return "FLAC".into(),
-        Some("alac") => return "ALAC".into(),
-        Some("mp3") => return "MP3".into(),
-        Some("ogg" | "oga") => return "Vorbis".into(),
-        Some("wav") => return "WAVE".into(),
-        Some("aiff" | "aif") => return "AIFF".into(),
-        Some("opus" | "webm") => return "Opus".into(),
-        Some("m4a" | "aac" | "mp4") => {
-            if audio.profile.is_some() {
-                return "AAC".into();
-            }
-            return "AAC".into();
-        }
-        _ => {}
-    }
-    "AAC".into()
+    match audio.codec {
+        CODEC_ID_MP1 => "MP1",
+        CODEC_ID_MP2 => "MP2",
+        CODEC_ID_MP3 => "MP3",
+        CODEC_ID_AAC => "AAC",
+        CODEC_ID_VORBIS => "Vorbis",
+        _ => "Unknown",
+    }.into()
 }
 
 /// The length the container declares for the media as a whole.

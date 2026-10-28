@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -82,10 +83,9 @@ object SourceResolverBridge {
         isExplicit: Boolean?,
         isVideo: Boolean,
         callback: StreamCallback,
-    ) = launch(callback) {
+    ) = lookup(callback) {
         val target = TrackMatcher.Target(title, artist, durationSec, album, isExplicit, isVideo)
-        SourceResolver.substituteForYouTube(target)?.let { callback.onResult(it.encode(), null) }
-            ?: callback.onResult(null, null)
+        SourceResolver.substituteForYouTube(target)
     }
 
     /**
@@ -102,16 +102,10 @@ object SourceResolverBridge {
         artist: String,
         durationSec: Int?,
         callback: StreamCallback,
-    ) = launch(callback) {
-        val parsed = SourceRegistry.parseTrackKey(key)
-        if (parsed == null) {
-            callback.onResult(null, "Not a source track")
-            return@launch
-        }
+    ) = lookup(callback) {
+        val parsed = SourceRegistry.parseTrackKey(key) ?: return@lookup null
         val target = TrackMatcher.Target(title, artist, durationSec)
         SourceResolver.resolve(parsed.first, parsed.second, target)
-            ?.let { callback.onResult(it.encode(), null) }
-            ?: callback.onResult(null, "No stream from that source")
     }
 
     /**
@@ -134,12 +128,10 @@ object SourceResolverBridge {
         playingJson: String?,
         servedBy: String?,
         callback: StreamCallback,
-    ) = launch(callback) {
+    ) = lookup(callback) {
         val target = TrackMatcher.Target(title, artist, durationSec, album, isExplicit, isVideo)
         val playing = playingJson?.let { readFormat(it) }
         SourceResolver.upgradeFor(target, playing, servedBy)
-            ?.let { callback.onResult(it.encode(), null) }
-            ?: callback.onResult(null, null)
     }
 
     /**
@@ -157,10 +149,9 @@ object SourceResolverBridge {
         isExplicit: Boolean?,
         isVideo: Boolean,
         callback: StreamCallback,
-    ) = launch(callback) {
+    ) = lookup(callback) {
         val target = TrackMatcher.Target(title, artist, durationSec, album, isExplicit, isVideo)
-        SourceResolver.prefetchSubstitute(target)?.let { callback.onResult(it.encode(), null) }
-            ?: callback.onResult(null, null)
+        SourceResolver.prefetchSubstitute(target)
     }
 
     /** The copy worth keeping as a file over whatever YouTube's ladder would give. */
@@ -424,6 +415,22 @@ object SourceResolverBridge {
     fun isDuplicate(url: String, exceptId: String?): Boolean =
         SourceRegistry.duplicateOf(url, exceptId) != null
 
+    /** Recovery retries must ask enabled addons again rather than reuse an expired URL. */
+    fun refreshPlaybackSources() {
+        SourceRegistry.activeForPlayback().filterIsInstance<AddonSource>().forEach { it.clearCompletedTrackCalls() }
+    }
+
+    private fun lookup(callback: StreamCallback, block: suspend () -> SourceStream?) {
+        scope.launch {
+            val report = SourceResolutionReport()
+            try {
+                val stream = withContext(report) { block() }
+                callback.onResult(stream?.encode(), report.summary())
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { callback.onResult(null, "Preferred sources could not provide playable audio.") }
+        }
+    }
+
     /** The one place a quality decision is made, exposed so the host agrees with it. */
     private fun launch(callback: StreamCallback, block: suspend () -> Unit) {
         scope.launch {
@@ -472,6 +479,7 @@ object SourceResolverBridge {
                 kbps = stream.format.kbps,
                 sampleRateHz = stream.format.sampleRateHz,
                 bitDepth = stream.format.bitDepth,
+                verified = stream.format.verified,
                 isLossless = stream.format.isLossless,
                 isDolbyAtmos = stream.format.isDolbyAtmos,
                 summary = stream.format.summary,
@@ -520,6 +528,7 @@ data class FormatDocument(
     val kbps: Int? = null,
     val sampleRateHz: Int? = null,
     val bitDepth: Int? = null,
+    val verified: Boolean = false,
     val isLossless: Boolean? = null,
     val isDolbyAtmos: Boolean = false,
     val summary: String = "",
@@ -562,4 +571,5 @@ private fun FormatDocument.toFormat(): StreamFormat = StreamFormat(
     kbps = kbps,
     sampleRateHz = sampleRateHz,
     bitDepth = bitDepth,
+    verified = verified,
 )

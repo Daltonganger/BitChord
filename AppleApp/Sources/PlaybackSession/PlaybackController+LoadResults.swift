@@ -44,6 +44,11 @@ extension PlaybackController {
         playingIndex = index
         current = entry
         historyVideoID = youtubeVideoID(for: entry)
+        let restoredStream = recoveringEntryID == entry.id
+        if restoredStream {
+            sourceDecisionNotes[entry.id] = "Playback restored with a fresh stream."
+            recoveringEntryID = nil
+        }
         engineLoadedId = entry.id
         loadedSourcePath = info.source
         loadedSourceHeaders = headers
@@ -64,17 +69,19 @@ extension PlaybackController {
         nerd = dolbyRenderer?.nerd ?? engine.nerdStats()
         try? engine.setBitPerfectEnabled(enabled: effectiveBitPerfectOutput)
         racingLossless = QualityUpgrade.isRacing(entry.id)
-        scrobbleArmed = false
-        scrobbleSent = false
-        if let id = historyVideoID {
-            QueueBuilderBridge.shared.rememberPlayed(videoId: id)
-            PlaybackTrackerBridge.shared.onPlaying(videoId: id)
+        if !restoredStream {
+            scrobbleArmed = false
+            scrobbleSent = false
+            if let id = historyVideoID {
+                QueueBuilderBridge.shared.rememberPlayed(videoId: id)
+                PlaybackTrackerBridge.shared.onPlaying(videoId: id)
+            }
+            publishPresence()
+            ScrobbleBridge.shared.nowPlaying(
+                artist: scrobbleArtist(for: entry), title: entry.title, album: entry.albumName,
+                durationSec: Swift.Int32(info.durationSeconds), positionMs: Swift.Int64(0)
+            )
         }
-        publishPresence()
-        ScrobbleBridge.shared.nowPlaying(
-            artist: scrobbleArtist(for: entry), title: entry.title, album: entry.albumName,
-            durationSec: Swift.Int32(info.durationSeconds), positionMs: Swift.Int64(0)
-        )
         nowPlaying.update(
             id: entry.id, title: entry.title, artist: entry.artist,
             duration: info.durationSeconds, artworkData: entry.artworkData,
