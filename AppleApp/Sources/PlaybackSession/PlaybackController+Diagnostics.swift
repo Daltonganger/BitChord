@@ -456,6 +456,25 @@ extension PlaybackController {
         togglePlaybackContext([entry], title: "First list", contextID: "first")
         for _ in 0..<30 { if isPlaying { break }; try? await Task.sleep(for: .milliseconds(100)) }
         checks["same_list_resumes"] = isPlaying && isPlaybackContextPlaying("first")
+        let beforeInvalidSeek = position
+        seek(to: .nan)
+        seek(to: .infinity)
+        checks["nonfinite_seek_ignored"] = position == beforeInvalidSeek
+        seek(to: -10)
+        checks["negative_seek_clamped"] = position == 0
+        seek(to: duration + 10)
+        checks["seek_clamped_to_duration"] = position == duration
+        seek(to: 1)
+        audioInterruptionBegan()
+        checks["interruption_pauses"] = state == .paused && wasInterrupted
+        togglePlayPause()
+        for _ in 0..<30 { if isPlaying { break }; try? await Task.sleep(for: .milliseconds(100)) }
+        let manualResume = resumeGeneration
+        audioInterruptionEnded(shouldResume: true)
+        checks["manual_resume_survives_interruption_end"] = isPlaying && !wasInterrupted && resumeGeneration == manualResume
+        pausePlayback()
+        audioInterruptionEnded(shouldResume: true)
+        checks["explicit_pause_survives_late_interruption_end"] = state == .paused
         togglePlaybackContext([entry], title: "Second list", contextID: "second")
         checks["different_list_replaces_origin"] = playbackContextID == "second" && !isPlaybackContextActive("first")
         let second = QueueEntry(id: "queue-second", title: "", artist: "", source: path.path, durationText: "0:20", isLocal: true)

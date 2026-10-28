@@ -17,8 +17,17 @@ import Security
 /// The `ThisDeviceOnly` half keeps it out of iCloud Keychain and out of any
 /// backup that would restore it to a different device.
 enum Keychain {
-    private static let service = "app.bitchord.BitChord.credentials"
-    private static let synchronizableService = "app.bitchord.BitChord"
+    private static let namespace: String = {
+        #if DEBUG
+        // The muted CLI diagnostic has its own container and credentials.
+        if Bundle.main.bundleIdentifier == "app.bitchord.BitChord.queuevalidation" {
+            return "app.bitchord.BitChord.queuevalidation"
+        }
+        #endif
+        return "app.bitchord.BitChord"
+    }()
+    private static let service = namespace + ".credentials"
+    private static let synchronizableService = namespace
 
     /// Read a value, or nil when there is none.
     ///

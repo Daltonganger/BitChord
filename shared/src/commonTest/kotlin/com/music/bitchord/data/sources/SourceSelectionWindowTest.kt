@@ -14,6 +14,17 @@ import kotlin.test.assertTrue
 class SourceSelectionWindowTest {
     private val target = TrackMatcher.Target("Get Lucky", "Daft Punk", 300)
 
+    @Test fun oneThreeAndSixAddonsKeepPlayingWhenAnotherProviderFails() = runTest {
+        for (count in listOf(1, 3, 6)) {
+            val preferred = Provider("preferred-$count", 100, StreamFormat(codec = "flac"))
+            val others = (1 until count).map { index ->
+                Provider("other-$index", 10, StreamFormat(codec = "mp3", kbps = 128), fail = index % 2 == 1)
+            }
+            val result = SourceResolver.bestAcross(listOf(preferred) + others, target, StreamRequest.Lossless)
+            assertEquals(preferred.configId, result?.first?.configId)
+        }
+    }
+
     @Test fun slowerLosslessBeatsFastTranscode() = runTest {
         val lower = Provider("lower", 10, StreamFormat(codec = "mp3", kbps = 128))
         val fast = Provider("fast", 20, StreamFormat(codec = "mp3", kbps = 320))
@@ -73,6 +84,7 @@ class SourceSelectionWindowTest {
         override val configId: String,
         private val latencyMs: Long?,
         private val format: StreamFormat,
+        private val fail: Boolean = false,
     ) : MusicSource {
         override val kind = SourceKind.ADDON
         override val displayName = configId
@@ -84,6 +96,7 @@ class SourceSelectionWindowTest {
         override suspend fun stream(trackId: String, request: StreamRequest): SourceStream {
             try {
                 if (latencyMs == null) awaitCancellation() else delay(latencyMs)
+                check(!fail) { "Provider unavailable" }
                 completed = true
                 return SourceStream(url = "https://example.test/$configId", format = format)
             } finally {

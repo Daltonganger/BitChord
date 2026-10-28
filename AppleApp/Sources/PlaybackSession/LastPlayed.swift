@@ -20,6 +20,7 @@ enum LastPlayed {
     }
 
     private static let key = "bitchord_last_played"
+    private static let backupKey = "bitchord_last_played_previous"
     private static let keepBehind = 10
     private static let maxTracks = 60
 
@@ -36,36 +37,47 @@ enum LastPlayed {
         orderedContextEntries: [QueueEntry] = [],
         contextContinuation: String? = nil,
         contextCursor: Int = 0,
-        contextBaseIndex: Int = 0
+        contextBaseIndex: Int = 0,
+        defaults: UserDefaults = .standard
     ) {
         guard !tracks.isEmpty, tracks.indices.contains(index) else { return }
         let start = max(0, min(index - keepBehind, max(0, tracks.count - maxTracks)))
         let end = min(tracks.count, start + maxTracks)
         let window = Array(tracks[start..<end])
+        let safeSeconds = position.isFinite ? min(max(0, position), Double(Int64.max / 4) / 1000) : 0
+        let droppedContextRows = tracks.prefix(start).filter { $0.contextOrder != nil }.count
         let stored = Stored(
             tracks: window.map(StoredTrack.init),
             index: (index - start).clamped(to: 0...max(0, window.count - 1)),
-            positionMs: Int64(max(0, position) * 1000),
+            positionMs: Int64(safeSeconds * 1000),
             repeatMode: repeatMode.rawValue,
             shuffle: shuffleEnabled,
-            volume: volume,
+            volume: boundedVolume(volume),
             contextID: contextID,
             contextTitle: contextTitle,
             contextEntries: contextEntries.map(StoredTrack.init),
             orderedContextEntries: orderedContextEntries.map(StoredTrack.init),
             contextContinuation: contextContinuation,
             contextCursor: contextCursor,
-            contextBaseIndex: contextBaseIndex
+            contextBaseIndex: max(0, contextBaseIndex) + droppedContextRows
         )
         if let data = try? JSONEncoder().encode(stored) {
-            UserDefaults.standard.set(data, forKey: key)
+            if let previous = defaults.data(forKey: key),
+               let decoded = try? JSONDecoder().decode(Stored.self, from: previous), !decoded.tracks.isEmpty {
+                defaults.set(previous, forKey: backupKey)
+            }
+            defaults.set(data, forKey: key)
         }
     }
 
-    static func load() -> Snapshot? {
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let stored = try? JSONDecoder().decode(Stored.self, from: data),
-              !stored.tracks.isEmpty else { return nil }
+    static func load(defaults: UserDefaults = .standard) -> Snapshot? {
+        let stored = [key, backupKey].lazy.compactMap { name -> Stored? in
+            guard let data = defaults.data(forKey: name),
+                  let decoded = try? JSONDecoder().decode(Stored.self, from: data),
+                  !decoded.tracks.isEmpty else { return nil }
+            return decoded
+        }.first
+        guard let stored else { return nil }
         let tracks = stored.tracks.map(\.entry)
         return Snapshot(
             tracks: tracks,
@@ -73,7 +85,7 @@ enum LastPlayed {
             position: Double(max(0, stored.positionMs)) / 1000,
             repeatMode: PlaybackController.RepeatMode(rawValue: stored.repeatMode) ?? .off,
             shuffleEnabled: stored.shuffle,
-            volume: stored.volume > 0 ? min(stored.volume, 1) : 0.9,
+            volume: boundedVolume(stored.volume),
             contextID: stored.contextID,
             contextTitle: stored.contextTitle,
             contextEntries: stored.contextEntries?.map(\.entry) ?? [],
@@ -82,6 +94,10 @@ enum LastPlayed {
             contextCursor: stored.contextCursor ?? 0,
             contextBaseIndex: stored.contextBaseIndex ?? 0
         )
+    }
+
+    private static func boundedVolume(_ value: Double) -> Double {
+        value.isFinite ? min(max(value, 0), 1) : 0.9
     }
 
     private struct Stored: Codable {
@@ -115,6 +131,7 @@ enum LastPlayed {
         var setVideoId: String?
         var contextOrder: Int?
         var isVideo: Bool?
+        var isExplicit: Bool?
 
         init(_ entry: QueueEntry) {
             id = entry.id
@@ -131,6 +148,7 @@ enum LastPlayed {
             setVideoId = entry.setVideoId
             contextOrder = entry.contextOrder
             isVideo = entry.isVideo
+            isExplicit = entry.isExplicit
         }
 
         var entry: QueueEntry {
@@ -139,7 +157,7 @@ enum LastPlayed {
                 thumbnailUrl: thumbnailUrl, durationText: durationText,
                 albumName: albumName, artworkData: nil, isLocal: isLocal,
                 fromAutoplay: fromAutoplay, artistId: artistId, albumId: albumId,
-                setVideoId: setVideoId, contextOrder: contextOrder, isVideo: isVideo ?? false
+                setVideoId: setVideoId, contextOrder: contextOrder, isExplicit: isExplicit, isVideo: isVideo ?? false
             )
         }
     }

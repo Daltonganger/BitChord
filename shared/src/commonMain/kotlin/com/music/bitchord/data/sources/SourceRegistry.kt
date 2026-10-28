@@ -44,6 +44,13 @@ object SourceRegistry {
     private const val TAG = "BitChord"
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val refreshStorage = SourceRefreshStorage(PlatformSettings::readSecret, PlatformSettings::writeSecret)
+    private val listStorage = SourceListStorage(
+        readPrimary = { PlatformSettings.getString(KEY_SOURCES, "") },
+        writePrimary = { PlatformSettings.putString(KEY_SOURCES, it) },
+        readBackup = { PlatformSettings.readSecret("sources-document-backup-v1") },
+        writeBackup = { PlatformSettings.writeSecret("sources-document-backup-v1", it) },
+        isValid = ::isReadableDocument,
+    )
 
     /** Every configured source, enabled or not. */
     private val _configs = MutableStateFlow<List<SourceConfig>>(emptyList())
@@ -82,11 +89,11 @@ object SourceRegistry {
         // after recording the marker but before the disabled source would
         // otherwise believe the forced opt-out had happened and silently restore
         // the old on state.
-        publish(after, persist = false)
         if (after != stored || !jioOptInDone) {
             writeStored(after)
             PlatformSettings.putBoolean(KEY_JIOSAAVN_OPT_IN_V1, true)
         }
+        publish(after, persist = false)
     }
 
     /**
@@ -152,23 +159,37 @@ object SourceRegistry {
      * user's real, working config is silently gone along with it.
      */
     private fun readStored(): List<SourceConfig> {
-        val raw = PlatformSettings.getString(KEY_SOURCES, "")
+        val raw = listStorage.read()
         if (raw.isBlank()) return emptyList()
-        val elements = runCatching { json.parseToJsonElement(raw).jsonArray }
-            .getOrElse { return emptyList() }
+        val elements = json.parseToJsonElement(raw).jsonArray
         return elements.mapNotNull { element ->
             runCatching { json.decodeFromJsonElement(SourceConfig.serializer(), element) }
-                .onFailure { DebugLog.w("dropping unreadable stored source: ${it.message}") }
+                .onFailure { DebugLog.w("Skipping an unreadable stored source entry") }
                 .getOrNull()?.let { config ->
                     refreshStorage.restore(config)
                 }
         }
     }
 
+    internal fun isReadableDocument(raw: String): Boolean = runCatching {
+        val elements = json.parseToJsonElement(raw).jsonArray
+        val configs = mutableListOf<SourceConfig>()
+        for (element in elements) {
+            val fields = element.jsonObject
+            val kind = fields["kind"]?.jsonPrimitive?.content ?: return@runCatching false
+            // Future/retired kinds may be skipped; a damaged known source may
+            // not disappear just because another entry can still be decoded.
+            if (SourceKind.entries.none { it.name == kind }) continue
+            if (fields["id"]?.jsonPrimitive?.content.isNullOrBlank()) return@runCatching false
+            configs += json.decodeFromJsonElement(SourceConfig.serializer(), element)
+        }
+        (elements.isEmpty() || configs.isNotEmpty()) &&
+            configs.all { it.id.isNotBlank() } && configs.map { it.id }.distinct().size == configs.size
+    }.getOrDefault(false)
+
     private fun writeStored(configs: List<SourceConfig>) {
         refreshStorage.commit(configs, _configs.value) {
-            PlatformSettings.putString(
-                KEY_SOURCES,
+            listStorage.write(
                 json.encodeToString(ListSerializer(SourceConfig.serializer()), configs.map { it.copy(refreshUrl = "") }),
             )
         }

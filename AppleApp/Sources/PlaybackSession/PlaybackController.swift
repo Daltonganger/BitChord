@@ -607,22 +607,14 @@ final class PlaybackController {
                 Task { @MainActor in
                     guard let self else { return }
                     NSLog("[BitChord] Audio interruption began")
-                    if self.isPlaying || self.isBuffering {
-                        self.pausePlayback(releaseAudioSession: true)
-                        self.wasInterrupted = true
-                    }
+                    self.audioInterruptionBegan()
                 }
             },
             ended: { [weak self] shouldResume in
                 Task { @MainActor in
                     guard let self else { return }
                     NSLog("[BitChord] Audio interruption ended, shouldResume=\(shouldResume)")
-                    if self.wasInterrupted {
-                        self.wasInterrupted = false
-                        if shouldResume {
-                            self.togglePlayPause()
-                        }
-                    }
+                    self.audioInterruptionEnded(shouldResume: shouldResume)
                 }
             }
         )

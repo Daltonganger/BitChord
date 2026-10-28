@@ -19,12 +19,10 @@ import BitChordShared
 struct SourcesView: View {
     @Environment(ToastCenter.self) private var toast
 
-    /// Re-read whenever the registry says it changed, which is the only thing
-    /// that should be able to change it.
-    @State private var configs: [ConfigDocument] = []
-    /// Last known reachability, filled in as the probes come back.
-    @State private var health: [String: Health] = [:]
-    @State private var probing = Set<String>()
+    @State private var sourceState = SourceListState.shared
+    private var configs: [ConfigDocument] { sourceState.configs }
+    private var health: [String: Health] { sourceState.health }
+    private var probing: Set<String> { sourceState.probing }
     @State private var editing: ConfigDocument?
     @State private var removingAddon: ConfigDocument?
     /// The confirm JioSaavn opens before it is opted into — see `onConfirmJioSaavn`.
@@ -43,13 +41,19 @@ struct SourcesView: View {
     @State private var editMode: EditMode = .inactive
     #endif
 
-    struct Health {
-        var name: String
-        var detail: String
-    }
+    typealias Health = SourceHealthSnapshot
 
     var body: some View {
         List {
+            if let error = sourceState.loadError {
+                Section {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                    Button("Try again") { Task { await reload() } }
+                        .disabled(sourceState.loading)
+                }
+            } else if sourceState.loading && configs.isEmpty {
+                ProgressView("Loading sources…")
+            }
             Section {
                 rowsView
                 Button {
@@ -57,6 +61,7 @@ struct SourcesView: View {
                 } label: {
                     Label("Add an addon", systemImage: "plus.circle")
                 }
+                .disabled(sourceState.changing != nil)
             } header: {
                 Text("Sources, tried in this order")
             } footer: {
@@ -150,8 +155,13 @@ struct SourcesView: View {
                 // The grip is last in the row and deliberately outside the
                 // dimming: a source switched off still has a position worth
                 // setting for when it is switched back on.
+                changing: sourceState.changing != nil,
+                onCheck: config.needsServer && config.isComplete && config.enabled ? {
+                    _ = Task<Void, Never> { await check(config) }
+                } : nil,
                 handle: config.kind == "ADDON" ? { AnyView(dragHandle(config.id)) } : nil
             )
+            .moveDisabled(config.kind != "ADDON" || sourceState.changing != nil)
             #if os(iOS)
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 if config.kind == "ADDON" {
@@ -159,6 +169,7 @@ struct SourcesView: View {
                         removingAddon = config
                     }
                     .tint(.red)
+                    .disabled(sourceState.changing != nil)
                 }
             }
             #endif
@@ -213,7 +224,9 @@ struct SourcesView: View {
     }
 
     @ViewBuilder
-    private var orderFooter: some View {        VStack(alignment: .leading, spacing: 8) {
+    private var orderFooter: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Reachable means the provider answered its checks. Audio quality is verified separately for each track.")
             Text("If a source does not have a track or cannot be reached, BitChord tries the next one. Sources above YouTube can replace its recording when they return a better version.")
             if !AudioRouteState.shared.carriesLossless {
                 Text("Bluetooth compresses the output. Choosing Lossless still allows lossless sources; addons that require a lossless output need a speaker or wired connection.")
@@ -331,78 +344,62 @@ struct SourcesView: View {
 
     // MARK: - Loading and probing
 
-    private func reload() async {
-        let listed = await withCheckedContinuation {
-            (continuation: CheckedContinuation<[ConfigDocument], Never>) in
-            SourceResolverBridge.shared.configs(
-                callback: ListingReader { json in
-                    guard let json, let data = json.data(using: .utf8),
-                          let listing = try? JSONDecoder().decode(Listing.self, from: data)
-                    else { continuation.resume(returning: []); return }
-                    continuation.resume(returning: listing.sources)
-                }
-            )
+    @MainActor private func reload() async {
+        let revision = sourceState.beginLoad()
+        let document = await withCheckedContinuation { continuation in
+            SourceResolverBridge.shared.configs(callback: ListingReader { continuation.resume(returning: $0) })
         }
-        configs = listed
-        await probeAll()
-    }
-
-    /// Probe everything with a server to reach, one at a time.
-    ///
-    /// Sequentially rather than all at once, because these are third-party
-    /// servers and a burst of simultaneous requests is what gets a listener's
-    /// address noticed. The probes are cheap when they succeed and slow when they
-    /// do not, and a screen that shows a spinner per row beats one that shows
-    /// every server at once.
-    private func probeAll() async {
-        for config in configs where config.needsServer && config.isComplete {
-            if Task.isCancelled { return }
-            probing.insert(config.id)
-            let answer = await probe(config.id)
-            health[config.id] = answer
-            probing.remove(config.id)
+        guard !Task.isCancelled else { sourceState.cancelLoad(revision); return }
+        guard sourceState.finishLoad(document, revision: revision) else { return }
+        for config in configs {
+            guard !Task.isCancelled else { return }
+            await check(config)
         }
     }
 
-    private func probe(_ id: String) async -> Health {
-        await withCheckedContinuation { continuation in
-            SourceResolverBridge.shared.health(
-                configId: id,
-                callback: HealthProbe { _, name, detail in
-                    continuation.resume(returning: Health(name: name, detail: detail))
-                }
-            )
+    @MainActor private func check(_ config: ConfigDocument) async {
+        guard let request = sourceState.beginProbe(config) else { return }
+        let answer = await withCheckedContinuation { continuation in
+            SourceResolverBridge.shared.health(configId: config.id, callback: HealthProbe { _, name, detail in
+                continuation.resume(returning: Health(name: name, detail: detail))
+            })
+        }
+        sourceState.finishProbe(request, result: Task.isCancelled ? nil : answer)
+    }
+
+    @MainActor private func change(_ id: String, operation: @escaping (SourceResolverBridgeActionCallback) -> Void,
+                                    accepted: @escaping () -> Void = {}) {
+        guard sourceState.beginChange(id) else { return }
+        Task { @MainActor in
+            let result = await withCheckedContinuation { continuation in
+                operation(NoReply { ok, message in continuation.resume(returning: (ok, message)) })
+            }
+            sourceState.finishChange()
+            guard result.0 else {
+                toast.show(result.1 ?? "Could not save this source change. Try again.", kind: .failure)
+                return
+            }
+            accepted()
+            await reload()
         }
     }
 
     private func setEnabled(_ id: String?, _ enabled: Bool) {
         guard let id else { return }
-        SourceResolverBridge.shared.setEnabled(
-            configId: id, enabled: enabled,
-            callback: NoReply { _, _ in }
-        )
-        Task { await reload() }
+        change(id, operation: { callback in
+            SourceResolverBridge.shared.setEnabled(configId: id, enabled: enabled, callback: callback)
+        }, accepted: { sourceState.acceptEnabled(id, enabled) })
     }
 
     private func removeAddon(_ id: String) {
         guard configs.contains(where: { $0.id == id && $0.kind == "ADDON" }) else { return }
-        SourceResolverBridge.shared.remove(
-            configId: id,
-            callback: NoReply { ok, message in
-                Task { @MainActor in
-                    if ok {
-                        await reload()
-                    } else {
-                        toast.show(message ?? "Could not remove addon", kind: .failure)
-                    }
-                }
-            }
-        )
+        change(id, operation: { callback in
+            SourceResolverBridge.shared.remove(configId: id, callback: callback)
+        }, accepted: { sourceState.acceptRemoved(id) })
     }
 
     // MARK: - Reordering
 
-    #if os(iOS)
     private func moveAddons(from source: IndexSet, to dest: Int) {
         // Only the addons' relative order is the listener's to set, and the
         // registry stores exactly that — so the gesture is applied to the addon
@@ -410,9 +407,9 @@ struct SourcesView: View {
         var ordered = rows
         ordered.move(fromOffsets: source, toOffset: dest)
         let ids = ordered.filter { $0.kind == "ADDON" }.map(\.id)
-        SourceResolverBridge.shared.reorderAddons(
-            orderedIds: ids, callback: NoReply { _, _ in }
-        )
+        change("reorder", operation: { callback in
+            SourceResolverBridge.shared.reorderAddons(orderedIds: ids, callback: callback)
+        }, accepted: { sourceState.acceptOrder(ids) })
     }
 
     /// macOS has no `EditMode` and no drag-to-reorder in a `List`, so the handle
@@ -423,7 +420,9 @@ struct SourcesView: View {
         return AnyView(
             Menu {
                 Button("Move Up") { nudge(id, by: -1) }
+                    .disabled(rows.first?.id == id)
                 Button("Move Down") { nudge(id, by: 1) }
+                    .disabled(rows.filter { $0.kind == "ADDON" }.last?.id == id)
             } label: {
                 Image(systemName: "line.3.horizontal")
                     .foregroundStyle(.secondary)
@@ -437,54 +436,17 @@ struct SourcesView: View {
     }
 
     private func nudge(_ id: String, by offset: Int) {
-        var ordered = rows
+        var ordered = rows.filter { $0.kind == "ADDON" }
         guard let from = ordered.firstIndex(where: { $0.id == id }) else { return }
         let to = from + offset
         guard to >= 0, to < ordered.count else { return }
         ordered.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
         let ids = ordered.filter { $0.kind == "ADDON" }.map(\.id)
-        SourceResolverBridge.shared.reorderAddons(
-            orderedIds: ids, callback: NoReply { _, _ in }
-        )
-        Task { await reload() }
+        change("reorder", operation: { callback in
+            SourceResolverBridge.shared.reorderAddons(orderedIds: ids, callback: callback)
+        }, accepted: { sourceState.acceptOrder(ids) })
     }
-    #else
-    private func moveAddons(from source: IndexSet, to dest: Int) {}
-    private func dragHandle(_ id: String) -> some View { EmptyView() }
-    private func nudge(_ id: String, by offset: Int) {}
-    #endif
 
-    // MARK: - Wire types
-
-    private struct Listing: Codable {
-        let sources: [ConfigDocument]
-    }
-}
-
-/// One configured source, as the shared registry describes it.
-struct ConfigDocument: Codable, Identifiable, Hashable {
-    let id: String
-    let kind: String
-    let label: String
-    let displayName: String
-    let baseUrl: String
-    var enabled: Bool
-    let isComplete: Bool
-    let needsServer: Bool
-    let canServeLossless: Bool
-    let labels: [String]
-    var refreshEnabled: Bool? = nil
-    var refreshUrl: String? = nil
-    var refreshUrlUnavailable: Bool? = nil
-
-    /// A blank addon, for the "Add" row.
-    static func newAddon() -> ConfigDocument {
-        ConfigDocument(
-            id: "", kind: "ADDON", label: "", displayName: "Addon",
-            baseUrl: "", enabled: true, isComplete: false,
-            needsServer: true, canServeLossless: true, labels: []
-        )
-    }
 }
 
 // MARK: - The row
@@ -502,6 +464,8 @@ private struct SourceRow: View {
     let onClick: (() -> Void)?
     /// Nil for a source that cannot be switched off, which gets a label instead.
     let onToggle: ((Bool) -> Void)?
+    let changing: Bool
+    let onCheck: (() -> Void)?
     let handle: (() -> AnyView)?
 
     var body: some View {
@@ -524,36 +488,70 @@ private struct SourceRow: View {
                 .frame(width: 26)
                 .opacity(dimmed ? 0.4 : 1)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(config.displayName)
-                    .font(.body)
-                    .lineLimit(1)
-                statusLine
-                    .font(.subheadline)
-                    .foregroundStyle(lineColour)
-                    .lineLimit(2)
+            VStack(alignment: .leading, spacing: 3) {
+                if let onClick {
+                    Button(action: onClick) { description }
+                        .buttonStyle(.plain)
+                        .disabled(changing)
+                        .accessibilityHint("Edit this source")
+                } else {
+                    description
+                }
+                if let onCheck, config.enabled, health?.name == "unreachable" || health?.name == "rejected" {
+                    Button("Try again", action: onCheck)
+                        .font(.caption).disabled(probing || changing)
+                }
             }
-            .opacity(dimmed ? 0.4 : 1)
 
             Spacer(minLength: 8)
 
             if let onToggle {
                 Toggle("", isOn: Binding(get: { config.enabled }, set: onToggle))
                     .labelsHidden()
+                    .disabled(changing)
+                    .accessibilityLabel("Enable \(config.displayName)")
             } else {
                 Text("Always on")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
 
-            if let handle { handle() }
+            if onClick != nil || onCheck != nil {
+                Menu {
+                    if let onClick { Button("Edit source", action: onClick) }
+                    if let onCheck { Button("Check again", action: onCheck).disabled(probing) }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .disabled(changing)
+                .accessibilityLabel("Actions for \(config.displayName)")
+            }
+            if let handle { handle().disabled(changing) }
         }
         .padding(.vertical, 5)
         .frame(minHeight: 44)
         .contentShape(Rectangle())
-        .onTapGesture { onClick?() }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var description: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(config.displayName).font(.body).lineLimit(1)
+            statusLine.font(.subheadline).foregroundStyle(lineColour).lineLimit(2)
+            if config.kind == "ADDON" {
+                Text(renewalDescription).font(.caption).foregroundStyle(.secondary)
+            }
+            if let checkedAt = health?.checkedAt, config.enabled && !probing {
+                Text("Checked \(checkedAt.formatted(date: .omitted, time: .shortened))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .opacity(!config.enabled || skippedByQuality ? 0.4 : 1)
+    }
+
+    private var renewalDescription: String {
+        if config.refreshUrlUnavailable == true { return "Renewal link unavailable · unlock your device or Keychain" }
+        return config.refreshEnabled == true ? "Automatic renewal on · renews when needed" : "Automatic renewal off · configure in Edit source"
     }
 
     private var icon: String {
@@ -566,7 +564,9 @@ private struct SourceRow: View {
 
     @ViewBuilder
     private var statusLine: some View {
-        if !config.isComplete {
+        if !config.enabled {
+            Text("Off · not checked or used for playback")
+        } else if !config.isComplete {
             Text("Tap to finish setting up")
         } else if config.kind == "JIOSAAVN" {
             Text("May match the wrong version of a song. Enable at your own risk.")
@@ -577,16 +577,16 @@ private struct SourceRow: View {
         } else if let health {
             switch health.name {
             case "ok":
-                Text([health.detail, config.labels.prefix(3).joined(separator: " · ")]
+                Text(["Reachable", health.detail, config.labels.prefix(3).joined(separator: " · ")]
                     .filter { !$0.isEmpty }
                     .joined(separator: " · "))
             case "rejected":
-                Text(health.detail)
+                Text("Needs attention · \(health.detail)")
             default:
                 Text("Can’t reach it right now · \(health.detail)")
             }
         } else if config.needsServer {
-            Text("Checking…").foregroundStyle(.secondary)
+            Text("Not checked yet").foregroundStyle(.secondary)
         } else {
             Text(config.labels.prefix(3).joined(separator: " · "))
         }
@@ -603,13 +603,6 @@ private struct SourceRow: View {
         return .red
     }
 
-    private var accessibilityLabel: String {
-        var parts = ["Position \(position)", config.displayName]
-        parts.append(config.enabled ? "On" : "Off")
-        if skippedByQuality { parts.append("Not used on this connection") }
-        if let health, health.name == "rejected" { parts.append(health.detail) }
-        return parts.joined(separator: ", ")
-    }
 }
 
 // MARK: - Helpers

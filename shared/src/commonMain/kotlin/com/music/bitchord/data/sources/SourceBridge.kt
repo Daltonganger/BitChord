@@ -66,7 +66,11 @@ object SourceBridge {
      */
     fun searchAddons(query: String, callback: RowCallback) {
         scope.launch {
-            val addons = SourceRegistry.active().filterIsInstance<AddonSource>()
+            val addons = try { SourceRegistry.active().filterIsInstance<AddonSource>() }
+            catch (_: Exception) {
+                callback.onResult(null, "Sources could not be loaded. Unlock your device or Keychain and try again.")
+                return@launch
+            }
             if (addons.isEmpty()) {
                 callback.onResult(null, "No addons are enabled.")
                 return@launch

@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -59,7 +60,7 @@ object SourceResolverBridge {
      * below YouTube, so every queued track paid a pointless race for a source that
      * could not have won it.
      */
-    fun canSubstituteForYouTube(): Boolean = SourceResolver.canSubstituteForYouTube()
+    fun canSubstituteForYouTube(): Boolean = runCatching { SourceResolver.canSubstituteForYouTube() }.getOrDefault(false)
 
     /** A stream that genuinely satisfies the request, for a track already playing. */
     fun worthSwapping(candidateJson: String, playingJson: String?): Boolean {
@@ -243,17 +244,22 @@ object SourceResolverBridge {
 
     /** Every configured source, as a document the sources screen can read. */
     fun configs(callback: ConfigsCallback) {
-        callback.onResult(json.encodeToString(ConfigListing.serializer(), readConfigs()))
+        val document = runCatching { json.encodeToString(ConfigListing.serializer(), readConfigs()) }.getOrNull()
+        callback.onResult(document)
     }
 
     /** Reachability for one configured source, or for a candidate not yet saved. */
     fun health(configId: String, callback: HealthCallback) {
         scope.launch {
-            val config = SourceRegistry.config(configId)
-            val health = if (config != null) {
-                SourceRegistry.probeCandidate(config)
-            } else {
-                com.music.bitchord.data.sources.SourceHealth.Rejected("Unknown source")
+            val health = try {
+                withTimeoutOrNull(15_000) {
+                    val config = SourceRegistry.config(configId)
+                    if (config != null) SourceRegistry.probeCandidate(config)
+                    else com.music.bitchord.data.sources.SourceHealth.Rejected("Unknown source")
+                } ?: com.music.bitchord.data.sources.SourceHealth.Unreachable("The source did not answer in time. Try again.")
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) {
+                com.music.bitchord.data.sources.SourceHealth.Unreachable("The source could not be checked. Try again.")
             }
             callback.onResult(configId, healthName(health), healthDetail(health))
         }
@@ -320,7 +326,10 @@ object SourceResolverBridge {
         enabled: Boolean,
         callback: ActionCallback,
     ) {
-        val existing = SourceRegistry.config(id)
+        val existing = try { SourceRegistry.config(id) } catch (_: Exception) {
+            callback.onResult(false, "Sources could not be read. Unlock your device or Keychain and try again.")
+            return
+        }
         saveWithRefresh(id, kind, label, baseUrl, enabled,
             existing?.refreshEnabled ?: false, existing?.refreshUrl.orEmpty(), existing?.refreshUrlUnavailable ?: false, callback)
     }
@@ -379,7 +388,7 @@ object SourceResolverBridge {
      * asks them — `AddonSource` only — so a tab that says "no addons yet" and a
      * search that finds none can never disagree.
      */
-    fun addonCount(): Int = SourceRegistry.active().count { it is AddonSource }
+    fun addonCount(): Int = runCatching { SourceRegistry.active().count { it is AddonSource } }.getOrDefault(0)
 
     fun setEnabled(configId: String, enabled: Boolean, callback: ActionCallback) {
         sourceAction(callback) { SourceRegistry.setEnabled(configId, enabled) }
@@ -413,11 +422,13 @@ object SourceResolverBridge {
      * are all the same source.
      */
     fun isDuplicate(url: String, exceptId: String?): Boolean =
-        SourceRegistry.duplicateOf(url, exceptId) != null
+        runCatching { SourceRegistry.duplicateOf(url, exceptId) != null }.getOrDefault(false)
 
     /** Recovery retries must ask enabled addons again rather than reuse an expired URL. */
     fun refreshPlaybackSources() {
-        SourceRegistry.activeForPlayback().filterIsInstance<AddonSource>().forEach { it.clearCompletedTrackCalls() }
+        runCatching {
+            SourceRegistry.activeForPlayback().filterIsInstance<AddonSource>().forEach { it.clearCompletedTrackCalls() }
+        }
     }
 
     private fun lookup(callback: StreamCallback, block: suspend () -> SourceStream?) {
