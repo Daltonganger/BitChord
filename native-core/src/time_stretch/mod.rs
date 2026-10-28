@@ -247,8 +247,14 @@ impl TimeStretch {
         // No search from here: with no more input there is nothing to match
         // against, and the natural continuation is what the ear expects at the
         // end of a file.
-        while self.limit() >= self.anchor + self.frame {
-            let at = self.anchor;
+        loop {
+            // Continue the waveform that actually entered the overlap. The
+            // nominal anchor may differ by a search offset; jumping to it
+            // makes the return to 1x a phase splice.
+            let at = self.placed.map(|p| p + self.hop).unwrap_or(self.anchor);
+            if self.limit() < at + self.frame {
+                break;
+            }
             self.place(at);
         }
         // The accumulator's remaining window, normalised by the weight that
@@ -280,7 +286,7 @@ impl TimeStretch {
                 .extend_from_slice(&self.fifo[(end - self.base) * 2..]);
         }
         self.produced = self.out.len() / 2;
-        self.anchor = self.fifo.len() / 2;
+        self.anchor = self.limit();
     }
 
     /// Emits output while the input allows a frame to be placed.
@@ -478,6 +484,44 @@ mod tests {
     use core::f64::consts::PI as TAU;
 
     const RATE: u32 = 48_000;
+
+    #[test]
+    fn retiring_a_glided_stretcher_continues_the_actual_waveform() {
+        let mut stage = TimeStretch::new(0.97);
+        for second in 0..4 {
+            if second == 2 {
+                stage.set_rate(1.0);
+            }
+            let input: Vec<f32> = (second * RATE..(second + 1) * RATE)
+                .flat_map(|i| {
+                    let x = (i as f64 * 2.0 * TAU * 440.0 / RATE as f64).sin() as f32 * 0.3;
+                    [x, x]
+                })
+                .collect();
+            for chunk in input.chunks(1024) {
+                stage.process(chunk);
+                stage.take();
+            }
+        }
+        let continuation = stage.placed.unwrap() + stage.hop;
+        let expected: Vec<f32> = (continuation..stage.limit())
+            .flat_map(|i| [stage.left_at(i), stage.right_at(i)])
+            .collect();
+        stage.flush();
+        let tail = stage.take();
+        assert_eq!(
+            tail.len(),
+            expected.len(),
+            "The flush jumped from the waveform placement to the nominal anchor"
+        );
+        for (a, b) in tail.iter().zip(expected) {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "The glide hand-back mixed different waveform phases"
+            );
+        }
+        assert_eq!(stage.latency_frames(), 0.0);
+    }
 
     #[test]
     fn bass_alignment_scales_with_the_output_route() {
