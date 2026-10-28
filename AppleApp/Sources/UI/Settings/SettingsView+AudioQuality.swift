@@ -69,7 +69,7 @@ extension SettingsView {
             }
         }
         rows.row("Sound Mode", "preserves", "recording", "transparent", "clarity", "spatial") {
-            Text(controller.soundMode == "TRANSPARENT" ? "Preserves the recording. Playback speed, Automix and crossfade keep their own settings." : "Reference clarity adds tonal contour, centered bass and gentle width. Manual EQ and spatial remain optional.")
+            Text(controller.soundMode == "TRANSPARENT" ? "Preserves the recording. Loudness normalization, playback speed, Automix and crossfade keep their own settings." : "Reference clarity adds tonal contour, centered bass and gentle width. Manual EQ and spatial remain optional.")
                 .font(.footnote).foregroundStyle(.secondary)
         }
         qualityRow(

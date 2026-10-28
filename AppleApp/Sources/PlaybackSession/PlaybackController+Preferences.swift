@@ -122,7 +122,7 @@ extension PlaybackController {
     }
 
     nonisolated static func storedLoudnessMode() -> LoudnessMode {
-        let legacy = PlatformSettings.shared.getBoolean(key: "loudness_normalization", default: false)
+        let legacy = PlatformSettings.shared.getBoolean(key: "loudness_normalization", default: true)
         let raw = PlatformSettings.shared.getString(key: "loudness_mode", default: legacy ? "TRACK" : "OFF")
         return raw == "ALBUM" ? .album : raw == "TRACK" ? .track : .off
     }

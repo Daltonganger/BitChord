@@ -201,7 +201,7 @@ pub fn run_mixer(
         nerd,
         last_diagnostic_signature: None,
         last_diagnostic_publish: None,
-        // New profiles default to Off; the owner restores any legacy setting.
+        // The low-level engine starts neutral; the app restores its policy.
         loudness_enabled: false,
         loudness_mode: LoudnessMode::Off,
         swap_probe: SwapProbe::default(),
