@@ -418,7 +418,7 @@ final class PlaybackController {
     var clarityPreset = PlatformSettings.shared.getString(key: "clarity_preset", default: "REFERENCE")
     var clarityWet = Double(PlatformSettings.shared.getFloat(key: "clarity_wet", default: 1))
     var loudnessMode = PlatformSettings.shared.getString(key: "loudness_mode", default: PlatformSettings.shared.getBoolean(key: "loudness_normalization", default: true) ? "TRACK" : "OFF")
-    var loudnessNormalization = Self.storedLoudnessMode() != .off
+    var loudnessNormalization = PlaybackController.storedLoudnessMode() != .off
     /// CPU budget for Automix's background analysis (EFFICIENT / BALANCED /
     /// PERFORMANCE). EFFICIENT skips the vocal model; the 1 / 2 / 4 thread
     /// counts are upstream's ORT numbers, reported for the analysis path.
