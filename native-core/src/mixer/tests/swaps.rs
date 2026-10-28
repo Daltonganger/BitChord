@@ -2,6 +2,124 @@
 
 use super::*;
 
+#[test]
+fn seeking_during_a_pending_swap_rejects_it_and_keeps_the_original() {
+    let (harness, low, high) = SwapHarness::new("seek-pending-swap");
+    let (reply, loaded) = crossbeam_channel::bounded(1);
+    harness
+        .tx
+        .send(Command::Load {
+            request: SwapHarness::source(&low, "Original", 96),
+            reply,
+        })
+        .unwrap();
+    loaded
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    harness.tx.send(Command::Pause).unwrap();
+    let (reply, swapped) = crossbeam_channel::bounded(1);
+    harness
+        .tx
+        .send(Command::SwapSource {
+            request: SwapHarness::source(&high, "Candidate", 320),
+            crossfade_seconds: 0.55,
+            reply,
+        })
+        .unwrap();
+    swapped
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    assert_eq!(harness.nerd.lock().unwrap().swap_accepted, None);
+    harness.tx.send(Command::Seek { seconds: 2.0 }).unwrap();
+    // A source-gated command proves the seek retained the original voice.
+    harness
+        .tx
+        .send(Command::ForSource {
+            source: low.display().to_string(),
+            command: Box::new(Command::QueueNext {
+                request: SwapHarness::source(&high, "Next", 320),
+            }),
+        })
+        .unwrap();
+    let (reply, pending) = crossbeam_channel::bounded(1);
+    harness.tx.send(Command::PendingTrack { reply }).unwrap();
+    assert_eq!(
+        pending
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .title,
+        "Next"
+    );
+    let snapshot = harness.nerd.lock().unwrap().clone();
+    assert_eq!(snapshot.swap_target, high.display().to_string());
+    assert_eq!(snapshot.swap_accepted, Some(false));
+    harness.finish();
+}
+
+#[test]
+fn stop_or_next_during_a_pending_swap_reports_rejection() {
+    for stop in [true, false] {
+        let (harness, low, high) = SwapHarness::new(if stop {
+            "stop-pending-swap"
+        } else {
+            "next-pending-swap"
+        });
+        let (reply, loaded) = crossbeam_channel::bounded(1);
+        harness
+            .tx
+            .send(Command::Load {
+                request: SwapHarness::source(&low, "Original", 96),
+                reply,
+            })
+            .unwrap();
+        loaded
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        harness.tx.send(Command::Pause).unwrap();
+        let (reply, swapped) = crossbeam_channel::bounded(1);
+        harness
+            .tx
+            .send(Command::SwapSource {
+                request: SwapHarness::source(&high, "Candidate", 320),
+                crossfade_seconds: 0.55,
+                reply,
+            })
+            .unwrap();
+        swapped
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        if stop {
+            harness.tx.send(Command::Stop).unwrap();
+        } else {
+            let (reply, skipped) = crossbeam_channel::bounded(1);
+            harness
+                .tx
+                .send(Command::SkipToPending {
+                    skip_mix_enabled: false,
+                    reply,
+                })
+                .unwrap();
+            assert!(skipped
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_err());
+        }
+        let (reply, barrier) = crossbeam_channel::bounded(1);
+        harness.tx.send(Command::PendingTrack { reply }).unwrap();
+        assert!(barrier
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .is_none());
+        assert_eq!(harness.nerd.lock().unwrap().swap_accepted, Some(false));
+        harness.finish();
+    }
+}
+
 /// How well a swap actually lines up.
 ///
 /// Swapping to a byte-identical copy makes alignment directly measurable:
@@ -77,6 +195,9 @@ fn swap_to_an_identical_copy_reports_its_alignment() {
         rho > 0.99,
         "two byte-identical copies must correlate at 1.0, got {rho}"
     );
+    let snapshot = harness.nerd.lock().unwrap().clone();
+    assert_eq!(snapshot.swap_target, copy.display().to_string());
+    assert_eq!(snapshot.swap_accepted, Some(true));
     harness.finish();
 }
 
@@ -365,6 +486,9 @@ fn source_swap_with_mismatched_recording_is_rejected() {
         kbps, 96,
         "kbps must NOT be promoted to 320 when swap is rejected"
     );
+    let snapshot = harness.nerd.lock().unwrap().clone();
+    assert_eq!(snapshot.swap_target, mismatched.display().to_string());
+    assert_eq!(snapshot.swap_accepted, Some(false));
     harness.finish();
 }
 

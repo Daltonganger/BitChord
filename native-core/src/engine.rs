@@ -915,6 +915,18 @@ impl PlayerEngine {
             if matches!(bars, 8 | 16) { bars } else { 0 };
     }
 
+    /// Opening a replacement is not acceptance: the mixer decides after rendering the fade.
+    /// None means this target has not completed a swap; a rejection keeps the original voice.
+    pub fn source_swap_outcome(&self, source: String) -> Option<bool> {
+        self.nerd.lock().ok().and_then(|snap| {
+            if snap.swap_target == source {
+                snap.swap_accepted
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn nerd_stats(&self) -> NerdStatsRec {
         let snap = self.nerd.lock().unwrap().clone();
         NerdStatsRec {
