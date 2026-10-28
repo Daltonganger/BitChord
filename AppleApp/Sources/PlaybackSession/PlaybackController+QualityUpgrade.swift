@@ -442,6 +442,7 @@ extension PlaybackController {
             // whole output ring, and the engine is the only side that knows
             // where the samples it is about to replace actually are.
             let gate = await MainActor.run { self.loadSubmissionGate }
+            try Task.checkCancellation()
             guard let info = try gate.performIfCurrent(generation: generation, {
                 try engine.swapSourceIfCurrent(
                     request: LoadRequest(
@@ -466,17 +467,16 @@ extension PlaybackController {
                 )
             }) else { return }
             log.record("upgrade candidate opened; waiting for mixer acceptance", about: mediaId)
-            var accepted: Bool?
-            while accepted == nil {
-                try Task.checkCancellation()
-                let stillCurrent = await MainActor.run {
-                    self.playGeneration == generation && self.current?.id == mediaId &&
-                        (self.state == .playing || self.state == .paused)
-                }
-                guard stillCurrent else { return }
-                accepted = engine.sourceSwapOutcome(source: info.source)
-                if accepted == nil { try await Task.sleep(for: .milliseconds(100)) }
-            }
+            let accepted = await PlaybackSwapConfirmation.wait(
+                isCurrent: {
+                    await MainActor.run {
+                        self.playGeneration == generation && self.current?.id == mediaId &&
+                            (self.state == .playing || self.state == .paused)
+                    }
+                },
+                outcome: { engine.sourceSwapOutcome(source: info.source) }
+            )
+            guard let accepted else { return }
             guard accepted == true else {
                 QualityUpgrade.refuseUpgrades(mediaId)
                 QualityUpgrade.forget(mediaId)
