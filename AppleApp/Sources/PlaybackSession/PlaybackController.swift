@@ -147,6 +147,7 @@ final class PlaybackController {
     var duration: Double = 0
     var lastError: String?
     @ObservationIgnored var pendingPlaybackLatency: PlaybackLatencySample?
+    @ObservationIgnored var nextPreparationTask: Task<Void, Never>?
     @ObservationIgnored var urlPrefetchTask: Task<Void, Never>?
     @ObservationIgnored var urlPrefetchFingerprint: String?
     /// A′3's session pacing: at most one transition in four may use an effect

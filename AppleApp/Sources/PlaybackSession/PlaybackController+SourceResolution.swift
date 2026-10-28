@@ -88,6 +88,7 @@ extension PlaybackController {
 
     static func resolveSource(
         _ entry: QueueEntry, prefs: ResolvePrefs,
+        preparationBudget: TimeInterval? = nil,
         latencyResolved: PlaybackLatencyRecorder? = nil
     ) async throws -> ResolveOutcome {
         await DownloadStore.shared.waitUntilReady()
@@ -193,20 +194,35 @@ extension PlaybackController {
             )
         }
         return try await resolveWithModulePriority(
-            entry, videoId: videoId, prefs: prefs, latencyResolved: latencyResolved
+            entry, videoId: videoId, prefs: prefs, preparationBudget: preparationBudget, latencyResolved: latencyResolved
         )
     }
 
     /// Upstream `resolveWithModulePriority`: start YouTube and substitutes
     /// together. Lossless gives configured sources up to three seconds to answer
     /// before a ready YouTube fallback is selected. A lookup that loses is **not** cancelled — it is handed
-    /// to QualityUpgrade as `inFlight`.
+    /// to QualityUpgrade as `inFlight`. Preparing the next track may spend a
+    /// larger budget while the current track is still playing.
     private static func resolveWithModulePriority(
         _ entry: QueueEntry, videoId: String, prefs: ResolvePrefs,
+        preparationBudget: TimeInterval?,
         latencyResolved: PlaybackLatencyRecorder? = nil
     ) async throws -> ResolveOutcome {
         let lookup = Task<QualityUpgrade.Candidate?, Never> {
-            await Self.resolveSubstitute(entry, prefs: prefs)?.asCandidate()
+            if preparationBudget != nil && prefs.canSubstitute && !entry.isVideo {
+                let stream = await SourceSubstitution.prefetch(
+                    title: entry.title, artist: entry.artist,
+                    durationSec: entry.durationSeconds > 0 ? Int(entry.durationSeconds.rounded()) : nil,
+                    album: entry.albumName,
+                    isExplicit: entry.isExplicit.map { KotlinBoolean(value: $0) }
+                )
+                return stream.map { QualityUpgrade.Candidate(
+                    url: $0.url, headers: $0.headers,
+                    format: QualityUpgrade.Format(codec: $0.codec, kbps: $0.kbps, lossless: $0.lossless),
+                    durationSec: $0.durationSec
+                ) }
+            }
+            return await Self.resolveSubstitute(entry, prefs: prefs)?.asCandidate()
         }
         let fallback = Task<ResolvedSource, Error> {
             try await Self.resolveYouTube(videoId: videoId, prefs: prefs)
@@ -244,7 +260,8 @@ extension PlaybackController {
         _ = Task { await race.finishLookup(await lookup.value) }
         _ = Task { await race.finishFallback(try? await fallback.value) }
 
-        switch await race.wait(timeoutNanoseconds: preferLossless ? 3_000_000_000 : 800_000_000) {
+        let waitSeconds = preferLossless ? (preparationBudget ?? 3) : 0.8
+        switch await race.wait(timeoutNanoseconds: UInt64(waitSeconds * 1_000_000_000)) {
         case .preferred(let stream):
             fallback.cancel()
             await latencyResolved?(ProcessInfo.processInfo.systemUptime, "cold", "source substitute")
@@ -500,8 +517,8 @@ extension PlaybackController {
     ///
     ///  - The track is matched by `TrackMatcher` before anything is opened, so a
     ///    cover cannot be substituted for the recording the listener picked.
-    ///  - Rank decides who is asked; the race decides who answers first. The two
-    ///    are not the same thing, and only the first one is a list.
+    ///  - Rank decides who is asked. Lossless compares completed answers within
+    ///    a bounded window instead of selecting only the first responder.
     ///  - `playingDurationSec` set routes this through the *upgrade* path, whose bar
     ///    is "beats what is actually playing" rather than "satisfies the request",
     ///    and which waits for every source so a slow one holding the FLAC still
@@ -518,7 +535,7 @@ extension PlaybackController {
         let stream = await SourceSubstitution.substitute(
             title: entry.title,
             artist: entry.artist,
-            durationSec: playingDurationSec,
+            durationSec: playingDurationSec ?? (entry.durationSeconds > 0 ? Int(entry.durationSeconds.rounded()) : nil),
             album: entry.albumName,
             isExplicit: entry.isExplicit.map { KotlinBoolean(value: $0) },
             isVideo: entry.isVideo,
@@ -555,6 +572,39 @@ extension PlaybackController {
         let url: String
         let kbps: Int
         let lossless: Bool?
+    }
+
+    /// Buffer the chosen next-track rendition under its own cache identity.
+    /// A failed speculative download retains the remote stream for normal loading.
+    static func bufferPreparedSource(_ outcome: ResolveOutcome, mediaId: String) async throws -> ResolveOutcome {
+        let chosen = outcome.source
+        guard chosen.origin == .substitute,
+              chosen.source.hasPrefix("https://") || chosen.source.hasPrefix("http://"),
+              !PlaybackCodecCapabilities.shared.canRenderDolby(codec: chosen.codec, headers: chosen.headers) else {
+            return outcome
+        }
+        do {
+            let path = try await streamViaKtor(
+                videoId: "\(mediaId)#prepared-\(DiskCache.hashName(chosen.source))",
+                url: chosen.source, headers: chosen.headers,
+                codec: chosen.codec ?? "unknown", kbps: chosen.kbps,
+                durationSeconds: chosen.durationSec
+            )
+            try Task.checkCancellation()
+            let buffered = ResolvedSource(
+                source: path, headers: [:], kbps: chosen.kbps,
+                lossless: chosen.lossless, codec: chosen.codec,
+                durationSec: chosen.durationSec, origin: .substitute
+            )
+            return ResolveOutcome(source: buffered, leftover: outcome.leftover)
+        } catch is CancellationError {
+            outcome.leftover?.cancel()
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            PlaybackDebugLog.shared.record("next-track buffer unavailable; retaining selected stream", about: mediaId)
+            return outcome
+        }
     }
 
     /// Warm short-lived stream URLs for the upcoming queue window. This does

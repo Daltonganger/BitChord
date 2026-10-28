@@ -193,6 +193,8 @@ extension PlaybackController {
     /// must not arm the next song — the current track seeks to 0 at EOS.
     /// Repeat-one *with* Automix arms a self-mix into the same track.
     func syncEngineQueueNext() {
+        nextPreparationTask?.cancel()
+        nextPreparationTask = nil
         guard !sleepAfterTrack else { return }
         if dolbyRenderer != nil {
             nowPlaying.updateCommands(canNext: nextEntry != nil, canPrevious: current != nil, canSeek: duration > 0)
@@ -249,9 +251,18 @@ extension PlaybackController {
         // `.utility` is deferrable. The scheduler was holding this until the
         // song was nearly over, so the next download — and the plan that waits
         // on it — started after the blend should already have been playing.
-        Task.detached(priority: .userInitiated) {
+        // Spend spare playback time on quality, but keep a short-track transition
+        // out of the twelve-second preparation window.
+        let fadeSeconds = automix ? max(pendingAutomixPlan?.fadeSeconds ?? 8, 8)
+            : Double(PlatformSettings.shared.getInt(key: "crossfade_seconds", default: 0))
+        let preparationBudget = PlaybackPreparationPolicy.lookupBudget(
+            remainingSeconds: outgoingDuration - position, transitionSeconds: fadeSeconds
+        )
+        nextPreparationTask = Task.detached(priority: .userInitiated) {
             do {
-                let outcome = try await Self.resolveSource(next, prefs: prefs)
+                let selection = try await Self.resolveSource(next, prefs: prefs, preparationBudget: preparationBudget)
+                try Task.checkCancellation()
+                let outcome = try await Self.bufferPreparedSource(selection, mediaId: nextId)
                 let stillCurrent = await MainActor.run { [weak self] in
                     guard let self else { return false }
                     return self.playGeneration == generation
@@ -339,6 +350,7 @@ extension PlaybackController {
                 // the plan as more of either file arrives while the mixer is arming.
                 var attempt = 0
                 while true {
+                    try Task.checkCancellation()
                     let stillPlanning = await MainActor.run { [weak self] in
                         guard let self else { return false }
                         return self.playGeneration == generation
@@ -462,6 +474,8 @@ extension PlaybackController {
                     attempt += 1
                     try await Task.sleep(nanoseconds: 2_000_000_000)
                 }
+            } catch is CancellationError {
+                return
             } catch {
                 // Keep the current song playing; natural end retries with a
                 // full load and reports any final failure to the listener.

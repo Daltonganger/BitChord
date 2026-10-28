@@ -18,8 +18,7 @@ import BitChordShared
 ///  - `upgrade` — the unhurried second look, run with sound already playing. Waits
 ///    for every source, so a slow source holding the FLAC still gets to serve it
 ///    mid-track rather than being dropped for a fast 320.
-///  - `prefetch` — the same race, earlier, narrowed to the sources quick enough to
-///    be worth asking about a track nobody has reached yet.
+///  - `prefetch` — a longer bounded comparison while the current track is playing.
 enum SourceSubstitution {
 
     struct Stream: Sendable {
@@ -110,7 +109,7 @@ enum SourceSubstitution {
         }
     }
 
-    /// The copy a source quick enough to ask about *before* the track is played.
+    /// The best available copy for the next track, including slower addons.
     ///
     /// The caller is expected to pin a returned stream before caching any of it —
     /// otherwise playback re-runs the race, may land on a different source, and
