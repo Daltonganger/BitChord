@@ -188,10 +188,10 @@ extension PlaybackController {
                         self.upgradeFor = nil
                         self.qualityUpgradeTask = nil
                     }
+                    QualityUpgrade.onRaceEnd(mediaId)
                     if self.current?.id == mediaId {
                         self.racingLossless = QualityUpgrade.isRacing(mediaId)
                     }
-                    QualityUpgrade.onRaceEnd(mediaId)
                 }
             }
             let moment = await MainActor.run { [weak self] () -> String in
@@ -391,15 +391,15 @@ extension PlaybackController {
             log.record("upgrade audition failed", about: mediaId)
             return
         }
-        let again = await MainActor.run { () -> (Double, Bool, Double?, String?, [String: String], ResolvedSource.Origin?)? in
+        let again = await MainActor.run { () -> (Double, Bool, Double?, String?)? in
             guard self.playGeneration == generation, self.current?.id == mediaId else { return nil }
             if self.smartMixInProgress { return nil }
             return (
                 self.position, self.isPlaying, self.currentLoudnessDb,
-                self.loadedSourcePath, self.loadedSourceHeaders, self.resolvedOrigin[mediaId]
+                self.loadedSourcePath
             )
         }
-        guard let (nowPos, playing, loudnessDb, priorSource, priorHeaders, priorOrigin) = again else {
+        guard let (nowPos, playing, loudnessDb, priorSource) = again else {
             QualityUpgrade.shelve(mediaId, stream: stream)
             log.record("upgrade proved but the queue moved on; shelved", about: mediaId)
             return
@@ -442,6 +442,7 @@ extension PlaybackController {
             // whole output ring, and the engine is the only side that knows
             // where the samples it is about to replace actually are.
             let gate = await MainActor.run { self.loadSubmissionGate }
+            try Task.checkCancellation()
             guard let info = try gate.performIfCurrent(generation: generation, {
                 try engine.swapSourceIfCurrent(
                     request: LoadRequest(
@@ -465,6 +466,28 @@ extension PlaybackController {
                     expectedSource: priorSource ?? ""
                 )
             }) else { return }
+            log.record("upgrade candidate opened; waiting for mixer acceptance", about: mediaId)
+            let accepted = await PlaybackSwapConfirmation.wait(
+                isCurrent: {
+                    await MainActor.run {
+                        self.playGeneration == generation && self.current?.id == mediaId &&
+                            (self.state == .playing || self.state == .paused)
+                    }
+                },
+                outcome: { engine.sourceSwapOutcome(source: info.source) }
+            )
+            guard let accepted else { return }
+            guard accepted == true else {
+                QualityUpgrade.refuseUpgrades(mediaId)
+                QualityUpgrade.forget(mediaId)
+                await MainActor.run {
+                    guard self.playGeneration == generation, self.current?.id == mediaId else { return }
+                    self.nerd = engine.nerdStats()
+                    self.racingLossless = false
+                }
+                log.record("quality upgrade rejected by mixer; original source remains active", about: mediaId)
+                return
+            }
             await MainActor.run {
                 guard self.playGeneration == generation, self.current?.id == mediaId else { return }
                 QualityUpgrade.unshelve(mediaId)
@@ -474,7 +497,8 @@ extension PlaybackController {
                 self.resolvedOrigin[mediaId] = .substitute
                 self.duration = info.durationSeconds
                 // The playhead is continuous across a swap; the engine keeps it.
-                self.position = swapPos
+                self.position = engine.positionSeconds()
+                self.positionSampledAt = Date()
                 self.nerd = engine.nerdStats()
                 self.racingLossless = false
                 // No syncEngineQueueNext here on purpose: the armed blend
@@ -489,35 +513,8 @@ extension PlaybackController {
                     about: mediaId
                 )
             }
-            // Monitor swap crossfade completion: verify Pearson correlation rho >= 0.85.
-            // If the engine rejected the swap due to mismatched recording or transcode,
-            // roll back the source path and mark the track refused for upgrades.
-            Task { [weak self] in
-                let waitSeconds = QualityUpgrade.swapCrossfadeSeconds + 0.2
-                try? await Task.sleep(nanoseconds: UInt64(waitSeconds * 1_000_000_000))
-                guard let self = self else { return }
-                await MainActor.run {
-                    guard self.playGeneration == generation, self.current?.id == mediaId else { return }
-                    let currentNerd = self.engine.nerdStats()
-                    self.nerd = currentNerd
-                    if let rho = currentNerd.swapCorrelation, rho < 0.85 {
-                        QualityUpgrade.refuseUpgrades(mediaId)
-                        if let prior = priorSource {
-                            self.loadedSourcePath = prior
-                            self.loadedSourceHeaders = priorHeaders
-                            self.resolvedOrigin[mediaId] = priorOrigin
-                            // No re-arm here either: the engine is still on the
-                            // swapped file (the revert is bookkeeping only), so
-                            // a sync would compare against the wrong source and
-                            // drop the queued next. The armed blend stands.
-                        }
-                        log.record(
-                            "swap rejected by engine (rho=\(String(format: "%.3f", rho)) < 0.85); reverted to original source",
-                            about: mediaId
-                        )
-                    }
-                }
-            }
+        } catch is CancellationError {
+            return
         } catch EngineError.LoadFailed(let message)
             where message.contains("transition is already running") {
             // A crossfade reached the engine before the swap did. That is a

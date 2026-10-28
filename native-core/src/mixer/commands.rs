@@ -187,6 +187,8 @@ pub(super) fn handle_command(state: &mut MixerState, cmd: Command, ring: &mut Pr
             skip_mix_enabled,
             reply,
         } => {
+            // The upgrade candidate is not the next song and has not passed correlation yet.
+            state.reject_pending_swap();
             // A blend already sounding completes now: the listener asked for
             // its target, not for the rest of the fade.
             if state.incoming.is_some() {
