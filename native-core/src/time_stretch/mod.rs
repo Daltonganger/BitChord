@@ -50,7 +50,7 @@
 //!
 //! ## Stereo
 //!
-//! One offset is chosen per frame from the mid signal and applied to both
+//! One offset is chosen per frame from both channels and applied to both
 //! channels. Choosing per channel would let L and R slide apart inside one hop
 //! and smear the stereo image on anything with reverb in it.
 //!
@@ -177,13 +177,6 @@ impl TimeStretch {
         self.base + self.fifo.len() / 2
     }
 
-    /// Mid (L+R)/2 of the frame at absolute input index `frame_index`, for the
-    /// similarity search.
-    fn mid_at(&self, frame_index: usize) -> f32 {
-        let index = (frame_index - self.base) * 2;
-        0.5 * (self.fifo[index] + self.fifo[index + 1])
-    }
-
     /// Changes the stretch ratio mid-stream. Safe at any point: the overlap-add
     /// state and the anchor are untouched, so a rate change is heard as a glide
     /// rather than as a splice.
@@ -255,7 +248,11 @@ impl TimeStretch {
         // so only the first `FRAME - HOP` samples carry the last frame; the
         // final hop is zeros, and emitting it put 128 samples of silence
         // between the stretched audio and the pass-through that follows it.
-        let held = if self.placed.is_some() { FRAME - HOP } else { 0 };
+        let held = if self.placed.is_some() {
+            FRAME - HOP
+        } else {
+            0
+        };
         for frame in 0..held {
             // The window is zero at its first sample, so the divisor can be too.
             // The floor is only here to turn a 0/0 into silence; anywhere the
@@ -323,10 +320,17 @@ impl TimeStretch {
         if reference + CORRELATE > limit {
             return self.anchor;
         }
-        let reference_mono: Vec<f32> = (0..CORRELATE).map(|i| self.mid_at(reference + i)).collect();
+        // Sum channel correlations, not the channels themselves. L+R can
+        // cancel on wide stereo material, leaving no alignment reference.
+        // One shared placement still preserves the stereo timing.
+        let reference_stereo: Vec<[f32; 2]> = (0..CORRELATE)
+            .map(|i| [self.left_at(reference + i), self.right_at(reference + i)])
+            .collect();
         let earliest = self.anchor.saturating_sub(SEARCH as usize);
         let latest = self.anchor + SEARCH as usize;
-        let usable = |candidate: usize| candidate >= earliest && candidate <= latest && candidate + FRAME <= limit;
+        let usable = |candidate: usize| {
+            candidate >= earliest && candidate <= latest && candidate + FRAME <= limit
+        };
 
         let mut best = self.anchor;
         let mut best_score = f32::NEG_INFINITY;
@@ -347,7 +351,7 @@ impl TimeStretch {
                     continue;
                 }
                 considered = true;
-                let score = self.similarity(&reference_mono, candidate, COARSE);
+                let score = self.similarity(&reference_stereo, candidate, COARSE);
                 if score > best_score {
                     best_score = score;
                     best = candidate;
@@ -364,14 +368,14 @@ impl TimeStretch {
         }
         // Refine between the coarse steps, at full resolution.
         let centre = best;
-        let mut best_score = self.similarity(&reference_mono, centre, 1);
+        let mut best_score = self.similarity(&reference_stereo, centre, 1);
         for distance in 1..COARSE {
             for candidate in [centre.checked_sub(distance), Some(centre + distance)] {
                 let Some(candidate) = candidate else { continue };
                 if !usable(candidate) {
                     continue;
                 }
-                let score = self.similarity(&reference_mono, candidate, 1);
+                let score = self.similarity(&reference_stereo, candidate, 1);
                 if score > best_score {
                     best_score = score;
                     best = candidate;
@@ -384,15 +388,17 @@ impl TimeStretch {
     /// Normalised correlation of the input at `candidate` with `reference`,
     /// over every `stride`-th sample. Normalised, so a quiet stretch of input
     /// cannot win on level alone.
-    fn similarity(&self, reference: &[f32], candidate: usize, stride: usize) -> f32 {
+    fn similarity(&self, reference: &[[f32; 2]], candidate: usize, stride: usize) -> f32 {
         let mut dot = 0.0f32;
         let mut energy = 0.0f32;
         let mut reference_energy = 0.0f32;
         for i in (0..CORRELATE).step_by(stride) {
-            let sample = self.mid_at(candidate + i);
-            dot += sample * reference[i];
-            energy += sample * sample;
-            reference_energy += reference[i] * reference[i];
+            let samples = [self.left_at(candidate + i), self.right_at(candidate + i)];
+            for ch in 0..2 {
+                dot += samples[ch] * reference[i][ch];
+                energy += samples[ch] * samples[ch];
+                reference_energy += reference[i][ch] * reference[i][ch];
+            }
         }
         dot / (reference_energy.max(1.0e-9) * energy.max(1.0e-9)).sqrt()
     }
@@ -461,6 +467,38 @@ mod tests {
     use core::f64::consts::PI as TAU;
 
     const RATE: u32 = 48_000;
+
+    #[test]
+    fn alignment_is_invariant_to_channel_polarity() {
+        for rate in [0.97, 1.03] {
+            let render = |right_polarity: f32| {
+                let input: Vec<f32> = (0..RATE as usize * 2)
+                    .flat_map(|i| {
+                        let x = (i as f64 * 2.0 * TAU * 440.0 / RATE as f64).sin() as f32 * 0.3;
+                        [x, x * right_polarity]
+                    })
+                    .collect();
+                let mut stretch = TimeStretch::new(rate);
+                let mut output = Vec::new();
+                for chunk in input.chunks(1024) {
+                    output.extend(stretch.process_and_take(chunk));
+                }
+                stretch.flush();
+                output.extend(stretch.take());
+                output
+            };
+            let same = render(1.0);
+            let opposite = render(-1.0);
+            assert_eq!(same.len(), opposite.len());
+            for (a, b) in same.chunks_exact(2).zip(opposite.chunks_exact(2)) {
+                assert_eq!(
+                    a[0], b[0],
+                    "right-channel polarity changed left-channel alignment at {rate}"
+                );
+                assert_eq!(a[1], -b[1]);
+            }
+        }
+    }
 
     /// A tone plus a second an octave up, so a pitch error cannot hide behind
     /// a single partial.
