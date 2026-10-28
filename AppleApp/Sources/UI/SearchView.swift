@@ -179,6 +179,62 @@ private struct MacSearchSourceTab: View {
 }
 #endif
 
+#if os(iOS)
+/// The iPad top bar's YouTube / Addons switcher.
+///
+/// The same capsule the Mac titlebar uses, sized for touch and set beside the
+/// search field: Music keeps its catalogue switcher in that row too. iPhone
+/// keeps the stock segmented picker above the results, where it has the width.
+struct IPadSearchSourceSwitcher: View {
+    @Binding var selection: SearchView.SearchSource
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(SearchView.SearchSource.allCases) { source in
+                IPadSearchSourceTab(
+                    title: source.label,
+                    isSelected: selection == source
+                ) {
+                    selection = source
+                }
+            }
+        }
+        .padding(2)
+        .background(Capsule().fill(Color.primary.opacity(0.08)))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .fixedSize()
+        .animation(.easeOut(duration: 0.15), value: selection)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Search source")
+    }
+}
+
+private struct IPadSearchSourceTab: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.78))
+                .padding(.horizontal, 14)
+                .frame(height: 32)
+                .background {
+                    if isSelected {
+                        Capsule().fill(Color.accentColor)
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+#endif
+
 struct SearchView: View {
     /// Upstream `TYPEAHEAD_MAX_RESULTS` in MainViewModel.kt.
     private static let typeaheadMaxResults = 15
@@ -298,7 +354,16 @@ struct SearchView: View {
                     ToolbarItem(placement: .topBarLeading) {
                         TopBarLeadingMark()
                     }
-                    ToolbarItem(placement: .topBarTrailing) { TopBarAccountButton() }
+                    if horizontalSizeClass == .regular {
+                        // iPad: the top bar carries the search field and the
+                        // catalogue switcher, as Music's does. The account is
+                        // already in the sidebar's footer.
+                        ToolbarItem(placement: .topBarTrailing) {
+                            IPadSearchSourceSwitcher(selection: $searchSource)
+                        }
+                    } else {
+                        ToolbarItem(placement: .topBarTrailing) { TopBarAccountButton() }
+                    }
                     #elseif os(macOS)
                     // The catalogue switcher lives in the titlebar beside the
                     // search field, as Music keeps its Library/Store control
@@ -327,7 +392,12 @@ struct SearchView: View {
                 .searchable(
                     text: $query,
                     isPresented: $isSearchPresented,
-                    placement: .navigationBarDrawer(displayMode: .always),
+                    // iPad puts the field in the top bar so the catalogue
+                    // switcher can sit beside it, as in Music. The phone keeps
+                    // the full-width drawer.
+                    placement: horizontalSizeClass == .regular
+                        ? .toolbarPrincipal
+                        : .navigationBarDrawer(displayMode: .always),
                     prompt: "Artists, Songs, Lyrics, and More"
                 )
                 #else
@@ -441,11 +511,13 @@ struct SearchView: View {
     private var resultsColumn: some View {
         VStack(spacing: 0) {
             #if os(iOS)
-            // Upstream's source picker is up only while the field is empty: once
-            // something is typed the page is about the results, and the picker
-            // would only push them down. On the Mac it lives in the titlebar,
-            // where it pushes nothing and stays reachable.
-            if term.isEmpty {
+            // The phone keeps upstream's picker above the results, up only
+            // while the field is empty: once something is typed the page is
+            // about the results, and the picker would only push them down. On a
+            // regular-width iPad and on the Mac it lives in the titlebar,
+            // beside the search field, where it pushes nothing and stays
+            // reachable.
+            if horizontalSizeClass != .regular, term.isEmpty {
                 sourceSwitcher
                     .padding(.horizontal, 16)
                     .padding(.bottom, 10)

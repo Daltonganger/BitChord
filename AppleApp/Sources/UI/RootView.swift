@@ -877,9 +877,13 @@ struct PlaybackPillMount: ViewModifier {
         #if os(iOS)
         if #available(iOS 26.0, *) {
             // One mount for every iOS device from 26: the system bottom
-            // accessory reflows with the sidebar on its own.
+            // accessory reflows with the sidebar on its own. The accessory is
+            // window-wide, though, so the pill itself keeps Music's 620 pt
+            // mini-player width and centres on iPad rather than stretching
+            // across the screen when the sidebar is closed.
             content.tabViewBottomAccessory {
                 PlaybackPill()
+                    .frame(maxWidth: sizeClass == .regular ? 620 : CGFloat.infinity)
                     .frame(maxWidth: .infinity)
             }
         } else if sizeClass == .regular {
