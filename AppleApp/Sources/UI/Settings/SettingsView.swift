@@ -54,7 +54,7 @@ struct SettingsView: View {
     @State var matchSourceRate = PlatformSettings.shared.getBoolean(key: "match_source_sample_rate", default: true)
     @State var bitPerfect = PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: false)
     @State var preferUsbDac = PlatformSettings.shared.getBoolean(key: "prefer_usb_dac", default: false)
-    @State var loudness = PlatformSettings.shared.getBoolean(key: "loudness_normalization", default: false)
+    @State var loudness = PlaybackController.storedLoudnessMode() != .off
     @State var loudnessModeSelection = PlatformSettings.shared.getString(key: "loudness_mode", default: "TRACK") == "ALBUM" ? "ALBUM" : "TRACK"
     @State var loudnessOffOnSpeaker = PlatformSettings.shared.getBoolean(key: "loudness_off_on_speaker", default: true)
     @State var automixPerf = PlatformSettings.shared.getString(key: "automix_performance", default: "BALANCED")

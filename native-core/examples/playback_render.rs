@@ -6,7 +6,7 @@ use native_core::{
     mixer::{
         run_mixer, Command, EngineEvents, NerdSnapshot, TrackInfo, TrackSource, TransitionPlan,
     },
-    ClarityPreset, ClarityTuning, PlaybackState, SoundMode, TrackEndReason,
+    ClarityPreset, ClarityTuning, LoudnessMode, PlaybackState, SoundMode, TrackEndReason,
 };
 use std::{
     collections::HashMap,
@@ -112,6 +112,14 @@ fn main() {
     ))
     .unwrap();
     tx.send(Command::SetSoundMode(mode)).unwrap();
+    tx.send(Command::SetLoudnessMode(
+        match option("--normalization").map(String::as_str) {
+            Some("track") => LoudnessMode::Track,
+            Some("album") => LoudnessMode::Album,
+            _ => LoudnessMode::Off,
+        },
+    ))
+    .unwrap();
     tx.send(Command::SetClarityTuning(ClarityTuning {
         preset,
         wet,
@@ -138,7 +146,7 @@ fn main() {
             headers: HashMap::new(),
             claimed_kbps: 0,
             duration_seconds: 0.0,
-            loudness_db: None,
+            loudness_db: option("--relative-loudness").map(|v| v.parse().unwrap()),
         },
         reply,
     })

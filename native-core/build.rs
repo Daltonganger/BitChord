@@ -5,7 +5,31 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../.git/HEAD");
+    // HEAD is usually a symbolic ref whose file does not change on commit.
+    // Track the resolved branch ref too, including in managed worktrees, so
+    // a release cannot carry an old commit label with newer source code.
+    let mut git_paths = vec!["HEAD".to_owned()];
+    if let Ok(branch) = std::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+    {
+        if branch.status.success() {
+            git_paths.push(String::from_utf8_lossy(&branch.stdout).trim().to_owned());
+        }
+    }
+    git_paths.push("packed-refs".to_owned());
+    for path in git_paths {
+        if let Ok(result) = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", &path])
+            .output()
+        {
+            let path = String::from_utf8_lossy(&result.stdout);
+            let path = path.trim();
+            if result.status.success() && std::path::Path::new(path).exists() {
+                println!("cargo:rerun-if-changed={path}");
+            }
+        }
+    }
     println!("cargo:rerun-if-changed=src/decode/apple_aac.c");
     let target = std::env::var("TARGET").unwrap();
     let mut cfg = cmake::Config::new("vendor/soxr-0.1.3");

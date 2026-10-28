@@ -142,10 +142,7 @@ impl MixerState {
                 voice.gain = 0.0;
                 voice.applied_gain = 0.0;
                 voice.normalization_mode = self.loudness_mode;
-                voice.arm_transition_match(
-                    self.current.as_ref(),
-                    self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
-                );
+                voice.arm_transition_match(self.current.as_ref(), self.loudness_enabled);
                 let track = self
                     .current
                     .as_ref()
@@ -260,10 +257,7 @@ impl MixerState {
                 // know what normalization it will get before the correction is
                 // worked out — a freshly opened voice is in `Off`.
                 voice.normalization_mode = self.loudness_mode;
-                voice.arm_transition_match(
-                    self.current.as_ref(),
-                    self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
-                );
+                voice.arm_transition_match(self.current.as_ref(), self.loudness_enabled);
                 let match_db = voice.match_db;
                 if let Ok(mut nerd) = self.nerd.lock() {
                     nerd.transition_match_db = (match_db.abs() >= 0.05).then_some(match_db);
@@ -422,10 +416,7 @@ impl MixerState {
         // fade re-arms the match here, while the incoming is still silent, so
         // the first frame is never corrected after it is audible.
         voice.normalization_mode = self.loudness_mode;
-        voice.arm_transition_match(
-            self.current.as_ref(),
-            self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
-        );
+        voice.arm_transition_match(self.current.as_ref(), self.loudness_enabled);
         self.incoming = Some(voice);
         let device_rate = self.device_rate;
         let snap_error = self

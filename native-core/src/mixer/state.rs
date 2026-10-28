@@ -226,10 +226,7 @@ impl MixerState {
     }
 
     pub(super) fn publish_nerd(&self, info: &TrackInfo, loudness_db: Option<f64>) {
-        let (_, gain_db) = loudness_gain(
-            loudness_db,
-            self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
-        );
+        let (_, gain_db) = loudness_gain(loudness_db, self.loudness_enabled);
         if let Ok(mut nerd) = self.nerd.lock() {
             // Preserved: they describe the last swap and the last transition,
             // not this track.
@@ -296,14 +293,13 @@ impl MixerState {
             true,
         ) {
             Ok(mut voice) => {
+                voice.normalization_mode = self.loudness_mode;
+                voice.arm_transition_match(None, self.loudness_enabled);
                 voice.gain = 1.0;
                 voice.release_plan_stretch(self.playback_speed, self.device_rate);
                 let info = voice.info.clone();
                 let duration = info.duration_seconds;
-                let (_, gain_db) = loudness_gain(
-                    voice.loudness_db,
-                    self.loudness_enabled && self.sound_mode == SoundMode::Enhanced,
-                );
+                let (_, gain_db) = loudness_gain(voice.loudness_db, self.loudness_enabled);
                 if let Ok(mut nerd) = self.nerd.lock() {
                     let correlation = nerd.swap_correlation;
                     *nerd = NerdSnapshot {

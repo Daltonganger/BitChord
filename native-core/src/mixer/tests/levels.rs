@@ -3,6 +3,77 @@
 use super::*;
 
 #[test]
+fn transparent_honors_normalization_before_peak_protection() {
+    let path = std::env::temp_dir().join(format!(
+        "bitchord-transparent-headroom-{}.wav",
+        std::process::id()
+    ));
+    let rate = 44_100u32;
+    let pcm: Vec<f32> = (0..rate * 2)
+        .flat_map(|i| {
+            let x = (i as f64 * std::f64::consts::TAU * 60.0 / rate as f64).sin() as f32 * 1.23;
+            [x, x]
+        })
+        .collect();
+    crate::diagnostics::write_float_wav(&path, rate, &pcm).unwrap();
+    let mut state = armed_test_state(&path, &path, Phase::Arming);
+    let (mut producer, mut consumer) = rtrb::RingBuffer::new(44_100 * 2);
+    super::super::commands::handle_command(
+        &mut state,
+        Command::SetLoudnessMode(LoudnessMode::Track),
+        &mut producer,
+    );
+    let (reply, response) = crossbeam_channel::bounded(1);
+    super::super::commands::handle_command(
+        &mut state,
+        Command::Load {
+            request: TrackSource {
+                source: path.display().to_string(),
+                title: "Hot bass".into(),
+                artist: String::new(),
+                start_seconds: 0.0,
+                plan: TransitionPlan::default(),
+                headers: Default::default(),
+                claimed_kbps: 0,
+                loudness_db: Some(6.0),
+                duration_seconds: 2.0,
+            },
+            reply,
+        },
+        &mut producer,
+    );
+    response.recv().unwrap().unwrap();
+    let mut output = Vec::new();
+    for _ in 0..90 {
+        super::super::render::render_available(&mut state, &mut producer);
+        while let Ok(x) = consumer.pop() {
+            output.push(x);
+        }
+        state.buffered_frames.store(0, Ordering::Relaxed);
+    }
+    let stats = state.nerd.lock().unwrap();
+    assert_eq!(
+        stats.loudness_gain_db,
+        Some(-6.0),
+        "Transparent ignored the selected normalization mode"
+    );
+    assert_eq!(
+        state.protector.interventions, 0,
+        "Source attenuation must leave this bass below the limiter ceiling"
+    );
+    let delay = state.protector.delay_frames() * 2;
+    let gain = 10f32.powf(-6.0 / 20.0);
+    for (actual, original) in output[delay + 2048..].iter().zip(&pcm[2048..]) {
+        assert!(
+            (actual - original * gain).abs() < 1e-5,
+            "Normalized bass acquired waveform distortion"
+        );
+    }
+    drop(stats);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn a_transition_matches_like_with_like_and_clamps() {
     let loud = deck(Some(-14.0), None, None);
     let quiet = deck(Some(-20.0), None, None);
@@ -21,9 +92,15 @@ fn a_transition_matches_like_with_like_and_clamps() {
     assert!((db + MAX_TRANSITION_MATCH_DB).abs() < 1e-9, "{db}");
     // A measured true peak bounds the boost further: a deck already peaking at
     // -0.5 dBTP has no room under the -1 dBTP ceiling.
-    let hot = DeckLoudness { true_peak_dbtp: Some(-0.5), ..quiet };
+    let hot = DeckLoudness {
+        true_peak_dbtp: Some(-0.5),
+        ..quiet
+    };
     assert_eq!(DeckLoudness::match_gain_db(hot, loud), Some(0.0));
-    let roomy = DeckLoudness { true_peak_dbtp: Some(-2.5), ..quiet };
+    let roomy = DeckLoudness {
+        true_peak_dbtp: Some(-2.5),
+        ..quiet
+    };
     let db = DeckLoudness::match_gain_db(roomy, loud).unwrap();
     assert!((db - 1.5).abs() < 1e-9, "{db}");
 
@@ -35,7 +112,10 @@ fn a_transition_matches_like_with_like_and_clamps() {
     let db = DeckLoudness::match_gain_db(louder, reference).unwrap();
     assert!((db + 6.0).abs() < 1e-9, "louder incoming got {db:+}");
     let db = DeckLoudness::match_gain_db(reference, louder).unwrap();
-    assert!((db - MAX_TRANSITION_BOOST_DB).abs() < 1e-9, "quieter incoming got {db:+}");
+    assert!(
+        (db - MAX_TRANSITION_BOOST_DB).abs() < 1e-9,
+        "quieter incoming got {db:+}"
+    );
 
     // An absolute figure and a relative one are not comparable.
     let mixed = deck(None, Some(3.0), None);

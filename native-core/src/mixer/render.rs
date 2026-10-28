@@ -67,15 +67,9 @@ fn diagnostic_stage_signature(state: &MixerState) -> u32 {
             .any(|voice| voice.filter.active()),
     );
     let (_, loudness_gain_db) = primary.map_or((1.0, None), |voice| {
-        normalization_gain(
-            voice,
-            state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
-        )
+        normalization_gain(voice, state.loudness_enabled)
     });
-    set(
-        14,
-        loudness_gain_db.is_some() && state.sound_mode == SoundMode::Enhanced,
-    );
+    set(14, loudness_gain_db.is_some());
     set(
         15,
         loudness_gain_db.is_none()
@@ -175,7 +169,7 @@ pub(super) fn render_available(state: &mut MixerState, ring: &mut Producer<f32>)
                         &voice_scratch,
                         &mut scratch,
                         ret.from_gain * fall_gain(elapsed),
-                        state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
+                        state.loudness_enabled,
                     );
                 }
                 state.retiring.push(ret);
@@ -224,7 +218,7 @@ pub(super) fn render_available(state: &mut MixerState, ring: &mut Producer<f32>)
                         &frames,
                         &mut dry_scratch,
                         input_gain,
-                        state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
+                        state.loudness_enabled,
                     );
                     effect.render(&dry_scratch, &mut scratch, CHUNK_FRAMES);
                     audible = true;
@@ -235,12 +229,7 @@ pub(super) fn render_available(state: &mut MixerState, ring: &mut Producer<f32>)
                     if swap_fade {
                         state.swap_probe.observe_current(&frames);
                     }
-                    voice.mix_into(
-                        &frames,
-                        &mut scratch,
-                        voice.gain,
-                        state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
-                    );
+                    voice.mix_into(&frames, &mut scratch, voice.gain, state.loudness_enabled);
                 }
             }
         }
@@ -272,7 +261,7 @@ pub(super) fn render_available(state: &mut MixerState, ring: &mut Producer<f32>)
                         &voice_scratch,
                         &mut scratch,
                         voice.gain,
-                        state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
+                        state.loudness_enabled,
                     );
                 }
             }
@@ -413,13 +402,9 @@ pub(super) fn render_available(state: &mut MixerState, ring: &mut Producer<f32>)
                         }
                     }
                     if let Some(v) = primary {
-                        nerd.loudness_gain_db = normalization_gain(
-                            v,
-                            state.loudness_enabled && state.sound_mode == SoundMode::Enhanced,
-                        )
-                        .1;
+                        nerd.loudness_gain_db = normalization_gain(v, state.loudness_enabled).1;
                     }
-                    if nerd.loudness_gain_db.is_some() && state.sound_mode == SoundMode::Enhanced {
+                    if nerd.loudness_gain_db.is_some() {
                         stages.push("Normalization".into());
                     } else if state
                         .current
