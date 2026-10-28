@@ -754,6 +754,11 @@ impl PlayerEngine {
         self.send(Command::SetCrossfadeWindow(seconds))
     }
 
+    /// Release only Automix-owned processing; retain the listener's speed.
+    pub fn cancel_automix_processing(&self) -> Result<(), EngineError> {
+        self.send(Command::CancelAutomixProcessing)
+    }
+
     pub fn set_spatial_enabled(&self, enabled: bool) -> Result<(), EngineError> {
         self.send(Command::SetSpatial(enabled))
     }

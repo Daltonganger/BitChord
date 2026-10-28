@@ -56,7 +56,7 @@
 //!
 //! ## Latency
 //!
-//! `frame + search` samples, about 50 ms at 48 kHz — small enough that the
+//! `frame + search` samples, about 110 ms at 48 kHz — small enough that the
 //! blend's own timing is unaffected, and it is bounded rather than growing with
 //! stream length, because the anchor only ever moves forward by `hop * rate` per
 //! output hop. [`TimeStretch::latency_frames`] reports it and the mixer
@@ -70,32 +70,24 @@
 //! stretcher the moment the glide lands on unity, instead of carrying the stage
 //! — and its latency — for the rest of the track.
 
-use core::f32::consts::PI;
-
-/// Analysis frame. 2048 samples is 43 ms at 48 kHz, inside the 40–80 ms that
-/// music stretchers use. The first version used 10.7 ms, which is shorter than
-/// one cycle of a kick or a bass line: every overlap then mixed two different
-/// phases of the low end, and dense records came out grainy for as long as the
-/// stage ran.
-const FRAME: usize = 2048;
+/// An 85 ms frame contains multiple cycles of deep bass. Shorter frames and
+/// searches aligned the treble while bending the bass, and produced stronger
+/// modulation sidebands throughout tempo-matched blends.
+const FRAME: usize = 4096;
 /// Synthesis hop. A quarter of the frame is 75 % overlap — the usual WSOLA
 /// figure, and the minimum that keeps the Hann window sum flat enough to
 /// normalise away.
+#[cfg(test)]
 const HOP: usize = FRAME / 4;
 /// How far the analysis position may slide to find a waveform match, in
-/// samples either way. 7.5 ms is half a cycle at 67 Hz, so the search can bring
-/// a kick or a bass note into phase rather than only the treble. At ±1.3 ms it
-/// could not reach anything under ~380 Hz, and the low end partly cancelled at
-/// every hop. Wider still would smear transients further than the ear fuses.
-const SEARCH: isize = 360;
+/// samples either way. A 25 ms radius covers a full cycle across the search
+/// interval at 20 Hz. The former ±7.5 ms search could not wrap even a 60 Hz
+/// cycle, so its nominally pitch-preserving 3% change bent low notes instead.
+const SEARCH: isize = 1200;
 /// The first pass of the search tries every `COARSE`-th offset and correlates
 /// every `COARSE`-th sample; the second pass refines around the winner at full
 /// resolution. The wide window then costs less than the narrow one did.
 const COARSE: usize = 4;
-/// Correlation window, in samples. The overlap region is three quarters of the
-/// frame; correlating over half of it is enough to identify the waveform and
-/// halves the work.
-const CORRELATE: usize = FRAME / 2;
 /// Divisor floor for the overlap-add normalisation. Only a 0/0 guard: the
 /// window is exactly zero at its first sample, and everywhere else the weight
 /// is small but real and dividing by it is the accurate reconstruction.
@@ -103,6 +95,10 @@ const WEIGHT_FLOOR: f32 = 1.0e-6;
 
 /// WSOLA time-stretcher. Interleaved stereo `f32` in and out.
 pub struct TimeStretch {
+    frame: usize,
+    hop: usize,
+    search: usize,
+    correlate: usize,
     window: Vec<f32>,
     /// Input not yet placed, interleaved. `base` is the absolute input index of
     /// `fifo[0]`; placed input is dropped off the front as the anchor advances,
@@ -138,16 +134,28 @@ pub struct TimeStretch {
 
 impl TimeStretch {
     pub fn new(rate: f64) -> Self {
-        // Periodic Hann, so the overlap sum is flat across the interior.
-        let window: Vec<f32> = (0..FRAME)
-            .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / FRAME as f32).cos())
+        Self::with_sample_rate(rate, 48_000)
+    }
+
+    /// Keep the same analysis duration and bass search range on every route.
+    pub fn with_sample_rate(rate: f64, sample_rate: u32) -> Self {
+        let scaled = (FRAME as u64 * sample_rate.max(1) as u64 / 48_000).max(4) as usize;
+        let frame = scaled.div_ceil(4) * 4;
+        let hop = frame / 4;
+        let search = (SEARCH as u64 * sample_rate.max(1) as u64 / 48_000).max(1) as usize;
+        let window: Vec<f32> = (0..frame)
+            .map(|i| (0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / frame as f64).cos()) as f32)
             .collect();
         Self {
+            frame,
+            hop,
+            search,
+            correlate: frame / 2,
             window,
             fifo: Vec::new(),
             base: 0,
-            accum: vec![0.0f32; FRAME * 2],
-            weight: vec![0.0f32; FRAME],
+            accum: vec![0.0f32; frame * 2],
+            weight: vec![0.0f32; frame],
             out: Vec::new(),
             anchor: 0,
             anchor_frac: 0.0,
@@ -197,7 +205,7 @@ impl TimeStretch {
     ///
     /// The anchor is the source position of the next output hop, and the pump
     /// will not emit one until a frame plus the search window sits past it, so
-    /// this stays near `FRAME + SEARCH` instead of growing with the stream.
+    /// this stays near `self.frame + self.search` instead of growing with the stream.
     /// Reporting `produced * rate` instead would walk, because the anchor moves
     /// in whole frames and the nominal rate does not.
     pub fn latency_frames(&self) -> f64 {
@@ -239,17 +247,17 @@ impl TimeStretch {
         // No search from here: with no more input there is nothing to match
         // against, and the natural continuation is what the ear expects at the
         // end of a file.
-        while self.limit() >= self.anchor + FRAME {
+        while self.limit() >= self.anchor + self.frame {
             let at = self.anchor;
             self.place(at);
         }
         // The accumulator's remaining window, normalised by the weight that
         // actually landed on each sample. `place` has already slid it one hop,
-        // so only the first `FRAME - HOP` samples carry the last frame; the
+        // so only the first `self.frame - self.hop` samples carry the last frame; the
         // final hop is zeros, and emitting it put 128 samples of silence
         // between the stretched audio and the pass-through that follows it.
         let held = if self.placed.is_some() {
-            FRAME - HOP
+            self.frame - self.hop
         } else {
             0
         };
@@ -258,15 +266,15 @@ impl TimeStretch {
             // The floor is only here to turn a 0/0 into silence; anywhere the
             // weight is merely small, dividing by it is the correct
             // reconstruction rather than a distortion.
-            let norm = self.weight[frame].max(WEIGHT_FLOOR);
+            let norm = self.weight[frame].max(f32::MIN_POSITIVE);
             self.out.push(self.accum[frame * 2] / norm);
             self.out.push(self.accum[frame * 2 + 1] / norm);
         }
         // The accumulator reaches to the end of the last frame that was
-        // *placed*, which after a hop is one HOP behind the anchor. Anchoring
+        // *placed*, which after a hop is one hop behind the anchor. Anchoring
         // this on the anchor instead skips those samples — 128 of them, an
         // eighth of a frame's worth of the end of the record, silently.
-        let end = self.placed.map(|placed| placed + FRAME).unwrap_or(0);
+        let end = self.placed.map(|placed| placed + self.frame).unwrap_or(0);
         if end < self.limit() {
             self.out
                 .extend_from_slice(&self.fifo[(end - self.base) * 2..]);
@@ -278,10 +286,10 @@ impl TimeStretch {
     /// Emits output while the input allows a frame to be placed.
     fn pump(&mut self) {
         loop {
-            // The search can reach `SEARCH` either side of the anchor, and a
+            // The search can reach `self.search` either side of the anchor, and a
             // placement needs a whole frame of input after it, so the furthest
             // one it could choose is the one the input has to cover.
-            if self.limit() < self.anchor + SEARCH as usize + FRAME {
+            if self.limit() < self.anchor + self.search as usize + self.frame {
                 break;
             }
             let at = self.best_offset();
@@ -291,10 +299,13 @@ impl TimeStretch {
     }
 
     /// Drops input the anchor has moved past. Everything still reachable is
-    /// within `FRAME` behind the last placement — that is the similarity
+    /// within `self.frame` behind the last placement — that is the similarity
     /// reference — so two frames of slack is generous.
     fn reclaim(&mut self) {
-        let horizon = self.placed.unwrap_or(self.anchor).saturating_sub(FRAME * 2);
+        let horizon = self
+            .placed
+            .unwrap_or(self.anchor)
+            .saturating_sub(self.frame * 2);
         if horizon > self.base {
             let drop = horizon - self.base;
             self.fifo.drain(..drop * 2);
@@ -304,7 +315,7 @@ impl TimeStretch {
 
     /// The placement that best continues the previous frame.
     ///
-    /// Of the offsets within `SEARCH` of the anchor, the one whose head
+    /// Of the offsets within `self.search` of the anchor, the one whose head
     /// correlates best with the input continuing from where the last frame
     /// landed. Normalised, so a quiet stretch of input cannot win on level
     /// alone.
@@ -312,31 +323,31 @@ impl TimeStretch {
         let Some(previous) = self.placed else {
             return self.anchor;
         };
-        // The last frame ran from `previous` for FRAME samples but only HOP of
+        // The last frame ran from `previous` for self.frame samples but only self.hop of
         // them have been emitted, so the part of it still to come is what the
         // next frame has to pick up in phase.
-        let reference = previous + HOP;
+        let reference = previous + self.hop;
         let limit = self.limit();
-        if reference + CORRELATE > limit {
+        if reference + self.correlate > limit {
             return self.anchor;
         }
         // Sum channel correlations, not the channels themselves. L+R can
         // cancel on wide stereo material, leaving no alignment reference.
         // One shared placement still preserves the stereo timing.
-        let reference_stereo: Vec<[f32; 2]> = (0..CORRELATE)
+        let reference_stereo: Vec<[f32; 2]> = (0..self.correlate)
             .map(|i| [self.left_at(reference + i), self.right_at(reference + i)])
             .collect();
-        let earliest = self.anchor.saturating_sub(SEARCH as usize);
-        let latest = self.anchor + SEARCH as usize;
+        let earliest = self.anchor.saturating_sub(self.search as usize);
+        let latest = self.anchor + self.search as usize;
         let usable = |candidate: usize| {
-            candidate >= earliest && candidate <= latest && candidate + FRAME <= limit
+            candidate >= earliest && candidate <= latest && candidate + self.frame <= limit
         };
 
         let mut best = self.anchor;
         let mut best_score = f32::NEG_INFINITY;
         // Walk outwards from the anchor so a tie resolves to the anchor — the
         // identity choice, and the one that makes a rate of 1.0 exact.
-        for distance in (0..=SEARCH as usize).step_by(COARSE) {
+        for distance in (0..=self.search as usize).step_by(COARSE) {
             let mut considered = false;
             for candidate in [
                 self.anchor.checked_sub(distance),
@@ -392,7 +403,7 @@ impl TimeStretch {
         let mut dot = 0.0f32;
         let mut energy = 0.0f32;
         let mut reference_energy = 0.0f32;
-        for i in (0..CORRELATE).step_by(stride) {
+        for i in (0..self.correlate).step_by(stride) {
             let samples = [self.left_at(candidate + i), self.right_at(candidate + i)];
             for ch in 0..2 {
                 dot += samples[ch] * reference[i][ch];
@@ -405,7 +416,7 @@ impl TimeStretch {
 
     /// Windows the frame at `at` into the accumulator and emits one hop.
     fn place(&mut self, at: usize) {
-        for frame in 0..FRAME {
+        for frame in 0..self.frame {
             let weight = self.window[frame];
             let left = self.left_at(at + frame);
             let right = self.right_at(at + frame);
@@ -413,7 +424,7 @@ impl TimeStretch {
             self.accum[frame * 2 + 1] += right * weight;
             self.weight[frame] += weight;
         }
-        for frame in 0..HOP {
+        for frame in 0..self.hop {
             if self.weight[frame] <= WEIGHT_FLOOR {
                 // Only the very first sample of a stream: the window is zero
                 // there and nothing else has landed, so the input is the
@@ -427,23 +438,23 @@ impl TimeStretch {
             self.out.push(self.accum[frame * 2] / norm);
             self.out.push(self.accum[frame * 2 + 1] / norm);
         }
-        self.produced += HOP;
+        self.produced += self.hop;
         // Slide the accumulator along by one hop and zero what is left.
-        self.accum.copy_within(HOP * 2..FRAME * 2, 0);
-        self.weight.copy_within(HOP..FRAME, 0);
-        for sample in (FRAME - HOP) * 2..FRAME * 2 {
+        self.accum.copy_within(self.hop * 2..self.frame * 2, 0);
+        self.weight.copy_within(self.hop..self.frame, 0);
+        for sample in (self.frame - self.hop) * 2..self.frame * 2 {
             self.accum[sample] = 0.0;
         }
-        for frame in FRAME - HOP..FRAME {
+        for frame in self.frame - self.hop..self.frame {
             self.weight[frame] = 0.0;
         }
         self.placed = Some(at);
-        // Playback speed: consume `HOP * rate` input frames for this output hop,
+        // Playback speed: consume `self.hop * rate` input frames for this output hop,
         // from the anchor's own value and *not* from where this frame landed.
-        // At unity this is HOP and the stage reconstructs the input. Above 1 the
+        // At unity this is self.hop and the stage reconstructs the input. Above 1 the
         // record plays faster. The fraction is kept so a rate like 120/116 does
         // not walk by half a sample per hop across a long blend.
-        let step = HOP as f64 * self.rate + self.anchor_frac;
+        let step = self.hop as f64 * self.rate + self.anchor_frac;
         let whole = step.floor() as usize;
         self.anchor_frac = step - whole as f64;
         self.anchor += whole.max(1);
@@ -463,10 +474,64 @@ pub fn stretch_whole(input: &[f32], rate: f64) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The module aliases `PI` as f32; the measurement helpers here are f64.
+    // Measurement helpers use f64 angles.
     use core::f64::consts::PI as TAU;
 
     const RATE: u32 = 48_000;
+
+    #[test]
+    fn bass_alignment_scales_with_the_output_route() {
+        for sample_rate in [44_100u32, 96_000] {
+            for hz in [30.0, 60.0] {
+                for rate in [0.97, 1.03] {
+                    let input: Vec<f32> = (0..sample_rate * 3)
+                        .flat_map(|i| {
+                            let x =
+                                (i as f64 * 2.0 * TAU * hz / sample_rate as f64).sin() as f32 * 0.3;
+                            [x, x]
+                        })
+                        .collect();
+                    let mut stage = TimeStretch::with_sample_rate(rate, sample_rate);
+                    let mut output = stage.process_and_take(&input);
+                    stage.flush();
+                    output.extend(stage.take());
+                    let actual = frequency_at_rate(
+                        &output,
+                        hz,
+                        sample_rate as usize,
+                        sample_rate as usize,
+                        sample_rate,
+                    );
+                    let cents = cents_off(actual, hz);
+                    assert!(
+                        cents.abs() < 12.0,
+                        "{sample_rate} Hz route, {hz} Hz bass, tempo {rate}: {cents:.1} cents"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tempo_changes_preserve_deep_bass_pitch() {
+        for hz in [30.0, 45.0, 60.0] {
+            for rate in [0.97, 1.03] {
+                let input: Vec<f32> = (0..RATE as usize * 4)
+                    .flat_map(|i| {
+                        let x = (i as f64 * 2.0 * TAU * hz / RATE as f64).sin() as f32 * 0.3;
+                        [x, x]
+                    })
+                    .collect();
+                let output = stretch_whole(&input, rate);
+                let actual = frequency_at(&output, hz, RATE as usize, RATE as usize);
+                let cents = cents_off(actual, hz);
+                assert!(
+                    cents.abs() < 12.0,
+                    "{hz} Hz bass at tempo {rate} shifted by {cents:.1} cents"
+                );
+            }
+        }
+    }
 
     #[test]
     fn alignment_is_invariant_to_channel_polarity() {
@@ -516,8 +581,18 @@ mod tests {
     /// parabolic fit through the magnitudes — cheap, and tight enough to tell a
     /// preserved 220 Hz from a resampled 226.6 Hz.
     fn frequency_at(samples: &[f32], hz: f64, start: usize, frames: usize) -> f64 {
+        frequency_at_rate(samples, hz, start, frames, RATE)
+    }
+
+    fn frequency_at_rate(
+        samples: &[f32],
+        hz: f64,
+        start: usize,
+        frames: usize,
+        sample_rate: u32,
+    ) -> f64 {
         let magnitude = |probe: f64| -> f64 {
-            let w = 2.0 * TAU * probe / RATE as f64;
+            let w = 2.0 * TAU * probe / sample_rate as f64;
             let coeff = 2.0 * w.cos();
             let (mut s1, mut s2) = (0.0f64, 0.0f64);
             for i in start..start + frames {
@@ -678,6 +753,11 @@ mod tests {
         for _ in 0..200 {
             stretcher.process(&tone(2048, 220.0));
             let latency = stretcher.latency_frames();
+            // Before the first placement this is startup pre-roll, not the
+            // bounded steady-state lookahead being measured below.
+            if stretcher.produced == 0 {
+                continue;
+            }
             if first == 0.0 {
                 first = latency;
             }

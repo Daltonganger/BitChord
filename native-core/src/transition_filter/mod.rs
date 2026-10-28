@@ -146,6 +146,11 @@ impl TransitionFilter {
             && self.current_low_pass_hz >= OPEN_HZ - SETTLED_HZ
             && self.current_high_pass_hz <= OFF_HZ + SETTLED_HZ;
         if parked {
+            // The park threshold is wider than active()'s telemetry threshold.
+            // Snap the settled state so it cannot stay "active" forever.
+            if self.current_low_pass_hz != target_low || self.current_high_pass_hz != target_high {
+                self.flush();
+            }
             return;
         }
 
@@ -279,6 +284,25 @@ mod tests {
         let mut buf = input.clone();
         filter.process(&mut buf);
         assert_eq!(buf, input);
+    }
+
+    #[test]
+    fn opening_a_used_filter_retires_its_active_state() {
+        let mut filter = TransitionFilter::new(2, 48_000);
+        filter.set_cutoffs(OPEN_HZ, 200.0);
+        filter.flush();
+        filter.open();
+        for _ in 0..300 {
+            filter.process(&mut vec![0.1; 512]);
+        }
+        assert!(
+            !filter.active(),
+            "The open filter remained marked active indefinitely"
+        );
+        let mut pcm = sine(100.0, 48_000, 512);
+        let dry = pcm.clone();
+        filter.process(&mut pcm);
+        assert_eq!(pcm, dry);
     }
 
     #[test]

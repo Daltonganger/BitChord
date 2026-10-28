@@ -296,6 +296,7 @@ pub enum Command {
     /// separately rebuilt to a matching integer format before this is sent.
     SetBitPerfect(bool),
     SetCrossfadeWindow(f64),
+    CancelAutomixProcessing,
     SetSpatial(bool),
     SetHeadYaw(f32),
     /// Manual filter aim on the current or incoming stream (shared's planner

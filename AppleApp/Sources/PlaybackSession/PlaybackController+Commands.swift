@@ -119,6 +119,9 @@ extension PlaybackController {
         guard automixEnabled != enabled else { return }
         automixEnabled = enabled
         AppSettings.shared.setSmartFadeEnabled(value: enabled)
+        if !enabled {
+            try? engine.cancelAutomixProcessing()
+        }
         syncSkipMixEnabled()
         refreshPlaybackRegions()
         syncEngineQueueNext()

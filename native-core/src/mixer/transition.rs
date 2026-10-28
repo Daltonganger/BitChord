@@ -52,16 +52,19 @@ impl MixerState {
             transition.plan = request.plan;
         }
         if let Some(voice) = &mut self.incoming {
+            let rate_changed = (voice.base_plan_rate - rate).abs() > 1e-5;
             voice.base_plan_rate = rate;
-            voice.plan_rate = rate;
             voice.post_glide_seconds = glide;
-            if (voice.decoder.position_seconds() - cue).abs() > 0.05 {
+            if rate_changed || (voice.decoder.position_seconds() - cue).abs() > 0.05 {
                 voice.base_position = 0.0;
                 voice.reset_processing();
                 if let Err(e) = voice.decoder.seek_seconds(cue) {
                     log::warn!("could not move the armed cue to {cue:.2}s: {e}");
                 }
             }
+            // Synchronize the actual DSP too. Merely changing plan_rate left
+            // an old non-unity stretcher alive after a unity-rate replan.
+            voice.set_plan_rate(rate);
             // A moved cue clears the primed buffer in `reset_processing`; fill
             // it again so the first fade chunk is not a cold decode.
             prime_voice(voice, self.device_rate);
@@ -406,8 +409,8 @@ impl MixerState {
                 voice.base_plan_rate,
                 1200.0 * (voice.base_plan_rate.ln() / 2f64.ln()).abs(),
             );
-            voice.set_plan_rate(voice.base_plan_rate);
         }
+        voice.set_plan_rate(voice.base_plan_rate);
         let info = voice.info.clone();
         log::info!("fade start + handoff: {}", info.title);
         self.duration_ms

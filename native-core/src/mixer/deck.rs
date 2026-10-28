@@ -165,11 +165,11 @@ pub(super) fn source_still_growing(path: &str) -> bool {
     std::path::Path::new(&grow).is_file() && !std::path::Path::new(&complete).exists()
 }
 
-pub(super) fn user_stretcher(_device_rate: u32, speed: f32) -> Option<TimeStretch> {
+pub(super) fn user_stretcher(device_rate: u32, speed: f32) -> Option<TimeStretch> {
     if (speed - 1.0).abs() < 1e-6 {
         None
     } else {
-        let mut stretch = TimeStretch::new(speed as f64);
+        let mut stretch = TimeStretch::with_sample_rate(speed as f64, device_rate);
         stretch.set_rate(speed as f64);
         Some(stretch)
     }

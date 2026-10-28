@@ -384,10 +384,13 @@ impl Voice {
         if (rate - 1.0).abs() <= 1e-4 {
             // Hold the stage until the next pull drains it.
             self.stretch_draining = self.stretch.is_some();
-        } else if let Some(stretch) = self.stretch.as_mut() {
-            stretch.set_rate(rate);
         } else {
-            self.stretch = Some(TimeStretch::new(rate));
+            self.stretch_draining = false;
+            if let Some(stretch) = self.stretch.as_mut() {
+                stretch.set_rate(rate);
+            } else {
+                self.stretch = Some(TimeStretch::with_sample_rate(rate, self.device_rate));
+            }
         }
     }
 
@@ -400,6 +403,7 @@ impl Voice {
                 stretch.flush();
                 let tail = stretch.take();
                 self.stretch = None;
+                log::info!("handoff stretch retired: {}", self.info.title);
                 tail
             }
             None => Vec::new(),
@@ -423,7 +427,10 @@ impl Voice {
     pub(super) fn release_plan_stretch(&mut self, speed: f32, device_rate: u32) {
         self.glide_total_frames = 0;
         self.glide_done_frames = 0;
-        if (self.plan_rate - 1.0).abs() < f64::EPSILON && !self.stretch_draining {
+        if self.stretch.is_none()
+            && (self.plan_rate - 1.0).abs() < f64::EPSILON
+            && !self.stretch_draining
+        {
             return;
         }
         // Clear the multiplier *before* re-deriving, or `set_playback_speed`
@@ -445,6 +452,11 @@ impl Voice {
             .max(1.0) as u64;
         self.glide_total_frames = frames;
         self.glide_done_frames = 0;
+        log::info!(
+            "handoff tempo glide: {} duration={:.2}s",
+            self.info.title,
+            self.post_glide_seconds
+        );
         self.set_plan_rate(self.base_plan_rate);
     }
 
@@ -696,6 +708,11 @@ impl Voice {
             voice.emitted_dev_frames += (take / 2) as u64;
         };
         serve_pending(out, self);
+        if out.len() >= want {
+            // Keep any decoded backlog ahead of the stretcher's held tail.
+            // Draining now could overwrite PCM that did not fit this pull.
+            return;
+        }
 
         // The handoff stretch has landed on unity: flush the stage and serve
         // what it was still holding before decoding anything more, so the

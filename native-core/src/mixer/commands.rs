@@ -433,6 +433,23 @@ pub(super) fn handle_command(state: &mut MixerState, cmd: Command, ring: &mut Pr
             }
         }
         Command::SetCrossfadeWindow(s) => state.crossfade_window_s = s.max(0.0),
+        Command::CancelAutomixProcessing => {
+            // An in-place quality upgrade is not an Automix transition.
+            if state.transition.as_ref().is_some_and(|t| !t.swap) {
+                state.bail();
+            }
+            state.pending_next = None;
+            for voice in state
+                .current
+                .iter_mut()
+                .chain(state.incoming.iter_mut())
+                .chain(state.retiring.iter_mut().map(|r| &mut r.voice))
+            {
+                voice.release_plan_stretch(state.playback_speed, state.device_rate);
+                voice.release_transition_match();
+                voice.filter.open();
+            }
+        }
         Command::SetSpatial(enabled) => {
             state.spatial_enabled = enabled;
             if let Some(current) = &mut state.current {

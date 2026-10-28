@@ -3,6 +3,139 @@
 use super::*;
 
 #[test]
+fn disabling_automix_releases_its_processing_but_keeps_user_speed() {
+    let path =
+        std::env::temp_dir().join(format!("bitchord-automix-off-{}.wav", std::process::id()));
+    test_wav(&path, 6.0, 440.0);
+    let mut state = armed_test_state(&path, &path, Phase::Arming);
+    state.transition = None;
+    state.incoming = None;
+    state.playback_speed = 1.25;
+    let voice = state.current.as_mut().unwrap();
+    voice.set_playback_speed(1.25, 44_100);
+    voice.base_plan_rate = 1.03;
+    voice.post_glide_seconds = 8.0;
+    voice.begin_tempo_glide(44_100);
+    voice.filter.set_cutoffs(1_000.0, 200.0);
+    voice.match_db = 2.0;
+    let (mut producer, _) = rtrb::RingBuffer::new(4096);
+    super::super::commands::handle_command(
+        &mut state,
+        Command::CancelAutomixProcessing,
+        &mut producer,
+    );
+    let voice = state.current.as_mut().unwrap();
+    assert_eq!(voice.glide_total_frames, 0);
+    assert_eq!(voice.match_db, 0.0);
+    assert_eq!(
+        voice.filter.target_high_pass_hz(),
+        crate::transition_filter::TransitionFilter::off_hz()
+    );
+    for _ in 0..20 {
+        voice.pull(512, 44_100);
+    }
+    assert!(voice.stretch.is_none());
+    assert_eq!(voice.user_stretch.as_ref().unwrap().rate(), 1.25);
+    drop(state);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn disabling_automix_preserves_a_pending_quality_swap() {
+    let path = std::env::temp_dir().join(format!(
+        "bitchord-automix-off-swap-{}.wav",
+        std::process::id()
+    ));
+    test_wav(&path, 2.0, 440.0);
+    let mut state = armed_test_state(&path, &path, Phase::Fading);
+    state.transition.as_mut().unwrap().swap = true;
+    let (mut producer, _) = rtrb::RingBuffer::new(4096);
+    super::super::commands::handle_command(
+        &mut state,
+        Command::CancelAutomixProcessing,
+        &mut producer,
+    );
+    assert!(state.transition.as_ref().unwrap().swap);
+    assert!(state.incoming.is_some());
+    drop(state);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn a_unity_plan_replaces_the_armed_stretcher_and_cannot_leak_into_the_song() {
+    let path =
+        std::env::temp_dir().join(format!("bitchord-unity-replan-{}.wav", std::process::id()));
+    test_wav(&path, 6.0, 440.0);
+    let mut state = armed_test_state(&path, &path, Phase::Arming);
+    let voice = state.incoming.as_mut().unwrap();
+    voice.base_plan_rate = 1.03;
+    voice.set_plan_rate(1.03);
+    voice.prime_for_fade(2048, 44_100);
+    assert!(voice.stretch.is_some());
+    // A later cue can coincide with the decoder head. A rate change still
+    // requires re-priming: the pending PCM was rendered with the old plan.
+    let cue = voice.decoder.position_seconds();
+    state.upgrade_armed_plan(TrackSource {
+        source: path.display().to_string(),
+        title: "replacement plan".into(),
+        artist: String::new(),
+        start_seconds: cue,
+        plan: TransitionPlan {
+            playback_rate: 1.0,
+            fade_seconds: 1.0,
+            ..TransitionPlan::default()
+        },
+        headers: Default::default(),
+        claimed_kbps: 0,
+        loudness_db: None,
+        duration_seconds: 6.0,
+    });
+    state.start_fade();
+    state.finish_transition();
+    let voice = state.current.as_mut().unwrap();
+    for _ in 0..20 {
+        voice.pull(512, 44_100);
+    }
+    assert!(
+        voice.stretch.is_none(),
+        "A stale stretcher survived the completed unity-rate transition"
+    );
+    assert_eq!(voice.plan_rate, 1.0);
+    drop(state);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn releasing_tempo_processing_keeps_every_pending_decoded_frame() {
+    let path = std::env::temp_dir().join(format!(
+        "bitchord-stretch-backlog-{}.wav",
+        std::process::id()
+    ));
+    test_wav(&path, 2.0, 440.0);
+    let mut state = armed_test_state(&path, &path, Phase::Arming);
+    let voice = state.current.as_mut().unwrap();
+    voice.set_plan_rate(1.03);
+    let input = vec![0.3; 16000];
+    voice.stretch.as_mut().unwrap().process(&input);
+    voice.stretch.as_mut().unwrap().take();
+    voice.pending_dev = vec![0.11, 0.11, 0.22, 0.22, 0.33, 0.33, 0.44, 0.44];
+    voice.pending_dev_cursor = 0;
+    voice.release_plan_stretch(1.0, 44_100);
+    assert_eq!(voice.pull(2, 44_100), vec![0.11, 0.11, 0.22, 0.22]);
+    assert_eq!(
+        voice.pull(2, 44_100),
+        vec![0.33, 0.33, 0.44, 0.44],
+        "Draining the stretcher overwrote decoded audio still waiting to play"
+    );
+    for _ in 0..20 {
+        voice.pull(512, 44_100);
+    }
+    assert!(voice.stretch.is_none());
+    drop(state);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn gapless_queue_advances_and_fires_handoff() {
     let dir = std::env::temp_dir().join("bitchord-mixer-test");
     std::fs::create_dir_all(&dir).unwrap();
