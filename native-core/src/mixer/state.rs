@@ -261,6 +261,7 @@ impl MixerState {
     /// smoothly ramps out the next 120 ms of buffered audio and discards the
     /// remaining backlog before the new track starts.
     pub(super) fn hard_cut(&mut self) {
+        self.reject_pending_swap();
         self.eq.flush();
         self.clarity.reset();
         self.protector.reset();
@@ -512,6 +513,10 @@ impl MixerState {
 
     /// 120 ms ramp-away for an interrupted transition — no click.
     pub(super) fn bail(&mut self) {
+        // A seek must keep the original until correlation has accepted the replacement.
+        if self.reject_pending_swap() {
+            return;
+        }
         let Some(t) = &self.transition else {
             return;
         };
@@ -552,6 +557,26 @@ impl MixerState {
         // output ran dry until the app was restarted.
         self.current = incoming;
         self.transition = None;
+    }
+
+    pub(super) fn reject_pending_swap(&mut self) -> bool {
+        if !self
+            .transition
+            .as_ref()
+            .is_some_and(|transition| transition.swap)
+        {
+            return false;
+        }
+        if let Ok(mut nerd) = self.nerd.lock() {
+            nerd.swap_accepted = Some(false);
+        }
+        self.incoming = None;
+        self.transition = None;
+        if let Some(current) = &mut self.current {
+            current.gain = 1.0;
+            current.filter.open();
+        }
+        true
     }
 
     pub(super) fn stop_all(&mut self) {
