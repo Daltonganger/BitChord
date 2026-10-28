@@ -120,6 +120,65 @@ enum AddonSearchHistory {
     }
 }
 
+#if os(macOS)
+/// The Mac titlebar's YouTube / Addons switcher.
+///
+/// It is a pill rather than the stock segmented control: two tabs in a capsule
+/// with the chosen one filled in the accent colour, reading as one control
+/// beside the search field. Music keeps its catalogue switcher in the same
+/// place — in the titlebar, to the right of search and to the left of the
+/// account and Downloads buttons.
+struct MacSearchSourceSwitcher: View {
+    @Binding var selection: SearchView.SearchSource
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(SearchView.SearchSource.allCases) { source in
+                MacSearchSourceTab(
+                    title: source.label,
+                    isSelected: selection == source
+                ) {
+                    selection = source
+                }
+            }
+        }
+        .padding(2)
+        .background(Capsule().fill(Color.primary.opacity(0.08)))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .fixedSize()
+        .animation(.easeOut(duration: 0.15), value: selection)
+        .help("Search YouTube Music or your addons")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Search source")
+    }
+}
+
+private struct MacSearchSourceTab: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.78))
+                .padding(.horizontal, 11)
+                .frame(height: 22)
+                .background {
+                    if isSelected {
+                        Capsule().fill(Color.accentColor)
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+#endif
+
 struct SearchView: View {
     /// Upstream `TYPEAHEAD_MAX_RESULTS` in MainViewModel.kt.
     private static let typeaheadMaxResults = 15
@@ -241,6 +300,12 @@ struct SearchView: View {
                     }
                     ToolbarItem(placement: .topBarTrailing) { TopBarAccountButton() }
                     #elseif os(macOS)
+                    // The catalogue switcher lives in the titlebar beside the
+                    // search field, as Music keeps its Library/Store control
+                    // there, rather than floating over the results.
+                    ToolbarItem(id: MacToolbarItemID.searchSource, placement: .primaryAction) {
+                        MacSearchSourceSwitcher(selection: $searchSource)
+                    }
                     if !searchedTerm.isEmpty {
                         ToolbarItem(placement: .primaryAction) {
                             Button {
@@ -375,14 +440,17 @@ struct SearchView: View {
 
     private var resultsColumn: some View {
         VStack(spacing: 0) {
+            #if os(iOS)
             // Upstream's source picker is up only while the field is empty: once
             // something is typed the page is about the results, and the picker
-            // would only push them down.
+            // would only push them down. On the Mac it lives in the titlebar,
+            // where it pushes nothing and stays reachable.
             if term.isEmpty {
                 sourceSwitcher
                     .padding(.horizontal, 16)
                     .padding(.bottom, 10)
             }
+            #endif
             if searchSource == .addons {
                 addonResultsColumn
             } else {
@@ -390,6 +458,11 @@ struct SearchView: View {
             }
         }
         .onChange(of: scenePhase) { _, _ in refreshAddonCount() }
+        .onChange(of: searchSource) { _, _ in
+            refreshAddonCount()
+            guard !term.isEmpty else { return }
+            Task { await performSearch() }
+        }
         #if os(macOS)
         // Settings is its own window here, so the tab is not told when the
         // sources screen closes; the window coming back is the next best signal.
@@ -409,14 +482,9 @@ struct SearchView: View {
             }
         }
         .pickerStyle(.segmented)
-        // macOS draws the picker's own label beside the segments; the label is
-        // still right for VoiceOver, so it is hidden rather than removed.
+        // The picker's own label is redundant beside the segments; VoiceOver
+        // still reads it, so it is hidden rather than removed.
         .labelsHidden()
-        .onChange(of: searchSource) { _, _ in
-            refreshAddonCount()
-            guard !term.isEmpty else { return }
-            Task { await performSearch() }
-        }
     }
 
     /// Re-reads how many addons are enabled. Cheap (an in-memory registry walk),

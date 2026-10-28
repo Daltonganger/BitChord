@@ -442,7 +442,7 @@ struct RootView: View {
                 ToolbarItem(placement: .navigation) {
                     MacHistoryButtons(navigator: navigator)
                 }
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItem(id: MacToolbarItemID.downloads, placement: .primaryAction) {
                     MacDownloadsButton()
                 }
             }
@@ -798,15 +798,61 @@ private final class MacWindowToolbarView: NSView {
             if let toggle = toolbar.items.first(where: Self.isSidebarToggle) {
                 toggle.visibilityPriority = .user
             }
+            arrangeTrailingControls(in: toolbar)
             normalItems = Dictionary(toolbar.items.map { ($0.itemIdentifier, $0.isHidden) }, uniquingKeysWith: { first, _ in first })
         }
         wasPlayerPresented = isPlayerPresented
+    }
+
+    /// Music's titlebar reads, from the leading edge: the title, the search
+    /// field, the catalogue switcher, the account control, Downloads.
+    /// SwiftUI appends the `.searchable` field after every `primaryAction`
+    /// item, which put the account and Downloads buttons to its left. This
+    /// moves the three controls we own directly after the search field, in
+    /// that order, rather than reordering the field itself.
+    ///
+    /// `itemIdentifiers` is the diffing setter: the items SwiftUI already
+    /// made are moved, not removed and rebuilt, so their bindings and the
+    /// search field's own state survive.
+    private func arrangeTrailingControls(in toolbar: NSToolbar) {
+        let wanted = [MacToolbarItemID.searchSource, MacToolbarItemID.account, MacToolbarItemID.downloads]
+        guard let search = toolbar.items.first(where: Self.isSearchField) else { return }
+        let present = wanted.compactMap { identifier in
+            toolbar.items.first { $0.itemIdentifier.rawValue == identifier }?.itemIdentifier
+        }
+        guard !present.isEmpty else { return }
+
+        var identifiers = toolbar.items.map(\.itemIdentifier)
+        guard let searchIndex = identifiers.firstIndex(of: search.itemIdentifier) else { return }
+        let trailing = identifiers.dropFirst(searchIndex + 1).prefix(present.count)
+        guard Array(trailing) != present else { return }
+
+        identifiers.removeAll { present.contains($0) }
+        guard let anchor = identifiers.firstIndex(of: search.itemIdentifier) else { return }
+        identifiers.insert(contentsOf: present, at: anchor + 1)
+        toolbar.itemIdentifiers = identifiers
     }
 
     private static func isSpacing(_ item: NSToolbarItem) -> Bool {
         item.itemIdentifier == .flexibleSpace || item.itemIdentifier == .space
             || item.itemIdentifier.rawValue.localizedCaseInsensitiveContains("spacer")
             || item.itemIdentifier.rawValue.localizedCaseInsensitiveContains("space")
+    }
+
+    /// The `.searchable` field SwiftUI adds to this window's toolbar. Class
+    /// first: our own identifiers contain "search" too.
+    private static func isSearchField(_ item: NSToolbarItem) -> Bool {
+        if item is NSSearchToolbarItem { return true }
+        if let group = item as? NSToolbarItemGroup,
+           group.subitems.contains(where: { isSearchField($0) }) {
+            return true
+        }
+        if item.itemIdentifier.rawValue == MacToolbarItemID.searchSource { return false }
+        if let view = item.view,
+           view is NSSearchField || view.subviews.contains(where: { $0 is NSSearchField }) {
+            return true
+        }
+        return item.itemIdentifier.rawValue.localizedCaseInsensitiveContains("search")
     }
 
     private static func isSidebarToggle(_ item: NSToolbarItem) -> Bool {

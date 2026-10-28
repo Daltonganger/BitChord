@@ -3,6 +3,16 @@ import SwiftUI
 import AppKit
 import BitChordShared
 
+/// Stable identifiers for the window toolbar's own controls, so the shell can
+/// put them in Music's order: search field, catalogue switcher, account,
+/// Downloads. SwiftUI gives items it creates private identifiers; these three
+/// are ours to find in the `NSToolbar`.
+enum MacToolbarItemID {
+    static let searchSource = "bitchord.searchSource"
+    static let account = "bitchord.account"
+    static let downloads = "bitchord.downloads"
+}
+
 /// Which panel is open beside the library.
 ///
 /// Lyrics and the queue used to be destinations *inside* the full player, which
@@ -166,7 +176,7 @@ struct MacWindowAccountToolbar: ViewModifier {
     func body(content: Content) -> some View {
         content
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItem(id: MacToolbarItemID.account, placement: .primaryAction) {
                     MacAccountToolbarButton(isPresented: $presentsAccount)
                 }
             }
