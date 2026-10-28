@@ -24,6 +24,7 @@ extension PlaybackController {
 
     func noteResolved(_ entry: QueueEntry, outcome: ResolveOutcome, prefs: ResolvePrefs) {
         resolvedOrigin[entry.id] = outcome.source.origin
+        sourceDecisionNotes[entry.id] = outcome.decisionNote
         if let videoId = outcome.source.youtubeVideoId { resolvedVideoIds[outcome.source.source] = videoId }
         prepareRegions(source: outcome.source.source, videoId: outcome.source.youtubeVideoId)
 
@@ -486,6 +487,10 @@ extension PlaybackController {
                     self.racingLossless = false
                 }
                 log.record("quality upgrade rejected by mixer; original source remains active", about: mediaId)
+                await MainActor.run { [weak self] in
+                    guard let self, self.playGeneration == generation, self.current?.id == mediaId else { return }
+                    self.sourceDecisionNotes[mediaId] = "The alternative audio did not match the current recording closely enough."
+                }
                 return
             }
             await MainActor.run {
@@ -525,7 +530,16 @@ extension PlaybackController {
         } catch {
             QualityUpgrade.refuseUpgrades(mediaId)
             QualityUpgrade.forget(mediaId)
-            log.record("upgrade broke playback; no more swaps", about: mediaId)
+            var explanation = "The alternative stream could not be opened; the original source remains active."
+            if case EngineError.LoadFailed(let detail) = error, detail.contains("PCM alignment") {
+                explanation = "The alternative recording could not be safely aligned; the original source remains active."
+            }
+            let note = explanation
+            await MainActor.run { [weak self] in
+                guard let self, self.playGeneration == generation, self.current?.id == mediaId else { return }
+                self.sourceDecisionNotes[mediaId] = note
+            }
+            log.record("upgrade refused; original source remains active", about: mediaId)
         }
     }
 }

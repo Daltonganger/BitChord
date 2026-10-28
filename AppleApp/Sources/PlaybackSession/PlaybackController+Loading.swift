@@ -12,11 +12,12 @@ import AppKit
 
 // Loading a queue entry into the engine, including Dolby Atmos.
 extension PlaybackController {
-    func loadCurrent(_ index: Int, startAt: Double? = nil, refreshAutoplay: Bool = true) {
+    func loadCurrent(_ index: Int, startAt: Double? = nil, refreshAutoplay: Bool = true, freshResolution: Bool = false) {
         guard queue.indices.contains(index) else { return }
         startEngineIfNeeded()
         let engineStartupTask = self.engineStartupTask
         let entry = queue[index]
+        let requiresFreshResolution = freshResolution || (recoveryNeedsFreshResolution && current?.id == entry.id)
         if current?.id == entry.id, playingIndex == index, engineLoadedId == entry.id,
            state == .buffering || state == .playing {
             return
@@ -40,6 +41,9 @@ extension PlaybackController {
             }
         }
         durationRepairTask?.cancel()
+        recoveryNeedsFreshResolution = false
+        if !freshResolution { recoveringEntryID = nil }
+        streamRecovery.select(entry.id, resetAttempts: !freshResolution)
         nextPreparationTask?.cancel()
         nextPreparationTask = nil
         playGeneration += 1
@@ -102,7 +106,7 @@ extension PlaybackController {
         // Start read-ahead after this selection has loaded (syncEngineQueueNext).
         // Rapid Next taps must not start four speculative resolver walks ahead
         // of the track the listener is actually waiting for.
-        if wasAudible {
+        if wasAudible && !requiresFreshResolution {
             PlaybackTrackerBridge.shared.onTrackChanged(positionSeconds: Int64(outgoingPosition))
         }
         let engine = self.engine
@@ -117,7 +121,7 @@ extension PlaybackController {
                 // the UI then had lyrics and a playing state without audio.
                 try await engineStartupTask?.value
                 let outcome = try await Self.resolveSource(
-                    entry, prefs: prefs, latencyResolved: latencyRecorder
+                    entry, prefs: prefs, freshResolution: requiresFreshResolution, latencyResolved: latencyRecorder
                 )
                 let stillCurrent = await MainActor.run { [weak self] in
                     self?.playGeneration == generation

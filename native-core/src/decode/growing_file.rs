@@ -56,6 +56,11 @@ impl GrowingFile {
     pub(super) fn wait_for_len(&self, needed: u64) -> std::io::Result<()> {
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
+            // The transport may replace a stalled progressive stream while the
+            // mixer is waiting here. Release the reader so queued stop/load can run.
+            if Path::new(&format!("{}.playback-cancelled", self.path.display())).exists() {
+                return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "playback reader cancelled"));
+            }
             let len = std::fs::metadata(&self.path)?.len();
             if len >= needed {
                 return Ok(());

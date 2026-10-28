@@ -46,7 +46,8 @@ enum SourceSubstitution {
         album: String? = nil,
         isExplicit: KotlinBoolean? = nil,
         isVideo: Bool = false,
-        playing: Format? = nil
+        playing: Format? = nil,
+        diagnostic: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> Stream? {
         // With a known floor the resolver's bar becomes "beats what is playing"
         // rather than "satisfies the request" — which is the difference between
@@ -54,10 +55,10 @@ enum SourceSubstitution {
         if let playing, let durationSec, !isVideo {
             return await upgrade(
                 title: title, artist: artist, durationSec: durationSec,
-                album: album, isExplicit: isExplicit, isVideo: isVideo, playing: playing
+                album: album, isExplicit: isExplicit, isVideo: isVideo, playing: playing, diagnostic: diagnostic
             )
         }
-        return await call { callback in
+        return await call(diagnostic: diagnostic) { callback in
             SourceResolverBridge.shared.substituteForYouTube(
                 title: title,
                 artist: artist,
@@ -82,7 +83,8 @@ enum SourceSubstitution {
         isExplicit: KotlinBoolean? = nil,
         isVideo: Bool = false,
         playing: Format,
-        servedBy: String? = nil
+        servedBy: String? = nil,
+        diagnostic: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> Stream? {
         guard durationSec != nil, !isVideo else {
             // The resolver declines both on purpose: without a runtime the length
@@ -94,7 +96,7 @@ enum SourceSubstitution {
                 album: album, isExplicit: isExplicit, isVideo: isVideo
             )
         }
-        return await call { callback in
+        return await call(diagnostic: diagnostic) { callback in
             SourceResolverBridge.shared.upgradeFor(
                 title: title,
                 artist: artist,
@@ -120,10 +122,11 @@ enum SourceSubstitution {
         durationSec: Int?,
         album: String? = nil,
         isExplicit: KotlinBoolean? = nil,
-        isVideo: Bool = false
+        isVideo: Bool = false,
+        diagnostic: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> Stream? {
         guard !isVideo else { return nil }
-        return await call { callback in
+        return await call(diagnostic: diagnostic) { callback in
             SourceResolverBridge.shared.prefetchSubstitute(
                 title: title,
                 artist: artist,
@@ -195,12 +198,14 @@ enum SourceSubstitution {
     }
 
     private static func call(
+        diagnostic: @escaping @Sendable (String) -> Void = { _ in },
         _ request: (SourceResolverBridgeStreamCallback) -> Void
     ) async -> Stream? {
         let box = ResumeOnce()
         return await withCheckedContinuation { continuation in
             box.arm(continuation)
-            request(ResolveCallback { json, _ in
+            request(ResolveCallback { json, message in
+                if let message { diagnostic(message) }
                 // A null document is a *miss*, not a failure: this source does not
                 // hold the recording, or nothing ranked above YouTube has it. The
                 // resolver has already logged why, and the caller's next move is the

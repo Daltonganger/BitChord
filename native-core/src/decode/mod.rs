@@ -73,6 +73,8 @@ pub struct SymphoniaDecoder {
     expected_layout: Channels,
     duration_secs: Option<f64>,
     decoded_frames: u64,
+    measured_packet_bytes: u64,
+    measured_packet_frames: u64,
     seek_skip_frames: usize,
     decoder_eof_drained: bool,
     sanitized_samples: u64,
@@ -230,7 +232,7 @@ impl SymphoniaDecoder {
             .channels
             .clone()
             .ok_or_else(|| DecodeError("missing decoded layout".into()))?;
-        let codec = codec_label(source, &audio);
+        let codec = codec_label(&audio);
         let mut timing: Option<(u64, usize)> = None;
         #[cfg(target_vendor = "apple")]
         if audio.codec == symphonia::core::codecs::audio::well_known::CODEC_ID_AAC
@@ -286,6 +288,8 @@ impl SymphoniaDecoder {
             expected_layout,
             duration_secs,
             decoded_frames: 0,
+            measured_packet_bytes: 0,
+            measured_packet_frames: 0,
             seek_skip_frames: 0,
             decoder_eof_drained: false,
             sanitized_samples: 0,
@@ -299,6 +303,16 @@ impl SymphoniaDecoder {
             pending_cursor: 0,
             codec,
             bit_depth,
+        })
+    }
+
+    /// Packet payload rate over the decoded window; a VBR estimate, not a claim.
+    pub fn estimated_kbps(&self) -> Option<u32> {
+        (self.measured_packet_frames > 0).then(|| {
+            (self.measured_packet_bytes as f64 * 8.0 * self.sample_rate as f64
+                / self.measured_packet_frames as f64
+                / 1000.0)
+                .round() as u32
         })
     }
 
@@ -520,6 +534,8 @@ impl SymphoniaDecoder {
                 }
             };
 
+            self.measured_packet_bytes += packet.data.len() as u64;
+            self.measured_packet_frames += decoded.frames() as u64;
             if self.dropped_packets > 0 {
                 // Debug-level lines never reach the diagnostics file; a jump
                 // the listener hears has to.

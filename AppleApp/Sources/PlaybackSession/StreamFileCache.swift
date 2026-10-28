@@ -48,10 +48,14 @@ actor StreamFileCache {
     func path(for videoId: String, maxKbps: Int = Int.max, requireLossless: Bool = false, allowGrowing: Bool = true) -> String? {
         if allowGrowing, let active = inFlight[videoId], active.quality == Self.qualityIdentity,
            FileManager.default.fileExists(atPath: active.path),
+           !FileManager.default.fileExists(atPath: active.path + ".failed"),
+           !FileManager.default.fileExists(atPath: active.path + ".playback-cancelled"),
            !requireLossless, active.kbps <= maxKbps { return active.path }
         for ext in Self.extensions {
         let dest = cachedURL(for: videoId, ext: ext)
-        guard let data = try? Data(contentsOf: manifestURL(dest.path)),
+        guard !FileManager.default.fileExists(atPath: dest.path + ".failed"),
+              !FileManager.default.fileExists(atPath: dest.path + ".playback-cancelled"),
+              let data = try? Data(contentsOf: manifestURL(dest.path)),
               let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
               manifest.version == 1, manifest.complete, manifest.codec != "unknown",
               manifest.recordingIdentity == videoId,

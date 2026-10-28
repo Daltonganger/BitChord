@@ -28,6 +28,7 @@ extension PlaybackController {
         if (state == .paused && newState == .playing)
             || (state == .playing && newState == .paused) { return }
 #endif
+        if state == .paused && newState == .stopped { return }
         state = newState
         if let current {
             nowPlaying.update(
@@ -89,6 +90,7 @@ extension PlaybackController {
         let sameSong = current?.id == queue[playingIndex].id
         autoplayRefresh.invalidate()
         current = queue[playingIndex]
+        if let current { streamRecovery.select(current.id, resetAttempts: true) }
         historyVideoID = current.flatMap(youtubeVideoID)
         duration = info.durationSeconds
         position = 0
@@ -126,6 +128,11 @@ extension PlaybackController {
     }
 
     func handleTrackEnded(_ reason: TrackEndReason, source: String) {
+        guard state != .paused else { return }
+        if reason == .error {
+            _ = recoverInterruptedStream(source: source, explanation: "The audio decoder stopped; requesting a fresh stream at the same position.")
+            return
+        }
         guard reason == .natural else { return }
         // A natural end for a voice the transport already left (manual skip,
         // or a blend that already handed off) must not move or stop the new
@@ -188,20 +195,11 @@ extension PlaybackController {
     /// as if the song had finished. Once per track, so a source that keeps
     /// failing still lets the queue advance.
     private func resumeAfterFailedDownload(source: String?) -> Bool {
-        guard let source, FileManager.default.fileExists(atPath: source + ".failed"),
-              let current, queue.indices.contains(playingIndex),
-              failedDownloadResumes[current.id, default: 0] < 2 else { return false }
-        let at = playbackPosition
-        guard duration <= 0 || at < duration - 3 else { return false }
-        failedDownloadResumes[current.id, default: 0] += 1
-        PlaybackDebugLog.shared.record("download failed at \(Int(at))s of \(Int(duration))s; reloading to resume", about: current.id)
-        let cacheId = youtubeVideoID(for: current) ?? current.id
-        Task { await StreamFileCache.shared.dropGrowing(videoId: cacheId) }
-        dolbyRenderer?.stop()
-        dolbyRenderer = nil
-        engineLoadedId = nil
-        loadCurrent(playingIndex, startAt: max(0, at - 0.5), refreshAutoplay: false)
-        return true
+        guard let source else { return false }
+        let failures = engine.drainSourceErrors()
+        let failed = FileManager.default.fileExists(atPath: source + ".failed") || failures.contains { $0.source == source }
+        guard failed else { return false }
+        return recoverInterruptedStream(source: source, explanation: "Playback was interrupted; requesting a fresh stream at the same position.")
     }
 
     /// Reopen the current queue item after a natural end. Seeking a finished

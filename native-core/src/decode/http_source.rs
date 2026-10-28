@@ -155,7 +155,9 @@ pub(super) fn fetch_loop(
                 .map(|t| (pos + HTTP_CHUNK - 1).min(t.saturating_sub(1)))
                 .unwrap_or(pos + HTTP_CHUNK - 1);
             let range = format!("bytes={pos}-{end}");
-            let mut req = ureq::get(&url).set("Range", &range);
+            let mut req = ureq::get(&url)
+                .timeout(std::time::Duration::from_secs(20))
+                .set("Range", &range);
             for (key, value) in &headers {
                 req = req.set(key, value);
             }

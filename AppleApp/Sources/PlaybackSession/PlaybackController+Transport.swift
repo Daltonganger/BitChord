@@ -38,7 +38,9 @@ extension PlaybackController {
             // Only when it is still the track the position was saved for.
             let start = restoredStart.flatMap { $0.entryId == current?.id ? $0.position : nil }
             restoredStart = nil
-            loadCurrent(playingIndex, startAt: start, refreshAutoplay: false)
+            let fresh = recoveryNeedsFreshResolution
+            if fresh, let current { streamRecovery.select(current.id, resetAttempts: true) }
+            loadCurrent(playingIndex, startAt: start, refreshAutoplay: false, freshResolution: fresh)
             return
         }
         if isPlaying {

@@ -13,6 +13,9 @@ pub trait EngineEvents: Send + Sync {
     fn state_changed(&self, state: crate::PlaybackState);
     fn track_ended(&self, reason: crate::TrackEndReason, source: String);
     fn error(&self, message: String);
+    fn source_error(&self, _source: String, message: String) {
+        self.error(message);
+    }
     /// The incoming track became audible: current-track metadata flips now
     /// (upstream fires `onHandoff` as the first note sounds, not at blend end).
     fn handoff(&self, info: TrackInfo);

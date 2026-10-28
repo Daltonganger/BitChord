@@ -34,14 +34,15 @@ final class SourceSearch: Sendable {
     /// The stream behind one addon search row, by its `src:` key — the path a
     /// row takes when it is tapped. Nil means the sources declined, not that the
     /// request failed; the caller falls back to skipping the row.
-    func stream(key: String, title: String, artist: String, durationSec: Int?) async -> SourceSubstitution.Stream? {
+    func stream(key: String, title: String, artist: String, durationSec: Int?, diagnostic: @escaping @Sendable (String) -> Void = { _ in }) async -> SourceSubstitution.Stream? {
         await withCheckedContinuation { continuation in
             SourceResolverBridge.shared.resolveAddonTrack(
                 key: key,
                 title: title,
                 artist: artist,
                 durationSec: durationSec.map { KotlinInt(value: Int32($0)) },
-                callback: AddonStreamAdapter { json, _ in
+                callback: AddonStreamAdapter { json, message in
+                    if let message { diagnostic(message) }
                     continuation.resume(returning: json.flatMap(SourceSubstitution.decode))
                 }
             )

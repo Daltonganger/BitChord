@@ -98,6 +98,8 @@ object PlayerBridge {
      * stays preferred and the URL stays cached, and every following track fails the
      * same way until the app is restarted.
      */
+    fun forgetPlaybackUrl(videoId: String) { StreamResolver.forgetPlaybackUrl(videoId) }
+
     fun onPlaybackRefused(url: String, responseCode: Int) {
         StreamResolver.onPlaybackRefused(url, responseCode)
     }

@@ -36,6 +36,7 @@ data class StreamFormat(
     val kbps: Int? = null,
     val sampleRateHz: Int? = null,
     val bitDepth: Int? = null,
+    val verified: Boolean = false,
 ) {
     /** Codec names from providers range from short labels to MIME types. */
     private val normalizedCodec: String?
@@ -64,6 +65,13 @@ data class StreamFormat(
                 "x-aiff" -> "aiff"
                 else -> name
             }
+        }
+
+    internal val codecFamily: String?
+        get() = when (val name = normalizedCodec) {
+            "mpeg", "mpga", "mp3" -> "mp3"
+            "aac", "aac-lc", "heaac" -> "aac"
+            else -> if (name?.startsWith("mp4a.") == true) "aac" else name
         }
 
     /**

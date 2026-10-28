@@ -463,3 +463,32 @@ fn pcm_layout_and_pull_size_are_independent() {
         std::fs::remove_file(path).unwrap();
     }
 }
+
+#[test]
+fn cancelling_a_stalled_progressive_reader_releases_the_mixer() {
+    use std::io::Read;
+    let path = std::env::temp_dir().join(format!("bitchord-cancelled-growing-{}", std::process::id()));
+    std::fs::write(&path, []).unwrap();
+    let marker = format!("{}.playback-cancelled", path.display());
+    let _ = std::fs::remove_file(&marker);
+    let mut reader = GrowingFile::open(path.to_str().unwrap()).unwrap();
+    let (sent, received) = std::sync::mpsc::channel();
+    let task = std::thread::spawn(move || { let result = reader.read(&mut [0u8; 1]); sent.send(result).unwrap(); });
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    std::fs::write(&marker, []).unwrap();
+    let result = received.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::ConnectionAborted);
+    task.join().unwrap();
+    std::fs::remove_file(marker).unwrap();
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn lossy_codec_labels_use_decoder_identity_without_filename_fallbacks() {
+    use symphonia::core::codecs::audio::well_known::*;
+    let mut audio = symphonia::core::codecs::audio::AudioCodecParameters::new();
+    for (codec, name) in [(CODEC_ID_MP3, "MP3"), (CODEC_ID_AAC, "AAC"), (CODEC_ID_VORBIS, "Vorbis"), (CODEC_ID_FLAC, "FLAC"), (CODEC_ID_ALAC, "ALAC")] {
+        audio.codec = codec;
+        assert_eq!(super::codec::codec_label(&audio), name);
+    }
+}

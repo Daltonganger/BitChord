@@ -42,8 +42,9 @@ pub use playback_regions::{PlaybackInterval, PlaybackRegions};
 pub use records::{
     AlignmentSegmentRec, AudioSourceFormatRec, AutomixAnalysisOverlayRec, AutomixTier,
     DecodedRegion, EngineError, LoadRequest, MelSpectrogramResult, NerdStatsRec, OutputDeviceRec,
-    OutputHealthRec, OutputPcmMode, PlaybackState, QueuedTrackRec, TrackEndReason, TrackInfoRec,
-    TrackMetadata, TransitionPlanRec, TransitionStyleRec, VersionAlignmentRec,
+    OutputHealthRec, OutputPcmMode, PlaybackState, QueuedTrackRec, SourceErrorRec, TrackEndReason,
+    TrackInfoRec, TrackMetadata, TransitionPlanRec, TransitionStyleRec, VerifiedAudioSourceRec,
+    VersionAlignmentRec,
 };
 pub use sound::{ClarityPreset, ClarityTuning, LoudnessMeasurement, LoudnessMode, SoundMode};
 

@@ -235,7 +235,7 @@ pub(super) fn render_available(state: &mut MixerState, ring: &mut Producer<f32>)
         }
         for voice in state.current.iter_mut().chain(state.incoming.iter_mut()) {
             if let Some(error) = voice.decode_error.take() {
-                state.events.error(error);
+                state.events.source_error(voice.info.source.clone(), error);
             }
         }
         if state.playing {
@@ -498,6 +498,11 @@ pub(super) fn render_bitperfect_available(state: &mut MixerState, ring: &mut Pro
                 0
             }
         };
+        if let Some(voice) = &mut state.current {
+            if let Some(error) = voice.decode_error.take() {
+                state.events.source_error(voice.info.source.clone(), error);
+            }
+        }
         if frame_count == 0 {
             let exhausted = state.current.as_ref().is_none_or(|voice| voice.finished);
             if exhausted && state.buffered_frames.load(Ordering::Relaxed) == 0 {
