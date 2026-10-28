@@ -85,6 +85,12 @@ struct EqualizerView: View {
                 .font(.headline)
                 .padding(.horizontal)
                 .padding(.vertical, 8)
+            if let reason = controller.settingsAudioReadout.processingBypass {
+                Text(reason).font(.footnote).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8)
+            } else if controller.soundMode == "TRANSPARENT" {
+                Text("Your EQ settings are saved. Choose Enhanced in Sound Processing to hear them; Transparent bypasses EQ.")
+                    .font(.footnote).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8)
+            }
             Picker("Mode", selection: $mode) {
                 ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }

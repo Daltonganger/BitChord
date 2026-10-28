@@ -74,6 +74,7 @@ struct SourcesView: View {
                 Text("Your libraries")
             } footer: {
                 Text("A library you host yourself, played from the server rather than from a catalogue. It takes no part in the ranking above — it holds your own files, so it is not standing in for anything.")
+                    .lineLimit(nil).fixedSize(horizontal: false, vertical: true)
             }
         }
         #if os(iOS)
@@ -268,6 +269,8 @@ struct SourcesView: View {
             Text("A larger tolerance accepts more source matches; a smaller tolerance is stricter. The default is 3 seconds.")
         }
         .foregroundStyle(.secondary)
+        .lineLimit(nil)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// Nil for a source that cannot be switched off, which the row renders as a

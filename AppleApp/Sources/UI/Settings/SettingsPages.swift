@@ -105,8 +105,8 @@ struct AudioQualityOption: Identifiable {
 
     static let stream: [AudioQualityOption] = [
         .init(id: "LOW", title: "Low", detail: "64 kbps · uses the least data"),
-        .init(id: "MEDIUM", title: "Medium", detail: "Best available · ~171 kbps Opus"),
-        .init(id: "HIGH", title: "High", detail: "JioSaavn up to 320 kbps · YouTube fallback"),
+        .init(id: "MEDIUM", title: "Medium", detail: "Compressed audio · balances data use and quality"),
+        .init(id: "HIGH", title: "High", detail: "High-quality audio from enabled sources · YouTube fallback"),
         .init(id: "LOSSLESS", title: "Lossless", detail: "Lossless and Hi-Res from sources that supply them"),
     ]
 

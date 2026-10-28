@@ -20,8 +20,9 @@ enum Keychain {
     private static let namespace: String = {
         #if DEBUG
         // The muted CLI diagnostic has its own container and credentials.
-        if Bundle.main.bundleIdentifier == "app.bitchord.BitChord.queuevalidation" {
-            return "app.bitchord.BitChord.queuevalidation"
+        if let identifier = Bundle.main.bundleIdentifier,
+           identifier.hasPrefix("app.bitchord.BitChord.queuevalidation") {
+            return identifier
         }
         #endif
         return "app.bitchord.BitChord"

@@ -119,14 +119,6 @@ extension SettingsView {
                 isOn: $showQueueHistory
             )
         }
-        rows.row("JioSaavn", "jiosaavn", "saavn", "source", "bitrate", "race", "match") {
-            SettingsToggleLine(
-                glyph: .sources,
-                title: "JioSaavn",
-                subtitle: "Race JioSaavn for high-bitrate matches alongside YouTube Music",
-                isOn: $jiosaavn
-            )
-        }
         rows.row("Stop When Backgrounded", "background", "stop", "pause", "close", "quit") {
             SettingsToggleLine(
                 glyph: .video,
@@ -220,13 +212,7 @@ extension SettingsView {
                  "acknowledgements", "privacy policy") {
             LabeledContent("Version", value: update.currentVersion)
         }
-        #if os(macOS)
-        rows.row("Updates", "update", "sparkle", "version", "check") {
-            MacUpdateSettings()
-        }
-        #else
         buildUpdateRows(&rows)
-        #endif
         rows.row("GitHub", "github", "source", "code", "repository") {
             Link("GitHub", destination: URL(string: "https://github.com/bagumamartin/BitChord")!)
         }
@@ -251,49 +237,10 @@ extension SettingsView {
         }
     }
 
-    /// The update row, which is three things depending on what is known.
-    ///
-    /// A release is offered with its version in the subtitle rather than as a badge:
-    /// an update notice that is only a coloured dot asks the reader to guess, and the
-    /// one question here is "what is it".
     private func buildUpdateRows(_ rows: inout SettingsRows) {
-        if let release = update.available {
-            rows.row(release.version, "update", "newer", "release", "version") {
-                Button {
-                    updateSheet = release
-                } label: {
-                    SettingsLine(
-                        glyph: .update,
-                        title: release.version,
-                        subtitle: "A newer BitChord is out"
-                    ) {
-                        Image(.bchChevronRight)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 12, height: 12)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .buttonStyle(.plain)
-            }
-        } else {
-            rows.row("Check for Updates", "update", "version", "release", "check") {
-                Button {
-                    Task { await update.check() }
-                } label: {
-                    if update.checking {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        SettingsLine(
-                            glyph: .update,
-                            title: "Check for Updates",
-                            subtitle: update.problem ?? "BitChord \(update.comparableVersion)"
-                        ) {
-                            EmptyView()
-                        }
-                    }
-                }
-                .disabled(update.checking)
+        rows.row("Version & Updates", "update", "newer", "release", "version", "build", "install", "ipa", "dmg", "sparkle") {
+            PushLink { UpdatesSettingsPage() } label: {
+                SettingsLine(glyph: .update, title: "Version & Updates", subtitle: update.currentVersion) { EmptyView() }
             }
         }
     }

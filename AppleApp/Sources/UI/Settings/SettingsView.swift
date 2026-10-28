@@ -36,8 +36,6 @@ struct SettingsView: View {
     @State var canvasCellular = PlatformSettings.shared.getBoolean(key: "canvas_over_cellular", default: false)
     @State var reduceBlur = PlatformSettings.shared.getBoolean(key: "reduce_dynamic_blur", default: false)
     @State var update = UpdateChecker.shared
-    /// The release being shown, and nil when nothing is.
-    @State var updateSheet: AppReleaseUpdate?
     @State var reduceAnimation = PlatformSettings.shared.getBoolean(key: "reduce_animation", default: false)
     @State var fullBleed = PlatformSettings.shared.getBoolean(key: "full_bleed_artwork", default: true)
     @AppStorage("lyrics_blur") var lyricsBlur = true
@@ -77,7 +75,6 @@ struct SettingsView: View {
         PlatformSettings.shared.getString(key: "lyrics_source_order", default: LyricsSourceNames.defaultEnabled)
     )
     @State var playbackSpeed = Double(PlatformSettings.shared.getFloat(key: "playback_speed", default: 1))
-    @State var jiosaavn = PlatformSettings.shared.getBoolean(key: "jiosaavn_enabled", default: true)
     @State var stopBackground = PlatformSettings.shared.getBoolean(key: "stop_when_backgrounded", default: false)
     @State var stopMusicOnClose = PlatformSettings.shared.getBoolean(key: "stop_music_on_close", default: false)
     @State var hidePlayerStatusBar = PlatformSettings.shared.getBoolean(key: "hide_status_bar_in_player", default: false)
@@ -108,9 +105,10 @@ struct SettingsView: View {
     /// The settings search box. Empty means "no filter", not "nothing" — clearing
     /// it must bring the whole screen back.
     @State private var search = ""
+    @State private var deepLinkedSettingsSection: SettingsSection?
     #if os(macOS)
     @State private var settingsHistory = PathNavigator()
-    @State private var selectedMacSettingsSection: SettingsSection? = .account
+    @State private var selectedMacSettingsSection: SettingsSection? = .sources
     #endif
 
     var metered: Bool { NetworkQuality.shared.metered }
@@ -163,10 +161,6 @@ struct SettingsView: View {
                 localFolderName = SettingsView.storedLocalFolderName()
                     ?? url.lastPathComponent
             }
-        }
-        .sheet(item: $updateSheet) { release in
-            UpdateSheet(release: release)
-                .environment(update)
         }
         .onAppear {
             // The tuner holds a display link while high performance is on, so it
@@ -258,7 +252,6 @@ struct SettingsView: View {
         .modifier(SettingsExtrasPersist(
             lyricsSources: $lyricsSources,
             lyricsSourceOrder: $lyricsSourceOrder,
-            jiosaavn: $jiosaavn,
             stopBackground: $stopBackground,
             syllableSync: $syllableSync,
             language: $language,
@@ -301,40 +294,33 @@ struct SettingsView: View {
     /// beside the section could only describe the section as a whole, which is how
     /// typing "flac" came to mean "show every row in Audio Quality".
     enum SettingsSection: String, CaseIterable, Identifiable {
-        case account, audioQuality, downloads, playback
-        case appearance, performance, localMusic, storage, yourData, miscellaneous, advanced, about
+        case sources, audioQuality, playback, downloads, appearance, account, advanced, yourData, about
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
+            case .sources: return "Sources"
             case .account: return "Account & Integrations"
-            case .audioQuality: return "Audio Quality"
-            case .downloads: return "Downloads"
+            case .audioQuality: return "Sound & Quality"
+            case .downloads: return "Downloads & Storage"
             case .playback: return "Playback"
             case .appearance: return "Appearance"
-            case .performance: return "Performance"
-            case .localMusic: return "Local Music"
-            case .storage: return "Storage"
-            case .yourData: return "Your Data"
-            case .miscellaneous: return "Miscellaneous"
+            case .yourData: return "Your Data & Backup"
             case .advanced: return "Advanced Options"
-            case .about: return "About"
+            case .about: return "About & Updates"
             }
         }
 
         var systemImage: String {
             switch self {
+            case .sources: return "square.stack.3d.up"
             case .account: return "person.crop.circle"
             case .audioQuality: return "waveform"
             case .downloads: return "arrow.down.circle"
             case .playback: return "play.circle"
             case .appearance: return "paintbrush"
-            case .performance: return "speedometer"
-            case .localMusic: return "music.note.list"
-            case .storage: return "externaldrive"
             case .yourData: return "externaldrive"
-            case .miscellaneous: return "ellipsis.circle"
             case .advanced: return "gearshape.2"
             case .about: return "info.circle"
             }
@@ -346,6 +332,7 @@ struct SettingsView: View {
     /// One row that survived the search filter, with whatever it draws itself as.
     struct SettingsRowEntry: Identifiable {
         let id: Int
+        let title: String
         let content: AnyView
     }
 
@@ -393,7 +380,11 @@ struct SettingsView: View {
                 title: sectionTitle,
                 termsCsv: terms
             ) else { return }
-            entries.append(SettingsRowEntry(id: entries.count, content: AnyView(content())))
+            entries.append(SettingsRowEntry(id: entries.count, title: title, content: AnyView(content())))
+        }
+
+        mutating func append(_ entry: SettingsRowEntry) {
+            entries.append(SettingsRowEntry(id: entries.count, title: entry.title, content: entry.content))
         }
 
         /// ASCII unit separator, as the bridge expects: the terms are phrases, and
@@ -424,20 +415,38 @@ struct SettingsView: View {
     func rows(for section: SettingsSection) -> [SettingsRowEntry] {
         var rows = SettingsRows(query: search, sectionTitle: section.title)
         switch section {
-        case .account: buildAccountRows(&rows)
+        case .sources:
+            rows.row("Sources", keywords: AudioSettingsItem.sources.keywords + ["addon", "source"]) {
+                PushLink { SourcesView() } label: { Label("Manage Sources", systemImage: "square.stack.3d.up") }
+            }
+        case .account:
+            buildAccountRows(&rows)
+            appendMiscRows(&rows, titles: ["Listen together", "Spotify Canvas"])
         case .audioQuality: buildAudioQualityRows(&rows)
-        case .downloads: buildDownloadRows(&rows)
-        case .playback: buildPlaybackRows(&rows)
-        case .appearance: buildAppearanceRows(&rows)
-        case .performance: buildPerformanceRows(&rows)
-        case .localMusic: buildLocalMusicRows(&rows)
-        case .storage: buildStorageRows(&rows)
+        case .downloads:
+            buildDownloadRows(&rows)
+            buildLocalMusicRows(&rows)
+            buildStorageRows(&rows)
+        case .playback:
+            buildPlaybackRows(&rows)
+            appendMiscRows(&rows, titles: ["Play Next on Swipe", "Don’t Repeat Songs in Current Session", "Show Queue History", "Stop When Backgrounded", "Stop Music on Close"])
+        case .appearance:
+            buildAppearanceRows(&rows)
+            appendMiscRows(&rows, titles: ["Hide Volume Bar", "Hide Song Status", "Hide Status Bar in Player", "App Language"])
+        case .advanced:
+            buildAdvancedRows(&rows)
+            buildAutomixAdvancedRows(&rows)
+            buildPerformanceRows(&rows)
         case .yourData: buildYourDataRows(&rows)
-        case .miscellaneous: buildMiscellaneousRows(&rows)
-        case .advanced: buildAdvancedRows(&rows)
         case .about: buildAboutRows(&rows)
         }
         return rows.entries
+    }
+
+    private func appendMiscRows(_ rows: inout SettingsRows, titles: Set<String>) {
+        var legacy = SettingsRows(query: rows.query, sectionTitle: rows.sectionTitle)
+        buildMiscellaneousRows(&legacy)
+        for entry in legacy.entries where titles.contains(entry.title) { rows.append(entry) }
     }
 
     /// What a section says underneath itself, when it has anything to say.
@@ -448,31 +457,25 @@ struct SettingsView: View {
     private func footer(for section: SettingsSection) -> some View {
         switch section {
         case .audioQuality:
-            Text("Match Source Sample Rate asks the route to switch clock families between tracks. Bit-perfect output is available on macOS when the DAC grants exclusive access and the lossless source format is supported. The Audio Pipeline readout shows what is actually in effect.")
+            Text("Source Quality is the request. Current Output shows the decoded audio, device format and processing actually in use. Technical Audio & DAC contains output-specific options.")
         case .downloads:
             Text("Exported downloads live in the shared Music folder. Private ones stay inside BitChord's own storage.")
         case .playback:
             Text("Gapless stays on at 0s. Automix picks timing per track; crossfade sets the manual blend length.")
-        case .performance:
-            Text("High Performance Mode holds the display at the chosen refresh rate instead of letting the system vary it. Expect noticeably shorter battery life while it is on.")
-        case .localMusic:
-            Text("BitChord watches the folder you choose for music files. Filtering keeps everything that is not a song out of the list.")
-        case .miscellaneous:
-            Text("With \u{201C}Stop When Backgrounded\u{201D} on, playback pauses when you leave the app — on Mac, closing the last window counts too.")
         case .advanced:
-            Text("A version switch resumes where you left off. With this off it restarts from the top, since no alignment is attempted.")
+            Text("Analysis and display performance options can increase CPU use and battery consumption. Version alignment controls how a source switch resumes the recording.")
         case .about:
-            Text("BitChord \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0")")
+            Text("BitChord \(update.currentVersion)")
                 .frame(maxWidth: .infinity)
                 .multilineTextAlignment(.center)
-        case .account, .appearance, .storage, .yourData:
+        case .sources, .account, .appearance, .yourData:
             EmptyView()
         }
     }
 
     #if os(macOS)
     private var macSettingsSplitView: some View {
-        let visibleSections = builtSections().map(\.section)
+        let visibleSections = search.isEmpty ? SettingsSection.allCases : builtSections().map(\.section)
         return SettingsMacSplitView(
             sections: visibleSections,
             selection: $selectedMacSettingsSection,
@@ -483,7 +486,7 @@ struct SettingsView: View {
             },
             detail: { section in
                 NavigationStack(path: Bindable(settingsHistory).path) {
-                    macSettingsSection(section)
+                    settingsSectionPage(section)
                         .navigationTitle("Settings")
                         .navigationDestination(for: PushRoute.self) { route in
                             route.make().navigationBarBackButtonHidden(true)
@@ -495,28 +498,18 @@ struct SettingsView: View {
                 }
             }
         )
+        .onChange(of: selectedMacSettingsSection) { _, _ in
+            settingsHistory = PathNavigator()
+        }
         .onChange(of: search) { _, _ in
-            let visibleSections = builtSections().map(\.section)
+            settingsHistory = PathNavigator()
+            let visibleSections = search.isEmpty ? SettingsSection.allCases : builtSections().map(\.section)
             if let selectedMacSettingsSection,
                visibleSections.contains(selectedMacSettingsSection) {
                 return
             }
             selectedMacSettingsSection = visibleSections.first
         }
-    }
-
-    private func macSettingsSection(_ section: SettingsSection) -> some View {
-        let rows = rows(for: section)
-        return Form {
-            Section {
-                ForEach(rows) { row in row.content }
-            } header: {
-                Text(section.title)
-            } footer: {
-                if search.isEmpty { footer(for: section) }
-            }
-        }
-        .formStyle(.grouped)
     }
 
     private func consumeMacSettingsDeepLinkIfNeeded() {
@@ -526,14 +519,72 @@ struct SettingsView: View {
         else { return }
         requestedSettingsPage = ""
         search = ""
+        settingsHistory = PathNavigator()
         selectedMacSettingsSection = section
     }
     #endif
 
+    private func settingsSectionForm(_ section: SettingsSection) -> some View {
+        let entries = rows(for: section)
+        let cleanupTitles: Set<String> = ["Clear Song Cache", "Clear Image Cache"]
+        return Form {
+            Section {
+                ForEach(entries.filter { !cleanupTitles.contains($0.title) }) { row in row.content }
+            } header: { Text(section.title) } footer: { if search.isEmpty { footer(for: section) } }
+            if section == .downloads {
+                Section {
+                    ForEach(entries.filter { cleanupTitles.contains($0.title) }) { row in row.content }
+                } header: { Text("Free Storage") } footer: {
+                    Text("Cache actions remove temporary files. Data import and backup are on Your Data & Backup.")
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    @ViewBuilder private func settingsSectionPage(_ section: SettingsSection) -> some View {
+        if section == .sources { SourcesView() }
+        else { settingsSectionForm(section).navigationTitle(section.title) }
+    }
+
+    private func sectionSummary(_ section: SettingsSection) -> String {
+        switch section {
+        case .sources:
+            let state = SourceListState.shared
+            guard state.hasLoaded else { return "Addons, source order, renewal and your libraries" }
+            let enabled = state.configs.filter { $0.enabled }.count
+            let attention = state.loadError != nil || state.configs.contains { config in
+                config.enabled && (state.health[config.id]?.name == "rejected" || state.health[config.id]?.name == "unreachable")
+            }
+            return "\(enabled) enabled" + (attention ? " · needs attention" : "")
+        case .audioQuality: return "Requested quality, decoded format, effects and device output"
+        case .playback: return "Queue, transitions, speed and background playback"
+        case .downloads: return "Offline quality, local folders and temporary storage"
+        case .appearance: return "Player, lyrics, language and visual preferences"
+        case .account: return "Sign-in, sharing and connected services"
+        case .advanced: return "Models, analysis, performance and version alignment"
+        case .yourData: return "Listening history, export and importing a backup"
+        case .about: return "Installed build, latest release and installation"
+        }
+    }
+
     private var settingsForm: some View {
-        let sections = builtSections()
+        let sections = search.isEmpty ? [] : builtSections()
         return ScrollViewReader { proxy in
             Form {
+                if search.isEmpty {
+                    Section {
+                        ForEach(SettingsSection.allCases) { section in
+                            PushLink { settingsSectionPage(section) } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Label(section.title, systemImage: section.systemImage)
+                                    Text(sectionSummary(section)).font(.caption).foregroundStyle(.secondary)
+                                }.padding(.vertical, 3)
+                            }
+                            .id(section.id)
+                        }
+                    } header: { Text("Settings") }
+                } else {
                 ForEach(sections) { built in
                     Section {
                         ForEach(built.rows) { row in
@@ -553,14 +604,14 @@ struct SettingsView: View {
                     }
                     .id(built.section.id)
                 }
-                if !search.isEmpty && sections.isEmpty {
-                    ContentUnavailableView.search(text: search)
+                if sections.isEmpty { ContentUnavailableView.search(text: search) }
                 }
             }
             .formStyle(.grouped)
             // The sheets, the picker and the warning belong to the screen rather than
             // to one group: the group they used to hang off can be filtered away, and
             // what it raises must still be able to appear.
+            .navigationDestination(item: $deepLinkedSettingsSection) { section in settingsSectionPage(section) }
             .onAppear { consumeSettingsDeepLinkIfNeeded(using: proxy) }
             .onChange(of: requestedSettingsPage) { _, _ in consumeSettingsDeepLinkIfNeeded(using: proxy) }
         }
@@ -575,6 +626,7 @@ struct SettingsView: View {
         Task { @MainActor in
             await Task.yield()
             withAnimation { proxy.scrollTo(section, anchor: .top) }
+            deepLinkedSettingsSection = SettingsSection(rawValue: section)
         }
     }
 

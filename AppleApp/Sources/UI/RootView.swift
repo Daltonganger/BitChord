@@ -55,6 +55,8 @@ struct RootView: View {
     /// The one selected row in the window, shared by every list.
     @State private var rowSelection = RowSelection()
 
+    @State private var updateDetails: AppReleaseUpdate?
+
     var body: some View {
         shell
         .environment(\.rowSelection, rowSelection)
@@ -181,17 +183,15 @@ struct RootView: View {
             get: { updateChecker.available != nil },
             set: { if !$0 { updateChecker.dismiss() } }
         )) {
-            Button("View Release Notes") {
-                if let release = updateChecker.available,
-                   let url = URL(string: release.releaseUrl) {
-                    UIApplication.shared.open(url)
-                }
+            Button("View Update") {
+                updateDetails = updateChecker.available
                 updateChecker.dismiss()
             }
             Button("Later", role: .cancel) { updateChecker.dismiss() }
         } message: {
-            Text("BitChord \(updateChecker.available?.version ?? "") is available. Update using the same method you used to install BitChord. The release page has the change notes.")
+            Text("BitChord \(updateChecker.available?.identity.label ?? "") is available. Update using the same method you used to install BitChord. The release page has the change notes.")
         }
+        .sheet(item: $updateDetails) { release in UpdateSheet(release: release) }
         #endif
         .onChange(of: tabBinding.wrappedValue) { old, new in
             if new == .search { appModel.focusSearch = true }

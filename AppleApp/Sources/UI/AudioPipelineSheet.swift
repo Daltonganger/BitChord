@@ -42,7 +42,7 @@ struct AudioPipelineSheet: View {
                         .foregroundStyle(.white.opacity(0.45))
                         .padding(.bottom, 14)
                     stage(0, "doc.text", "Track Info") {
-                        row("Claimed Quality", claimedQuality)
+                        row("Requested Source Quality", claimedQuality)
                         row("Measured Stream", measuredStream)
                         row("Source", sourceName)
                         if let id = controller.current?.id, let note = controller.sourceDecisionNotes[id] {
@@ -228,7 +228,7 @@ struct AudioPipelineSheet: View {
 
     // ---- The figures --------------------------------------------------------
 
-    private var nerd: NerdStatsRec? { controller.nerd }
+    private var nerd: NerdStatsRec? { controller.settingsAudioReadout.loaded && controller.dolbyRenderer == nil ? controller.nerd : nil }
     private var device: OutputDeviceRec { controller.outputDevice }
 
     private var sourceName: String {
@@ -240,8 +240,9 @@ struct AudioPipelineSheet: View {
     private var bitrate: String { (nerd?.kbps ?? 0) > 0 ? "\(nerd!.kbps) kbps" : "—" }
     private var sourceRate: String { (nerd?.sampleRate ?? 0) > 0 ? "\(nerd!.sampleRate) Hz" : "—" }
     private var claimedQuality: String {
-        let quality = AppSettings.shared.effectiveAudioQuality(metered: NetworkQuality.shared.metered).name
-        return "\(quality) · up to \(NetworkQuality.shared.maxKbps) kbps"
+        let metered = NetworkQuality.shared.metered
+        let quality = AppSettings.shared.effectiveAudioQuality(metered: metered).name
+        return "\(AudioQualityOption.label(quality, in: AudioQualityOption.stream)) requested on \(metered ? "Mobile Data" : "Wi-Fi")"
     }
     private var measuredStream: String {
         let values = [codec, bitrate, sourceRate, bitDepth].filter { $0 != "—" }
@@ -269,13 +270,13 @@ struct AudioPipelineSheet: View {
     private var decoderName: String { nerd?.decoderImplementation.isEmpty == false ? nerd!.decoderImplementation : "—" }
 
     private var deviceRate: String {
-        device.started && device.sampleRate > 0 ? "\(device.sampleRate) Hz" : "—"
+        nativeOutputReady && device.sampleRate > 0 ? "\(device.sampleRate) Hz" : "—"
     }
     private var deviceChannels: String {
-        device.started && device.channels > 0 ? "\(device.channels)" : "—"
+        nativeOutputReady && device.channels > 0 ? "\(device.channels)" : "—"
     }
     private var deviceName: String {
-        device.started && !device.name.isEmpty ? device.name : "Not open yet"
+        nativeOutputReady && !device.name.isEmpty ? device.name : "Not open yet"
     }
 
     /// "44100 → 48000" when the two differ, and the single rate when they do not
@@ -303,22 +304,16 @@ struct AudioPipelineSheet: View {
     /// The word length the unit was actually opened as — the setting's answer,
     /// not its request. Upstream's panel names the negotiated encoding for the
     /// same reason: PCM_16 quantizes at the callback, FLOAT_32 passes through.
+    private var nativeOutputReady: Bool {
+        controller.settingsAudioReadout.loaded && controller.dolbyRenderer == nil && device.started
+    }
     private var pcmFormat: String {
-        guard device.started else { return "—" }
-        switch device.sampleFormat {
-        case "FLOAT_32": return "Float32"
-        case "PCM_24": return "PCM 24"
-        default: return "PCM 16"
-        }
+        guard nativeOutputReady else { return "—" }
+        return AudioSettingsReadout.pcmLabel(device.sampleFormat)
     }
 
     private var bitPerfectStatus: String {
-        guard device.started else { return "Waiting for output" }
-        if device.bitPerfectActive { return "Active · \(pcmFormat)" }
-        guard PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: true) else {
-            return "Off"
-        }
-        return "Unavailable · \(device.bitPerfectReason)"
+        controller.settingsAudioReadout.bitPerfectStatus(requested: controller.bitPerfectOutput)
     }
 
     /// Applied loudness correction, read off the engine rather than the
@@ -352,11 +347,12 @@ struct AudioPipelineSheet: View {
     /// because no DSP was switched on would be wrong for every 44.1 kHz track on
     /// a 48 kHz route, which is most of them.
     private var samplePathVerdict: String {
-        guard device.started else { return "—" }
+        if controller.dolbyRenderer != nil { return "Native PCM processing is bypassed by Apple’s renderer" }
+        guard nativeOutputReady else { return "—" }
         if device.bitPerfectActive {
             return "Yes — exclusive integer PCM; engine DSP and system mixing bypassed"
         }
-        if PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: true) {
+        if PlatformSettings.shared.getBoolean(key: "bit_perfect_output", default: false) {
             return "No — \(device.bitPerfectReason)"
         }
         let src = nerd?.sampleRate ?? 0
@@ -413,8 +409,10 @@ struct AudioOutputRow: View {
     /// is no reason to show a rate the device has not reported.
     private var summary: String {
         let device = controller.outputDevice
+        guard controller.settingsAudioReadout.loaded else { return "Not open for the selected track" }
+        if controller.dolbyRenderer != nil { return "Apple Dolby renderer" }
         guard device.started else { return "Nothing open yet" }
-        var parts: [String] = [Self.formatLabel(device.sampleFormat)]
+        var parts: [String] = [AudioSettingsReadout.pcmLabel(device.sampleFormat)]
         if device.sampleRate > 0 {
             let khz = Double(device.sampleRate) / 1000
             parts.append(String(format: khz == khz.rounded() ? "%.0f kHz" : "%.1f kHz", khz))
@@ -422,13 +420,6 @@ struct AudioOutputRow: View {
         return parts.joined(separator: " · ")
     }
 
-    private static func formatLabel(_ format: String) -> String {
-        switch format {
-        case "FLOAT_32": "Float32"
-        case "PCM_24": "PCM 24"
-        default: "PCM 16"
-        }
-    }
 }
 
 /// Upstream `AudioOutputSheet`: current outputs, AirPlay, app volume, then the
@@ -563,7 +554,7 @@ struct OutputDeviceSheet: View {
     }
 
     private var device: OutputDeviceRec { controller.outputDevice }
-    private var nerd: NerdStatsRec? { controller.nerd }
+    private var nerd: NerdStatsRec? { controller.settingsAudioReadout.loaded && controller.dolbyRenderer == nil ? controller.nerd : nil }
 
     private var upgradeCorrelation: String {
         guard let rho = nerd?.swapCorrelation else { return "—" }
@@ -592,8 +583,10 @@ struct OutputDeviceSheet: View {
         #endif
     }
     private var pipelineSummary: String {
+        guard controller.settingsAudioReadout.loaded else { return "Not open for the selected track" }
+        if controller.dolbyRenderer != nil { return "Apple Dolby renderer" }
         guard device.started else { return "—" }
-        var parts = [Self.formatLabel(device.sampleFormat)]
+        var parts = [AudioSettingsReadout.pcmLabel(device.sampleFormat)]
         if device.sampleRate > 0 { parts.append("\(device.sampleRate) Hz") }
         return parts.joined(separator: " · ")
     }
@@ -627,13 +620,6 @@ struct OutputDeviceSheet: View {
     }
     #endif
 
-    private static func formatLabel(_ format: String) -> String {
-        switch format {
-        case "FLOAT_32": "Float32"
-        case "PCM_24": "PCM 24"
-        default: "PCM 16"
-        }
-    }
 }
 
 private struct OutputRouteRowModel: Identifiable {

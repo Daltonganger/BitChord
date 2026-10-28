@@ -10,103 +10,58 @@ import AppKit
 // Playback: crossfade, AutoMix and its models, and the rest of playback.
 extension SettingsView {
     func buildPlaybackRows(_ rows: inout SettingsRows) {
-        // Automix decides its own length from each pair of tracks, so it
-        // replaces the manual slider rather than needing it set to anything
-        // first — upstream's rule, which is why the slider goes away
-        // entirely instead of greying out.
-        if automix {
-            rows.row("Crossfade", "automix", "blend", "fade", "transition", "gapless") {
-                Text("Automix times every transition itself; the crossfade slider returns when Automix is off.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 4)
-            }
-        } else {
-            rows.row("Crossfade", "blend", "fade", "transition", "gapless", "automix") {
-                SettingsSliderRow(
-                    glyph: .crossfade,
-                    title: "Crossfade",
-                    subtitle: "Blends one track into the next",
+        rows.row("Crossfade", "blend", "fade", "transition", "gapless", "automix") {
+            VStack(alignment: .leading, spacing: 6) {
+                SettingsSliderRow(glyph: .crossfade, title: "Crossfade",
+                    subtitle: automix ? "Inactive while Automix controls transition timing" : "Blends one track into the next; 0s keeps gapless playback",
                     valueText: crossfade == 0 ? "Off" : "\(crossfade)s",
-                    value: Binding(
-                        get: { Double(crossfade) },
-                        set: { crossfade = Int($0.rounded()) }
-                    ),
-                    range: 0...12,
-                    step: 1
-                )
+                    value: Binding(get: { Double(crossfade) }, set: { crossfade = Int($0.rounded()) }),
+                    range: 0...12, step: 1)
+                    .disabled(automix || controller.settingsAudioReadout.processingBypass != nil)
+                if let reason = controller.settingsAudioReadout.processingBypass {
+                    Text(reason).font(.footnote).foregroundStyle(.secondary)
+                }
             }
         }
         rows.row("Automix", "blend", "transition", "beat", "model", "timing", "crossfade", "overheating", "lag") {
             SettingsToggleLine(
                 glyph: .automix,
                 title: "Automix [Beta]",
-                subtitle: automix
-                    ? (AutomixModelStore.shared.beatAvailable
-                        ? "Blends every transition, timed automatically from each track. Turn off if facing overheating or lag."
-                        : "Blends every transition automatically. The beat model is not installed, so timing comes from tempo analysis — install it below for transitions that land on the beat.")
-                    : "Times and blends transitions automatically, no slider needed.",
+                subtitle: automixSubtitle,
                 isOn: $automix
             )
         }
-        if automix {
-            rows.row("Phrase Length", "automix", "phrase", "bars", "adaptive", "8 bars", "16 bars") {
-                Picker("Phrase Length", selection: Binding(
-                    get: { controller.automixPhraseBars },
-                    set: { controller.setAutomixPhraseBars($0) }
-                )) {
-                    Text("Adaptive").tag(0)
-                    Text("8 bars").tag(8)
-                    Text("16 bars").tag(16)
-                }
-                .accessibilityHint("Choose the phrase length for AutoMix effects")
+        rows.row("Phrase Length", "automix", "phrase", "bars", "adaptive", "8 bars", "16 bars") {
+            Picker("Phrase Length", selection: Binding(
+                get: { controller.automixPhraseBars },
+                set: { controller.setAutomixPhraseBars($0) }
+            )) {
+                Text("Adaptive").tag(0)
+                Text("8 bars").tag(8)
+                Text("16 bars").tag(16)
             }
-            rows.row("Smart Sequencing", "sequence", "order", "suggestions", "autoplay", "transition", "shuffle") {
-                SettingsToggleLine(
-                    glyph: .automix,
-                    title: "Smart Sequencing",
-                    subtitle: "Order upcoming list tracks and Autoplay suggestions for smooth transitions, listening taste and freshness. Takes priority over Shuffle; manually queued tracks keep their order.",
-                    isOn: $automixSequence
-                )
-            }
-            rows.row("Mix on Skip", "skip", "next", "transition", "echo", "beat") {
-                SettingsToggleLine(
-                    glyph: .automix,
-                    title: "Mix on Skip",
-                    subtitle: "Pressing Next blends into the next track on the beat instead of cutting. Off during a party and on Repeat One.",
-                    isOn: Binding(
-                        get: { controller.automixOnSkipEnabled },
-                        set: { controller.setAutomixOnSkipEnabled($0) }
-                    )
-                )
-            }
+            .disabled(!automix)
+            .accessibilityHint(automix ? "Choose the phrase length for AutoMix effects" : "Enable Automix to use phrase timing")
+            if !automix { Text("Inactive · enable Automix to use phrase timing.").font(.footnote).foregroundStyle(.secondary) }
         }
-        rows.row("Automix Performance", "cpu", "threads", "analysis", "budget", "efficient", "balanced", "performance", "battery") {
-            PushLink {
-                AutomixPerformancePage(selection: $automixPerf)
-            } label: {
-                SettingsLine(
-                    glyph: .cpu,
-                    title: "Automix Performance",
-                    subtitle: "Background analysis budget — \(Self.automixPerfLabel(automixPerf)), \(controller.automixInferenceThreads) thread\(controller.automixInferenceThreads == 1 ? "" : "s")"
-                ) {
-                    Text(Self.automixPerfLabel(automixPerf))
-                        .foregroundStyle(.secondary)
-                }
-            }
+        rows.row("Smart Sequencing", "sequence", "order", "suggestions", "autoplay", "transition", "shuffle") {
+            SettingsToggleLine(
+                glyph: .automix,
+                title: "Smart Sequencing",
+                subtitle: automix ? "Order upcoming tracks for smooth transitions. Takes priority over Shuffle; manually queued tracks keep their order." : "Inactive · enable Automix to use Smart Sequencing.",
+                isOn: $automixSequence
+            ).disabled(!automix)
         }
-        rows.row("Automix Models", "models", "model", "onnx", "beat", "downbeat", "vocal", "install", "download models") {
-            PushLink {
-                AutomixModelsPage()
-            } label: {
-                SettingsLine(
-                    glyph: .models,
-                    title: "Automix Models",
-                    subtitle: Self.automixModelsSubtitle
-                ) {
-                    EmptyView()
-                }
-            }
+        rows.row("Mix on Skip", "skip", "next", "transition", "echo", "beat") {
+            SettingsToggleLine(
+                glyph: .automix,
+                title: "Mix on Skip",
+                subtitle: automix ? "Pressing Next blends into the next track. Inactive during a party and on Repeat One." : "Inactive · enable Automix to blend on Next.",
+                isOn: Binding(
+                    get: { controller.automixOnSkipEnabled },
+                    set: { controller.setAutomixOnSkipEnabled($0) }
+                )
+            ).disabled(!automix)
         }
         rows.row("Show Music Videos", "video", "music video", "clip", "picture", "avc", "mv") {
             SettingsToggleLine(
@@ -116,10 +71,9 @@ extension SettingsView {
                 isOn: $showMusicVideos
             )
         }
-        if showMusicVideos {
-            rows.row("Play Music Videos over Cellular", "video", "cellular", "mobile data") {
-                SettingsSubToggle(title: "Play Music Videos over Cellular", isOn: $videoOverCellular)
-            }
+        rows.row("Play Music Videos over Cellular", "video", "cellular", "mobile data") {
+            SettingsSubToggle(title: "Play Music Videos over Cellular", isOn: $videoOverCellular).disabled(!showMusicVideos)
+            if !showMusicVideos { Text("Inactive · Show Music Videos is off.").font(.footnote).foregroundStyle(.secondary) }
         }
         rows.row("Trim Leading and Trailing Silence", "silence", "trim", "edges", "gap") {
             Toggle("Trim Leading and Trailing Silence", isOn: $trimEdges)
@@ -146,7 +100,7 @@ extension SettingsView {
             SettingsToggleLine(
                 glyph: .skipSilence,
                 title: "Skip Silence",
-                subtitle: "Trim gaps longer than a second",
+                subtitle: controller.soundMode == "TRANSPARENT" ? "Inactive in Transparent mode · choose Enhanced to skip silence" : controller.settingsAudioReadout.processingBypass ?? "Trim gaps longer than a second",
                 isOn: $skipSilence
             )
         }
@@ -161,18 +115,6 @@ extension SettingsView {
                 step: 0.05
             )
         }
-        rows.row("BitChord spatial effect", "spatial", "widening", "head tracking", "stereo") {
-            SettingsToggleLine(
-                glyph: .spatial,
-                title: "BitChord spatial effect",
-                subtitle: "Optional stereo widening and head tracking. Suspended when Apple reports Spatial Audio is enabled.",
-                isOn: $spatial
-            )
-        }
-        rows.row("Spatial Audio", "airpods", "adaptive", "accessibility", "headphone", "accommodations") {
-            Text("Apple’s Headphone Accommodations, Adaptive Audio and Conversation Awareness are managed in system Accessibility, AirPods settings and Control Center. BitChord keeps your manual EQ choices.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
 #if os(iOS)
         rows.row("Play Alongside Other Apps", "mix", "other apps", "background audio", "interrupt") {
             SettingsToggleLine(
@@ -186,19 +128,6 @@ extension SettingsView {
             )
         }
 #endif
-        rows.row("Equalizer", "eq", "bands", "bass", "treble") {
-            PushLink {
-                EqualizerView()
-            } label: {
-                SettingsLine(
-                    glyph: .equalizer,
-                    title: "Equalizer",
-                    subtitle: "Ten-band EQ on the mixed output"
-                ) {
-                    EmptyView()
-                }
-            }
-        }
         rows.row("Show Stats for Nerds", "nerds", "stats", "codec", "bitrate", "sample rate") {
             SettingsToggleLine(
                 glyph: .nerd,
@@ -225,6 +154,43 @@ extension SettingsView {
                 subtitle: "Starts a music-video result on its catalogue audio release instead of the video's own upload",
                 isOn: $preferMusicOnly
             )
+        }
+    }
+
+    private var automixSubtitle: String {
+        if let bypass = controller.settingsAudioReadout.processingBypass { return "Requested transition settings are inactive · " + bypass }
+        guard automix else { return "Times and blends transitions automatically when enabled." }
+        if AutomixModelStore.shared.beatAvailable { return "Blends transitions automatically from each track’s timing." }
+        return "Uses tempo analysis while the beat model is missing. Install it under Advanced Options → Automix Models for beat-aligned transitions."
+    }
+
+    func buildAutomixAdvancedRows(_ rows: inout SettingsRows) {
+        rows.row("Automix Performance", "cpu", "threads", "analysis", "budget", "efficient", "balanced", "performance", "battery") {
+            PushLink {
+                AutomixPerformancePage(selection: $automixPerf)
+            } label: {
+                SettingsLine(
+                    glyph: .cpu,
+                    title: "Automix Performance",
+                    subtitle: "Background analysis budget — \(Self.automixPerfLabel(automixPerf)), \(controller.automixInferenceThreads) thread\(controller.automixInferenceThreads == 1 ? "" : "s")"
+                ) {
+                    Text(Self.automixPerfLabel(automixPerf))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        rows.row("Automix Models", "models", "model", "onnx", "beat", "downbeat", "vocal", "install", "download models") {
+            PushLink {
+                AutomixModelsPage()
+            } label: {
+                SettingsLine(
+                    glyph: .models,
+                    title: "Automix Models",
+                    subtitle: Self.automixModelsSubtitle
+                ) {
+                    EmptyView()
+                }
+            }
         }
     }
 

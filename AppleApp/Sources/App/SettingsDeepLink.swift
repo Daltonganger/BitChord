@@ -46,6 +46,8 @@ struct SettingsDeepLinkOpener: View {
 enum SettingsSectionName {
     static func canonical(_ component: String) -> String? {
         let key = component.lowercased().filter { $0.isLetter || $0.isNumber }
+        let aliases = ["localmusic": "downloads", "storage": "downloads", "performance": "advanced", "miscellaneous": "playback", "audio": "audioQuality"]
+        if let section = aliases[key] { return section }
         return SettingsView.SettingsSection.allCases.first {
             $0.rawValue.lowercased().filter { $0.isLetter || $0.isNumber } == key
         }?.rawValue

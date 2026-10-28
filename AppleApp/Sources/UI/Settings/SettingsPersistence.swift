@@ -146,7 +146,6 @@ struct SettingsExperiencePersist: ViewModifier {
 struct SettingsExtrasPersist: ViewModifier {
     @Binding var lyricsSources: String
     @Binding var lyricsSourceOrder: String
-    @Binding var jiosaavn: Bool
     @Binding var stopBackground: Bool
     @Binding var syllableSync: Bool
     @Binding var language: String
@@ -158,7 +157,6 @@ struct SettingsExtrasPersist: ViewModifier {
         content
             .onChange(of: lyricsSources) { _, value in AppSettings.shared.setLyricsSources(value: value) }
             .onChange(of: lyricsSourceOrder) { _, value in AppSettings.shared.setLyricsSourceOrder(value: value) }
-            .onChange(of: jiosaavn) { _, value in AppSettings.shared.setJiosaavnEnabled(value: value) }
             .onChange(of: stopBackground) { _, value in AppSettings.shared.setStopWhenBackgrounded(value: value) }
             .onChange(of: syllableSync) { _, value in AppSettings.shared.setPrioritizeSyllableSync(value: value) }
             .onChange(of: language) { _, value in

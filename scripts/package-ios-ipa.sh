@@ -9,7 +9,7 @@ Usage:
   scripts/package-ios-ipa.sh <version> [--output-dir DIR] [--overwrite]
 
 The script archives the iOS app with code signing disabled, removes embedded
-provisioning profiles, and writes BitChord-VERSION-unsigned.ipa.
+provisioning profiles, and writes BitChord-VERSION-buildBUILD-ios-unsigned.ipa.
 USAGE
 }
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -34,14 +34,14 @@ command -v zipinfo >/dev/null 2>&1 || fail 'zipinfo is required'
 command -v codesign >/dev/null 2>&1 || fail 'codesign is required'
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd)"
-ipa="$output_dir/BitChord-$version-unsigned.ipa"
-[[ ! -e "$ipa" || "$overwrite" -eq 1 ]] || fail "IPA already exists: $ipa (pass --overwrite to replace it)"
 stage="$(mktemp -d "${TMPDIR:-/tmp}/bitchord-ipa.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 archive="$stage/BitChord.xcarchive"
 app="$archive/Products/Applications/BitChord.app"
 staged_app="$stage/package/Payload/BitChord.app"
 
+build_revision="$(git -C "$repo_root" rev-parse --short=12 HEAD)"
+if ! git -C "$repo_root" diff --quiet HEAD -- || [[ -n "$(git -C "$repo_root" ls-files --others --exclude-standard)" ]]; then build_revision="$build_revision-dirty"; fi
 xcodebuild \
   -project "$repo_root/AppleApp/BitChord.xcodeproj" \
   -scheme BitChord \
@@ -51,6 +51,7 @@ xcodebuild \
   -archivePath "$archive" \
   -derivedDataPath "$stage/DerivedData" \
   archive \
+  BITCHORD_BUILD_REVISION="$build_revision" \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY=
@@ -58,6 +59,10 @@ xcodebuild \
 plist="$app/Info.plist"
 short_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
 [[ "$short_version" == "$version" ]] || fail "archive is version $short_version, not requested version $version"
+build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+[[ "$build_version" =~ ^[0-9]+$ ]] || fail 'archive has no numeric build number'
+ipa="$output_dir/BitChord-$version-build$build_version-ios-unsigned.ipa"
+[[ ! -e "$ipa" || "$overwrite" -eq 1 ]] || fail "IPA already exists: $ipa (pass --overwrite to replace it)"
 mkdir -p "$stage/package/Payload"
 ditto "$app" "$stage/package/Payload/BitChord.app"
 find "$stage/package/Payload/BitChord.app" -name embedded.mobileprovision -type f -delete

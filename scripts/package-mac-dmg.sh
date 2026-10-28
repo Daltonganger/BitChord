@@ -9,7 +9,7 @@ Usage:
   scripts/package-mac-dmg.sh <version> <export-folder> [options]
 
 Options:
-  --output-dir DIR  Write BitChord-VERSION.dmg to DIR (default: export-folder)
+  --output-dir DIR  Write BitChord-VERSION-buildBUILD-mac-arm64.dmg to DIR (default: export-folder)
   --overwrite       Replace an existing local DMG with the same name
   --publish         Upload an asset to an existing GitHub release
   --replace-asset   Replace the same-named asset (requires --publish)
@@ -49,7 +49,11 @@ app_source="$export_dir/BitChord.app"
 [[ -d "$app_source" ]] || fail "expected BitChord.app inside: $export_dir"
 if [[ -z "$output_dir" ]]; then output_dir="$export_dir"; fi
 mkdir -p "$output_dir"; output_dir="$(cd "$output_dir" && pwd)"
-dmg_path="$output_dir/BitChord-$version.dmg"
+input_plist="$app_source/Contents/Info.plist"
+build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$input_plist")"
+[[ "$build_version" =~ ^[0-9]+$ ]] || fail 'export has no numeric build number'
+dmg_name="BitChord-$version-build$build_version-mac-arm64.dmg"
+dmg_path="$output_dir/$dmg_name"
 [[ ! -e "$dmg_path" || "$overwrite" -eq 1 ]] || fail "DMG already exists: $dmg_path (pass --overwrite to replace it)"
 [[ -z "$notes_file" || -f "$notes_file" ]] || fail "release notes file does not exist: $notes_file"
 [[ -z "$notes_file" || "$publish" -eq 1 || "$create_release" -eq 1 ]] || fail "--notes requires --publish or --create-release"
@@ -67,7 +71,7 @@ if [[ "$publish" -eq 1 || "$create_release" -eq 1 ]]; then
   tag="v$version"
   if [[ "$publish" -eq 1 ]]; then
     release_assets="$(gh release view "$tag" --repo "$github_repo" --json assets --jq '.assets[].name')" || fail "GitHub release $tag does not exist; use --create-release for a new release"
-    if printf '%s\n' "$release_assets" | grep -Fxq "BitChord-$version.dmg" && [[ "$replace_asset" -ne 1 ]]; then
+    if printf '%s\n' "$release_assets" | grep -Fxq "$dmg_name" && [[ "$replace_asset" -ne 1 ]]; then
       fail "release already has BitChord-$version.dmg; pass --replace-asset to replace it"
     fi
   elif gh release view "$tag" --repo "$github_repo" >/dev/null 2>&1; then
